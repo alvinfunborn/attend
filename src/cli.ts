@@ -1,12 +1,14 @@
 import { parseArgs } from "node:util";
 import open from "open";
+import { scaffoldBrief } from "./commands/new.js";
 import { resolveConfig } from "./config.js";
 import { startServer } from "./server.js";
 
 const HELP = `attend — local web dashboard for brief-based AI session management
 
 Usage:
-  attend [dirs...] [options]
+  attend [dirs...] [options]     Serve the dashboard (scans dirs for brief.md)
+  attend new <name>              Scaffold projects/<name>/brief.md in the current dir
 
 Arguments:
   dirs                 Vault roots to scan for brief.md (default: current directory)
@@ -35,6 +37,20 @@ async function main(): Promise<void> {
 
   if (values.help) {
     process.stdout.write(`${HELP}\n`);
+    return;
+  }
+
+  if (positionals[0] === "new") {
+    const name = positionals[1];
+    if (!name) {
+      process.stderr.write("usage: attend new <name>\n");
+      process.exitCode = 1;
+      return;
+    }
+    const res = scaffoldBrief(name, process.cwd());
+    process.stdout.write(
+      res.created ? `created ${res.path}\n` : `already exists, left untouched: ${res.path}\n`,
+    );
     return;
   }
 
