@@ -153,10 +153,23 @@ Everything in between (briefs, dashboard, priority, telemetry) is vendor-agnosti
 
 If you (Claude / Codex / human) are picking this up cold:
 
-1. Read this document end-to-end.
+1. Read this document end-to-end (including the v1 pivot section below).
 2. Read `README.md` for run instructions.
 3. Read `brief.md` for current `next`.
-4. Open http://localhost:5050 if the daemon is running (`python daemon.py`).
+4. Open http://localhost:5050 if the app is running (`npx attend` or `npm start`).
 5. Pick from the brief's `next` and start.
 
 Do not add organizational layers unless you've checked them against invariant 5. Do not change telemetry output to be more "motivating" — that's invariant 3 violation; see Steel research.
+
+## v1: Node/npx pivot (2026-05)
+
+v0 was a single-file Python/Flask `daemon.py` run via `python daemon.py`. v1 reimplements it as a **Node + TypeScript** package distributable via `npx` (zero-install: `npx attend` / `npx github:you/attend`, boots a local server, opens the browser). The original is preserved under `legacy/` for reference.
+
+**Why the change.** The goal was cross-platform (Win + macOS) zero-install distribution. Two product forms were weighed:
+
+- **Tauri (rejected).** Considered, then rejected: Tauri bundles a native installer you *download and install* — the opposite of zero-install. It also renders into an embedded WebView, not a localhost page you open in any browser, so it would have broken the "single localhost polling surface" form. (Note: this supersedes the older "desktop app — engineering overhead" rejection note above for the same reason, just made concrete.)
+- **Node CLI + local web server (chosen).** Matches `npx serve`-style distribution: publish once (or run from GitHub), `npx` fetches-and-runs, no permanent install, browser is the UI. Node runs on Win/macOS uniformly. This *restores* the original localhost single-surface form — only the runtime changed (Python → Node), to make `npx` distribution possible.
+
+**What did NOT change.** All five design invariants hold. The memory model is unchanged — still Claude Code's per-project memory (`~/.claude/projects/*/memory/MEMORY.md`), just generalized from one hardcoded file to auto-discovering and unioning all per-project memories. The pattern definitions, priority heuristic, descriptive-telemetry constraint, and spawn-by-copy behavior are ported 1:1 (one refinement: the bare-"等" blocker false-positive from the roadmap is fixed in `priority.ts`).
+
+**Architecture.** `src/core/` is pure domain logic with no server dependency (unit-tested with vitest); `src/server.ts` (Hono) and `src/ui/` are a thin render layer; `src/core/vendor/` holds the `SessionSource` extension point (Claude impl + Codex stub). Adding a vendor = one new `SessionSource` — the rest stays vendor-neutral (invariant 4). See `README.md` for the file map and dev commands.

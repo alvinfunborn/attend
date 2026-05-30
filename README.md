@@ -15,13 +15,68 @@ Local web dashboard for brief-based AI session management across Claude Code + C
 
 ## Quick start
 
-```powershell
-cd D:\workspace\projects\attend
-pip install -r requirements.txt
-python daemon.py
+`attend` is a zero-install Node CLI — it boots a local web server and opens your browser. No app to download.
+
+```bash
+# run against the current directory (and below) without installing anything
+npx attend
+
+# scan specific vault roots, pick a port
+npx attend "D:\workspace\projects" "~/OneDrive/notes" --port 5050
 ```
 
-Open http://localhost:5050.
+Run straight from the repo (no npm publish required):
+
+```bash
+npx github:<you>/attend
+```
+
+Or clone and run locally:
+
+```bash
+git clone <repo> attend && cd attend
+npm install
+npm start              # = node dist/cli.js
+```
+
+Then open `http://localhost:5050` (opened automatically unless `--no-open`).
+
+> Requires Node ≥ 20. Works on Windows and macOS — paths and defaults are platform-aware.
+
+### Publishing (optional, later)
+
+The package is already structured for npm (`bin` entry + `dist/` build). If you ever want the short `npx attend` form to resolve from the public registry, that's a one-time `npm publish`. Until then, GitHub-`npx` and local `npm start` both work unchanged.
+
+## CLI / config
+
+```
+attend [dirs...] [options]
+
+  dirs                 Vault roots to scan for brief.md (default: current dir)
+  -p, --port <n>       Port (default: 5050)
+      --host <addr>    Host to bind (default: 127.0.0.1)
+  -c, --config <path>  Path to attend.config.json
+      --no-open        Don't open the browser
+  -h, --help           Help
+```
+
+**Precedence:** CLI args > env > config file > platform defaults.
+
+Env vars: `ATTEND_VAULTS` (path-separator-delimited), `ATTEND_PORT`, `ATTEND_HOST`, `ATTEND_CLAUDE_PROJECTS`, `ATTEND_CODEX_SESSIONS`.
+
+Optional `attend.config.json` (in the cwd, or via `--config`):
+
+```json
+{
+  "vaultRoots": ["D:\\workspace\\projects", "C:\\Users\\you\\OneDrive\\notes"],
+  "claudeProjects": "C:\\Users\\you\\.claude\\projects",
+  "codexSessions": "C:\\Users\\you\\.codex\\sessions",
+  "memorySources": [],
+  "port": 5050
+}
+```
+
+`memorySources` empty → per-project Claude memory (`~/.claude/projects/*/memory/MEMORY.md`) is auto-discovered and unioned. Same memory model as Claude Code.
 
 ## Brief format
 
@@ -45,17 +100,7 @@ done 的判据 (不是 todo list).
 每次离开 session 前更新这一行.
 ```
 
-Only `what` / `accept` / `next` sections are read. Other sections are fine — they're ignored.
-
-## Config
-
-Edit `CONFIG` at the top of `daemon.py`:
-
-- `vault_roots` — paths scanned recursively for `brief.md`
-- `claude_projects` — `~/.claude/projects` (default fits Claude Code)
-- `codex_sessions` — `~/.codex/sessions` (optional, currently not parsed in v0)
-- `memory_file` — your Claude Code MEMORY.md for keyword extraction
-- `port` — default 5050
+Only `what` / `accept` / `next` sections are read. Other sections are ignored.
 
 ## Pattern definitions
 
@@ -69,7 +114,7 @@ Edit `CONFIG` at the top of `daemon.py`:
 
 Telemetry is **descriptive, never judgmental** (Steel 2007 on procrastination self-report → avoidance feedback loops). All pattern labels are observations, not verdicts.
 
-## Priority scoring (v0 heuristic)
+## Priority scoring (v1 heuristic)
 
 `score = (memory alignment × 2) + pattern weight + explicit blocker bonus − defer/done penalty`
 
@@ -78,8 +123,38 @@ Each brief gets a one-line reason explaining the rank. Reasons compose so you ca
 ## Spawn commands
 
 Detail page generates copy-paste commands for both Claude and Codex.
-**v0 does not auto-spawn** — it copies to clipboard, you paste to your terminal.
+**Does not auto-spawn** — it copies to clipboard, you paste to your terminal.
 This is intentional: auto-spawn from dashboard → 4-tab cascade.
+
+## Architecture
+
+```
+src/
+  cli.ts            CLI entry: parse args, resolve config, boot server, open browser
+  server.ts         Hono HTTP server: feed + detail routes (server-rendered HTML)
+  config.ts         config resolution + platform defaults
+  core/             pure domain logic (no server deps) — unit-tested
+    brief.ts        parse brief.md + scan vaults
+    vendor/         SessionSource interface + claude (JSONL) + codex (stub)
+    telemetry.ts    cwd-containment match + aggregation
+    pattern.ts      behavioral classifier
+    memory.ts       Claude-convention per-project memory keywords
+    priority.ts     scoring + reasons
+  ui/               server-rendered feed/detail HTML
+legacy/             original Python/Flask daemon (reference)
+```
+
+`core/` is decoupled from the server so it's testable in isolation. New vendors plug in via the `SessionSource` interface (`src/core/vendor/`) — everything downstream is vendor-neutral.
+
+## Develop
+
+```bash
+npm run dev          # tsx, no build
+npm test             # vitest
+npm run typecheck    # tsc --noEmit
+npm run lint         # biome
+npm run build        # tsup → dist/cli.js
+```
 
 ## What this is NOT (deliberately)
 
@@ -87,20 +162,11 @@ This is intentional: auto-spawn from dashboard → 4-tab cascade.
 - Not push notifications — pull, manual refresh
 - Not a TODO app — briefs are task-shaped, not item-shaped
 - Not multi-user — single-person attention router
-- Not Obsidian / Zettelkasten — flat folder scan, no bidirectional links
-
-## v0 → v1 roadmap
-
-- [ ] Codex JSONL telemetry (when schema known)
-- [ ] Split CLI: `attend split <jsonl-path>` → N candidate briefs
-- [ ] Optional LLM-based priority (env-flag, with reasons)
-- [ ] `attend new <name>` to scaffold brief.md
-- [ ] Activity heatmap per brief (dwell over time)
-- [ ] Brief edit in-browser (currently file-system only)
+- Not a downloadable native app — zero-install via `npx`, runs in your browser
 
 ## Design invariants
 
-Touch these only with cause:
+Touch these only with cause (see `DESIGN.md`):
 
 1. **brief = state, session = cache** — nothing the dashboard knows lives only in a session
 2. **pull, not push** — no notifications unless user opts in later
