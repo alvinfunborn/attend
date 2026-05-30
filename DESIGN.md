@@ -133,13 +133,21 @@ Everything in between (briefs, dashboard, priority, telemetry) is vendor-agnosti
 
 ## v0 → v1 roadmap
 
-- [ ] Codex JSONL parser (need a sample of Codex's schema; user has it via CLI but not yet active)
-- [ ] `attend split <jsonl-path>` CLI: LLM extracts open follow-up threads → N candidate briefs to review
-- [ ] `attend new <project>` to scaffold `projects/<project>/brief.md`
-- [ ] LLM-based priority option (env-flag)
-- [ ] Refined blocker regex (only `等[具体内容]`, not bare `等` char — currently triggers false positives on parentheticals like "(作品B 等)")
-- [ ] Dwell distribution heatmap per brief
-- [ ] In-browser brief edit (currently file-system only)
+Shipped (see "v1.1" section below):
+- [x] Codex JSONL parser (`src/core/vendor/codex.ts`, against the documented rollout schema)
+- [x] `attend new <project>` scaffold
+- [x] Refined blocker regex (`等[具体内容]`, not bare `等`)
+- [x] Trust hardening: sustained-dwell avoidance, TF-IDF cosine memory alignment
+
+Still open:
+- [ ] `attend split <jsonl-path>` CLI: LLM extracts open follow-up threads → N candidate briefs to review (the next high-leverage item; keep output = candidates, user gate non-optional)
+
+Deferred (do not build yet):
+- [ ] LLM-based priority option (env-flag) — **deferred** until the legible heuristic is demonstrably insufficient on real briefs; do not trade the auditable one-line reason for an opaque score.
+
+Killed (PM review, 2026-05; both reviewers, emphatically):
+- ~~Dwell distribution heatmap per brief~~ — analytics theater; visualizing "time spent" *is* judgmental feedback (invariant 3 / Steel) and adds a second thing to scan (invariant 5).
+- ~~In-browser brief edit~~ — pulls state-authoring into the dashboard, eroding "daemon is view-only; vault is authoritative" (invariant 1). The user already lives in an editor.
 
 ## Out of scope (likely permanently)
 
@@ -172,4 +180,19 @@ v0 was a single-file Python/Flask `daemon.py` run via `python daemon.py`. v1 rei
 
 **What did NOT change.** All five design invariants hold. The memory model is unchanged — still Claude Code's per-project memory (`~/.claude/projects/*/memory/MEMORY.md`), just generalized from one hardcoded file to auto-discovering and unioning all per-project memories. The pattern definitions, priority heuristic, descriptive-telemetry constraint, and spawn-by-copy behavior are ported 1:1 (one refinement: the bare-"等" blocker false-positive from the roadmap is fixed in `priority.ts`).
 
-**Architecture.** `src/core/` is pure domain logic with no server dependency (unit-tested with vitest); `src/server.ts` (Hono) and `src/ui/` are a thin render layer; `src/core/vendor/` holds the `SessionSource` extension point (Claude impl + Codex stub). Adding a vendor = one new `SessionSource` — the rest stays vendor-neutral (invariant 4). See `README.md` for the file map and dev commands.
+**Architecture.** `src/core/` is pure domain logic with no server dependency (unit-tested with vitest); `src/server.ts` (Hono) and `src/ui/` are a thin render layer; `src/core/vendor/` holds the `SessionSource` extension point (Claude + Codex impls). Adding a vendor = one new `SessionSource` — the rest stays vendor-neutral (invariant 4). See `README.md` for the file map and dev commands.
+
+## v1.1: trust + cross-vendor (PM review, 2026-05)
+
+A two-PM requirements review (workflow/behavioral lens + strategy/scope lens) researched the 2025–26 landscape and converged on three findings that drove this round:
+
+**1. The wedge, sharpened.** The market exploded into *agent-throughput orchestration* (vibe-kanban, Conductor, Crystal, Claude Squad) and *session-status boards* — and the platform itself now ships the naive version: **Claude Code "Agent View" (May 2026)** is a single-surface, durable, "needs-you-first" session list. That commoditizes attend's *session-dashboard* framing. attend's only defensible ground is the **union no vendor will build: cross-vendor + task-durable + behavioral attention routing.** Consequences:
+- **The brief (task) is the primary object; sessions are derived.** This is the structural difference from session-centric Agent View — not a slogan.
+- **brief ≠ spec.** A Spec-Driven-Development spec is *upstream of execution* ("build this"); a brief is *resume/attention state* ("where I'm stuck, what to try next" — the Gollwitzer `next` line). Don't let attend drift into an SDD/spec tool.
+- **Cross-vendor (Codex) is load-bearing**, not optional — hence the Codex parser shipped this round.
+
+**2. Trust before surface.** The two signals carrying the whole product — the `avoidance` badge and memory-alignment ranking — were the two crudest heuristics (a single blunt prompt threshold; bag-of-words keyword hits). One false call and the user stops opening the page. Fixed this round:
+- `avoidance` now requires *sustained* dwell (operationalizing Rosenbaum's "did the easy detour end in 1–2h" test) and its reason carries the evidence.
+- memory alignment is now **TF-IDF cosine** (local, no model/API), reported with its top matched terms so the rank stays auditable and overridable.
+
+**3. Invariants are the brand, not constraints to relax.** Pull-only + descriptive-telemetry + single-surface are exactly the choices Conductor/Crystal/Agent View did *not* make (they are push + diff-review + session-centric). The review's one framing correction: the premise "10+ live sessions is normal" is softening (async/cloud delegation lowers live-session count), but "tasks outlive sessions" is *strengthening* — re-weight the pitch toward durable cross-vendor task state, keep the rule. A once-daily opt-in "needs-you" digest was considered and **rejected** (still invariant 2 / the Agent-Inbox rejected path).

@@ -19,23 +19,31 @@ v0 (shipped):
 - [x] 优先级综合 memory keyword × pattern × 显式 blocker, 每条带 reason
 - [x] detail 页 spawn 命令 (copy to clipboard)
 
-v1 roadmap (`DESIGN.md` 末尾有完整列表):
-- [ ] `attend split <jsonl>` CLI: transcript → N 候选 brief
-- [ ] Codex JSONL parser (待用户启用 Codex CLI 后采样 schema)
-- [ ] `attend new <project>` 脚手架
-- [ ] LLM-based priority option (env-flag)
-- [ ] 显式 blocker 正则收紧 (现在"等"字会误触 "(作品B 等)")
-- [ ] dwell 分布热力图
-- [ ] in-browser brief edit
+v1.1 (shipped 2026-05, 见 DESIGN.md "v1.1: trust + cross-vendor"):
+- [x] Node/TS 重写, `npx` 零安装分发, 跨 Win/macOS
+- [x] Codex JSONL parser (按文档 rollout schema; 待真实样本确认)
+- [x] `attend new <project>` 脚手架
+- [x] 显式 blocker 正则收紧 (`等[具体内容]`)
+- [x] trust 加固: avoidance 要求持续 dwell + 证据化 reason; memory alignment 改 TF-IDF cosine
+- [x] vitest 46 测试, biome + tsc 干净
+
+仍 open:
+- [ ] `attend split <jsonl>` CLI: transcript → N 候选 brief (下一个高杠杆项; 输出是候选不是答案, 用户筛选闸门不能省)
+
+deferred / killed (PM review):
+- [ ] LLM-based priority (env-flag) — 推迟到启发式在真实 brief 上证明不够再做
+- ~~dwell 热力图~~ / ~~in-browser edit~~ — 砍 (invariant 3 / 1)
 
 ## next
 
-v0 已 ship 并 running 在 localhost:5050。下一步真二选一:
+v1.1 已 ship: Node/TS + npx, Codex parser, trust 加固 (avoidance 持续 dwell + TF-IDF alignment), `attend new`。46 测试绿。两个 PM review 结论见 DESIGN.md v1.1。
 
-**A.** 给几个真实项目 (`作品B` / `lifeset` / `mcp` 等) 起 `brief.md` 骨架, 让 feed 立刻有数据, 验证 cwd-based 匹配在实际项目上工作。低风险, 快速产生信号。
+下一步真二选一:
 
-**B.** 写 `attend split` CLI——读 Claude JSONL transcript, LLM 抽 N 个候选 brief, 用户筛选落 vault。高 ROI, 直接消化"一个 session 越聊越发散"的痛点。
+**A. (先做这个, 最高优先)** 用 `attend new` 给几个真实项目 (`作品B` / `lifeset` / `mcp`) 起 brief.md, 让 feed 有真实数据 —— 没数据无法验证 telemetry/priority 链, 也无法判断 trust 加固是否到位。低风险, 立刻产生信号。两个 PM 都把这个列为前置。
 
-选 B 时注意: split 工具的 prompt 设计要克制——它的输出是候选, 不是答案。用户筛选环节是闸门, 不能省。
+**B.** 写 `attend split` CLI——读 JSONL transcript, LLM 抽 N 个候选 brief, 用户筛选落 vault。剩下最高杠杆的 generative 项, 直接消化"一个 session 越聊越发散"。注意: 输出是候选不是答案, 用户筛选闸门不能省, LLM 走 env-flag。
 
-DESIGN.md 的 invariants 是 hard rule, 不要碰 (尤其 invariant 3 telemetry 中性表达 — Steel 2007)。
+待确认: Codex parser 是按开源文档 schema 写的, 本机无 Codex 装, 需在真实 rollout 文件上验证字段 (见 `src/core/vendor/codex.ts` 注释)。
+
+DESIGN.md 的 invariants 是 hard rule, 不要碰 (尤其 invariant 3 telemetry 中性表达 — Steel 2007)。定位锚点: brief(task) 是主对象, session 派生; brief ≠ spec; 跨 vendor 是唯一护城河 (vs Agent View)。

@@ -1,8 +1,10 @@
 # attend
 
-Local web dashboard for brief-based AI session management across Claude Code + Codex.
+The one place that tells a solo dev **which task to re-engage next** — across Claude Code *and* Codex — using durable per-task state and behavioral signals the vendors don't compute.
 
 > session = cache, brief = state. vendor = replaceable backend, vault = substrate.
+
+**Why not just your IDE's agent view?** Claude Code's Agent View / Codex's command center are single-vendor and *session*-centric: they show you running processes. attend is **cross-vendor** and **task**-centric (the brief, which outlives any session), and it classifies *your* behavior — surfacing the task you're quietly avoiding, not just the one that's running. The brief is **resume/attention state** ("where I'm stuck, what to try next"), not a spec ("what to build").
 
 ## What it does
 
@@ -107,7 +109,7 @@ Only `what` / `accept` / `next` sections are read. Other sections are ignored.
 | Pattern | Trigger | Meaning |
 |---|---|---|
 | `fresh` | 0 sessions | Brief exists, no work started |
-| `avoidance` | ≥5 prompts, 0 actions | Many entries without productive output — possible decision avoidance |
+| `avoidance` | ≥5 prompts, 0 actions, sustained (≥1h dwell) | A long output-less stretch — possible decision avoidance (a *short* output-less session is read/planning, not avoidance) |
 | `stalled` | 0 actions, last touch ≥ 7 days | Cold, no recent activity |
 | `healthy` | actions > 0, avg dwell ≥ 10 min, touch ≤ 3 days | In flow, don't interrupt |
 | `active` | some actions, otherwise unclassified | Generic in-progress |
@@ -116,9 +118,9 @@ Telemetry is **descriptive, never judgmental** (Steel 2007 on procrastination se
 
 ## Priority scoring (v1 heuristic)
 
-`score = (memory alignment × 2) + pattern weight + explicit blocker bonus − defer/done penalty`
+`score = (memory alignment × weight) + pattern weight + explicit blocker bonus − defer/done penalty`
 
-Each brief gets a one-line reason explaining the rank. Reasons compose so you can override.
+**Memory alignment** is TF-IDF cosine similarity between the brief and your Claude memory corpus (local, no model/API; CJK handled via bigrams). Each brief gets a one-line reason — including the *top matched terms* and the *evidence* behind a pattern (e.g. "5 prompts, 0 actions over 1.5h") — so the rank is auditable and you can override it. No opaque scores.
 
 ## Spawn commands
 
