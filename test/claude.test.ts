@@ -8,11 +8,21 @@ function jsonl(...lines: object[]): string {
 describe("parseClaudeTranscript", () => {
   it("counts user text prompts and assistant action tool uses; captures cwd + ts span", () => {
     const raw = jsonl(
-      { type: "user", cwd: "D:\\proj", timestamp: "2026-05-01T10:00:00Z", message: { content: "do X" } },
+      {
+        type: "user",
+        cwd: "D:\\proj",
+        timestamp: "2026-05-01T10:00:00Z",
+        message: { content: "do X" },
+      },
       {
         type: "assistant",
         timestamp: "2026-05-01T10:05:00Z",
-        message: { content: [{ type: "tool_use", name: "Edit" }, { type: "tool_use", name: "Bash" }] },
+        message: {
+          content: [
+            { type: "tool_use", name: "Edit" },
+            { type: "tool_use", name: "Bash" },
+          ],
+        },
       },
       { type: "user", timestamp: "2026-05-01T10:10:00Z", message: { content: "do Y" } },
     );
@@ -37,7 +47,11 @@ describe("parseClaudeTranscript", () => {
   it("does not count subagent sidechain turns toward prompts/actions", () => {
     const raw = jsonl(
       { type: "user", isSidechain: true, message: { content: "subagent task" } },
-      { type: "assistant", isSidechain: true, message: { content: [{ type: "tool_use", name: "Write" }] } },
+      {
+        type: "assistant",
+        isSidechain: true,
+        message: { content: [{ type: "tool_use", name: "Write" }] },
+      },
       { type: "user", message: { content: "real prompt" } },
     );
     const s = parseClaudeTranscript("s.jsonl", raw);

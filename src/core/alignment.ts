@@ -6,9 +6,28 @@
  */
 
 const STOPWORDS = new Set([
-  "the", "and", "with", "this", "that", "from", "have", "will",
-  "name", "description", "metadata", "type", "memory", "file",
-  "your", "you", "for", "are", "but", "not", "they", "their",
+  "the",
+  "and",
+  "with",
+  "this",
+  "that",
+  "from",
+  "have",
+  "will",
+  "name",
+  "description",
+  "metadata",
+  "type",
+  "memory",
+  "file",
+  "your",
+  "you",
+  "for",
+  "are",
+  "but",
+  "not",
+  "they",
+  "their",
 ]);
 
 const LATIN = /[A-Za-z][A-Za-z0-9_-]{3,}/g;

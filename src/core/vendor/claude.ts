@@ -85,7 +85,15 @@ function parseSessionFile(file: string): RawSession {
   try {
     return parseClaudeTranscript(file, fs.readFileSync(file, "utf-8"));
   } catch {
-    return { path: file, vendor: "claude", cwd: null, firstTs: null, lastTs: null, prompts: 0, actions: 0 };
+    return {
+      path: file,
+      vendor: "claude",
+      cwd: null,
+      firstTs: null,
+      lastTs: null,
+      prompts: 0,
+      actions: 0,
+    };
   }
 }
 

@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
-import { type AlignmentModel, buildAlignmentModel } from "./core/alignment.js";
 import type { AttendConfig } from "./config.js";
+import { type AlignmentModel, buildAlignmentModel } from "./core/alignment.js";
 import { parseBrief, scanVault } from "./core/brief.js";
 import { discoverMemorySources, loadMemoryDocs } from "./core/memory.js";
 import { evaluatePriority } from "./core/priority.js";
