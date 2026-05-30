@@ -21,8 +21,14 @@ describe("classifyPattern", () => {
     expect(classifyPattern(tel({ sessions: 0 }))).toBe("fresh");
   });
 
-  it("avoidance: many prompts, zero actions", () => {
-    expect(classifyPattern(tel({ prompts: 5, actions: 0 }))).toBe("avoidance");
+  it("avoidance: many prompts, zero actions, sustained dwell", () => {
+    expect(classifyPattern(tel({ prompts: 5, actions: 0, totalMinutes: 90 }))).toBe("avoidance");
+  });
+
+  it("NOT avoidance: many prompts but a short output-less session (read/plan, not avoidance)", () => {
+    expect(classifyPattern(tel({ prompts: 6, actions: 0, totalMinutes: 12 }))).not.toBe(
+      "avoidance",
+    );
   });
 
   it("stalled: zero actions, cold for >=7 days", () => {

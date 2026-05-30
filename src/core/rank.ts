@@ -1,3 +1,4 @@
+import type { AlignmentModel } from "./alignment.js";
 import { evaluatePriority } from "./priority.js";
 import { telemetryForBrief } from "./telemetry.js";
 import type { Brief, Pattern, RankedBrief, RawSession } from "./types.js";
@@ -6,12 +7,12 @@ import type { Brief, Pattern, RankedBrief, RawSession } from "./types.js";
 export function rankBriefs(
   briefs: Brief[],
   sessions: RawSession[],
-  memoryKeywords: string[],
+  model: AlignmentModel | null,
   now: number = Date.now(),
 ): RankedBrief[] {
   const ranked = briefs.map((brief) => {
     const telemetry = telemetryForBrief(brief, sessions, now);
-    const { score, reason, pattern } = evaluatePriority(brief, telemetry, memoryKeywords);
+    const { score, reason, pattern } = evaluatePriority(brief, telemetry, model);
     return { brief, telemetry, score, reason, pattern };
   });
   ranked.sort((a, b) => b.score - a.score);

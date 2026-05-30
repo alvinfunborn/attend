@@ -16,6 +16,7 @@ interface JsonlEntry {
   cwd?: string;
   timestamp?: string;
   type?: string;
+  isSidechain?: boolean;
   message?: { content?: unknown };
 }
 
@@ -43,7 +44,8 @@ function countActions(content: unknown): number {
   return n;
 }
 
-function parseSessionFile(file: string): RawSession {
+/** Parse one Claude transcript's text into a normalized session (pure, testable). */
+export function parseClaudeTranscript(file: string, raw: string): RawSession {
   const session: RawSession = {
     path: file,
     vendor: "claude",
@@ -53,12 +55,6 @@ function parseSessionFile(file: string): RawSession {
     prompts: 0,
     actions: 0,
   };
-  let raw: string;
-  try {
-    raw = fs.readFileSync(file, "utf-8");
-  } catch {
-    return session;
-  }
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let obj: JsonlEntry;
@@ -73,6 +69,9 @@ function parseSessionFile(file: string): RawSession {
       if (session.firstTs === null) session.firstTs = ts;
       session.lastTs = ts;
     }
+    // Skip subagent sidechain turns — they are not the user's direct prompts
+    // and their tool uses shouldn't inflate the brief's action count.
+    if (obj.isSidechain) continue;
     if (obj.type === "user") {
       if (isTextPrompt(obj.message?.content)) session.prompts += 1;
     } else if (obj.type === "assistant") {
@@ -80,6 +79,14 @@ function parseSessionFile(file: string): RawSession {
     }
   }
   return session;
+}
+
+function parseSessionFile(file: string): RawSession {
+  try {
+    return parseClaudeTranscript(file, fs.readFileSync(file, "utf-8"));
+  } catch {
+    return { path: file, vendor: "claude", cwd: null, firstTs: null, lastTs: null, prompts: 0, actions: 0 };
+  }
 }
 
 /** Reads Claude Code transcripts at ~/.claude/projects/<encoded-cwd>/*.jsonl. */

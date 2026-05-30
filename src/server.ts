@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { type AlignmentModel, buildAlignmentModel } from "./core/alignment.js";
 import type { AttendConfig } from "./config.js";
 import { parseBrief, scanVault } from "./core/brief.js";
-import { discoverMemorySources, loadMemoryKeywords } from "./core/memory.js";
+import { discoverMemorySources, loadMemoryDocs } from "./core/memory.js";
 import { evaluatePriority } from "./core/priority.js";
 import { patternCounts, rankBriefs } from "./core/rank.js";
 import { spawnCommand } from "./core/spawn.js";
@@ -30,19 +31,19 @@ function ttlCache<T>(ttlMs: number, fn: () => T): () => T {
 
 export function createApp(config: AttendConfig): Hono {
   const getSessions = ttlCache(30_000, () => collectSessions(config));
-  const getKeywords = ttlCache(60_000, () => {
+  const getModel = ttlCache(60_000, (): AlignmentModel => {
     const sources = config.memorySources.length
       ? config.memorySources
       : discoverMemorySources(config.claudeProjects);
-    return loadMemoryKeywords(sources);
+    return buildAlignmentModel(loadMemoryDocs(sources));
   });
 
   const app = new Hono();
 
   app.get("/", (c) => {
     const briefs = scanVault(config.vaultRoots, config.scanDepth);
-    const ranked = rankBriefs(briefs, getSessions(), getKeywords());
-    return c.html(renderFeed(ranked, patternCounts(ranked), getKeywords().length));
+    const ranked = rankBriefs(briefs, getSessions(), getModel());
+    return c.html(renderFeed(ranked, patternCounts(ranked), getModel().vocabSize));
   });
 
   app.get("/brief", (c) => {
@@ -54,7 +55,7 @@ export function createApp(config: AttendConfig): Hono {
 
     const sessions = getSessions();
     const telemetry = telemetryForBrief(brief, sessions);
-    const { score, reason, pattern } = evaluatePriority(brief, telemetry, getKeywords());
+    const { score, reason, pattern } = evaluatePriority(brief, telemetry, getModel());
     const matched = matchSessions(brief, sessions)
       .sort((a: RawSession, b: RawSession) => (b.lastTs ?? 0) - (a.lastTs ?? 0))
       .slice(0, 10);

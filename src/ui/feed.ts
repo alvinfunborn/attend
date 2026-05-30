@@ -92,7 +92,7 @@ function card(r: RankedBrief): string {
 export function renderFeed(
   ranked: RankedBrief[],
   counts: Record<Pattern, number>,
-  memoryKeywords: number,
+  memoryTerms: number,
 ): string {
   const pills = PILL_ORDER.filter((p) => counts[p])
     .map((p) => `<span>${p}: ${counts[p]}</span>`)
@@ -109,7 +109,7 @@ export function renderFeed(
 </head>
 <body>
 <div class="topbar">
-  <h1>attend <span class="accent">${ranked.length} briefs · memory keywords: ${memoryKeywords}</span></h1>
+  <h1>attend <span class="accent">${ranked.length} briefs · memory terms: ${memoryTerms}</span></h1>
   <button onclick="location.reload()">refresh</button>
 </div>
 <div class="pill-row">${pills}</div>

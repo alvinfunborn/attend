@@ -1,3 +1,4 @@
+import { type AlignmentModel, scoreAlignment } from "./alignment.js";
 import { classifyPattern } from "./pattern.js";
 import type { Brief, Pattern, Telemetry } from "./types.js";
 
@@ -16,33 +17,49 @@ function hasBlocker(next: string): boolean {
   return /等[^\s)）.。,，]/.test(next);
 }
 
+function fmtDwell(minutes: number): string {
+  return minutes >= 60 ? `${(minutes / 60).toFixed(1)}h` : `${Math.round(minutes)}m`;
+}
+
+/** Cosine→score scale for memory alignment. Capped so a strong pattern signal
+ *  (avoidance +4, stalled +3) still competes — alignment shouldn't dominate. */
+const ALIGN_WEIGHT = 6;
+const ALIGN_MIN_COSINE = 0.05;
+
 /**
- * Heuristic priority: memory alignment ×2 + pattern weight + blocker bonus
- * − defer/done penalty. Returns a composed, human-readable reason so the user
- * can override (DESIGN.md: no opaque scores). Ported from daemon.py.
+ * Heuristic priority: memory alignment + pattern weight + blocker bonus −
+ * defer/done penalty. Returns a composed, human-readable reason carrying the
+ * evidence (DESIGN.md: no opaque scores — the user must be able to audit and
+ * override the rank).
  */
 export function evaluatePriority(
   brief: Brief,
   tel: Telemetry,
-  memoryKeywords: string[],
+  model: AlignmentModel | null,
 ): PriorityResult {
-  const blob = `${brief.name} ${brief.what} ${brief.next}`.toLowerCase();
+  const blob = `${brief.name} ${brief.what} ${brief.next}`;
   let score = 0;
   const reasons: string[] = [];
 
-  const kwHits = memoryKeywords.reduce((n, k) => (blob.includes(k.toLowerCase()) ? n + 1 : n), 0);
-  if (kwHits > 0) {
-    score += Math.min(kwHits, 5) * 2;
-    reasons.push(`memory aligned (${kwHits})`);
+  if (model) {
+    const align = scoreAlignment(model, blob);
+    if (align.cosine >= ALIGN_MIN_COSINE) {
+      score += align.cosine * ALIGN_WEIGHT;
+      const terms = align.topTerms.length ? ` (${align.topTerms.join(", ")})` : "";
+      reasons.push(`memory aligned${terms}`);
+    }
   }
 
   const pattern = classifyPattern(tel);
   if (pattern === "avoidance") {
     score += 4;
-    reasons.push("avoidance signal — needs decision, not work");
+    reasons.push(
+      `avoidance signal (${tel.prompts} prompts, 0 actions over ${fmtDwell(tel.totalMinutes)}) — needs decision, not work`,
+    );
   } else if (pattern === "stalled") {
     score += 3;
-    reasons.push("stalled — needs unblock or kill");
+    const touch = tel.lastTouchAgeDays !== null ? `, last touch ${tel.lastTouchAgeDays}d` : "";
+    reasons.push(`stalled (${tel.prompts} prompts, 0 actions${touch}) — needs unblock or kill`);
   } else if (pattern === "fresh") {
     score += 1;
     reasons.push("fresh — no entries yet");

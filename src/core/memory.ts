@@ -42,7 +42,20 @@ export function discoverMemorySources(claudeProjects: string): string[] {
   return sources;
 }
 
-/** Extract a deduped keyword set (CJK bigrams+ and latin words) from memory files. */
+/** Read the raw text of each memory file (one document per file) for the alignment model. */
+export function loadMemoryDocs(sources: string[]): string[] {
+  const docs: string[] = [];
+  for (const src of sources) {
+    try {
+      docs.push(fs.readFileSync(src, "utf-8"));
+    } catch {
+      // missing/unreadable memory file — skip
+    }
+  }
+  return docs;
+}
+
+/** Extract a deduped keyword set (CJK runs and latin words) from memory files. */
 export function loadMemoryKeywords(sources: string[]): string[] {
   const keywords = new Set<string>();
   for (const src of sources) {
