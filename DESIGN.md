@@ -1,0 +1,162 @@
+# attend — design
+
+This document captures the design context that led to v0. Subsequent sessions opened in this project should read this first to onboard.
+
+## Problem
+
+A single person collaborating with AI faces four compounding costs:
+
+1. **Concurrency** — 10+ active sessions across Claude Code (multiple VS Code projects) + Codex CLI is normal, not pathological. Reducing the count is not the goal.
+2. **Vendor isolation** — Claude Code and Codex are separate ecosystems. `/fork` exists in each (Codex CLI has it, Claude Code CLI has it but the VS Code panel does not). Neither is cross-vendor. Manual copy-paste is the current state.
+3. **Decision avoidance** — when a session needs a hard decision, the user switches to easier completed sessions to "verify and push." Classic Steel-type *avoidant procrastination*. Self-report doesn't detect it (gets rationalized as "efficient batching"). Behavioral telemetry would.
+4. **Polling overhead** — N IDE tabs × re-orientation cost on each switch (UC Irvine: 23 min 15 s to refocus; APA: 40% productivity loss from switching). Adding more organization tools makes this worse, not better.
+
+## Conceptual model — the invariant
+
+```
+session = cache       (transient, vendor-bound, may die)
+brief   = state       (persistent, vendor-neutral, survives session death)
+vendor  = replaceable backend
+vault   = substrate
+```
+
+A task may use 0..N sessions over its life. Sessions are vehicles; briefs are passengers. **A cold 3-day-old session is usually more expensive to resume than spawning a fresh session from a brief** — chat history accumulates dead context, summarization loses fidelity, and the user's own working memory of the session has decayed.
+
+Concrete consequence: don't try to keep sessions alive across attention gaps. Externalize state to brief; kill the session; spawn fresh when ready.
+
+## Four components
+
+### 1. Brief
+
+- **Granularity**: per-task, not per-session
+- **Location**: `projects/<name>/brief.md` — physically colocated with work, not in a separate "briefs/" directory. Found by `ls`, not by remembering.
+- **Three sections**:
+  - `what` — one sentence + *why* this is worth doing
+  - `accept` — done criteria (not a TODO list)
+  - `next` — **where you are stuck / what to try next**. Update this line before every session-leave. Gollwitzer's implementation-intention research: the meta-decision ("what should I do?") is where cost concentrates; pre-committing it at cheap time pays off massively.
+- **Front matter**: `status` (active/deferred/done), `defer_until` (a *condition*, not a date — "等 X 回复"), `last_touch`
+- **Lifecycle**: created manually or via split; killed only by explicit `status: done`. Cold sessions are killed; their briefs persist.
+
+### 2. Telemetry
+
+- **Data sources**: vendor JSONL transcripts
+  - Claude Code: `~/.claude/projects/<encoded-cwd>/*.jsonl`
+  - Codex CLI: `~/.codex/sessions/YYYY/MM/DD/*.jsonl` (not parsed in v0)
+- **Session-to-brief matching**: by `cwd` field in JSONL. A session's cwd contains (or equals) the brief's project directory.
+- **Per-brief signals**: sessions count, prompts count, action count (Edit/Write/Bash tool uses), dwell distribution, last_touch_age, last_action_age
+- **Pattern classifier**:
+
+| Pattern | Trigger | What it means |
+|---|---|---|
+| `fresh` | 0 sessions | Brief exists, no work started |
+| `avoidance` | ≥5 prompts, 0 actions | Many entries, no productive output — decision is what's needed, not more "work" |
+| `stalled` | 0 actions, last touch ≥ 7 days | Cold — needs unblock or kill |
+| `healthy` | actions > 0, avg dwell ≥ 10 min, touch ≤ 3 days | In flow, don't interrupt |
+| `active` | actions > 0, otherwise | Generic in-progress |
+
+- **Hard constraint** — descriptive, never judgmental (Steel 2007: judgmental feedback on procrastination behavior *worsens* it via self-esteem mediation). Output strings must avoid second-person pressure verbs ("you again," "still stuck"). Use observation-form: "X count, Y duration, Z actions."
+
+### 3. Priority evaluator
+
+- **Inputs**: brief × user-memory keywords (extracted from MEMORY.md) × telemetry pattern × explicit blockers in `next`
+- **Output**: ranked list + **one-line reason per rank** (no opaque scores; user must be able to override)
+- **Time NOT used as input** — explicitly rejected (see below). Semantic alignment with memory is the real axis; pattern signals action implication.
+- v0: heuristic scoring (memory keyword hits × 2 + pattern bonus + blocker bonus − defer penalty)
+- v1+: LLM-based, env-flagged (`ATTEND_LLM=anthropic|openai`)
+
+### 4. Split (not in v0)
+
+- **Purpose**: when a session organically grows N follow-up threads, factor them out into N new briefs
+- **Flow**: read transcript → LLM "identify open follow-up threads" → N candidate briefs in 3-line format → user reviews → commits selected to vault
+- **Intentional limitation**: does NOT auto-spawn sessions. spawn is a separate user decision. Auto-spawn from split would create a 4-tab cascade — exactly the load problem we're solving.
+- **Distinction from fork**: fork = duplicate-and-diverge (Warp, Claude SDK, Codex CLI); split = factor-out. Fork copies state; split extracts task specs. They're different operations.
+- **Cross-vendor**: split reads JSONL on disk — vendor-neutral input → vendor-neutral brief output. Vendor only re-enters at spawn time.
+
+## Product form
+
+**Local web app at `http://localhost:5050`. Python + Flask + server-side HTML.** Daemon scans vault, reads vendor JSONL, renders ranked feed. Polled by browser refresh.
+
+### Why this form
+
+- **Single polling surface** — one tab, one URL. Replaces N IDE tabs.
+- **Vendor-neutral** — not bound to VS Code or any terminal. Treats Claude and Codex equally.
+- **Data in local vault** — daemon is view-only; if it dies the vault is still authoritative.
+- **Incremental enrichment** — start static HTML, add buttons (spawn, defer, split) as needed.
+
+### Forms rejected
+
+- **VS Code plugin** — locks one IDE; can't span Claude + Codex
+- **TUI** — multi-window management collapses back to the tab-bounce problem
+- **Desktop app** — engineering overhead without benefit
+- **Push notifications** — user confirmed: when polling = idle moments, push doesn't help (can't act when not idle). Pull-only.
+
+### Inspirational reference
+
+Slock.ai's structural primitives — channel/thread (persistent, task-shaped) vs. message stream (transient) — directly informed brief/session separation. We use the structural insight without copying the multi-agent collaboration features.
+
+## Design invariants
+
+Touch these only with explicit cause:
+
+1. **brief = state, session = cache** — nothing the dashboard knows lives only in a session
+2. **pull, not push** — no notifications unless user opts in
+3. **descriptive telemetry, never judgmental** — Steel constraint, see telemetry section
+4. **vendor-neutral data, vendor-locked execution** — JSONL is read; spawn is per-vendor
+5. **single polling surface** — adding a second dashboard is a regression
+
+## Rejected paths (don't redo)
+
+- **4-bucket organization** (TODO / 进行中 / 已完成 / 长期保留 in separate locations). Asks user to remember N locations. Replaced by brief sidecar at task location, found by `ls`.
+- **Obsidian bidirectional links / Zettelkasten-style PKM**. Explicitly deferred — user judgment was that base models + memory + agent platforms will deliver this upstream over time. Don't preempt; revisit if upstream stalls.
+- **Hot/warm/cold by time**. Session state changes fast but total count stays high; recency doesn't track priority. Replaced by memory-aligned semantic priority + pattern-based action implication.
+- **LangChain Agent Inbox / push notifications**. User's diagnostic cost when polling is already near-zero; push adds noise without enabling action.
+- **Cap to 2-5 concurrent sessions**. Open ≠ active. Goal isn't reducing tab count, it's reducing re-warming cost via durable briefs.
+- **Fork as cross-vendor primitive**. Each vendor's fork is locked to its transcript format and API. Brief is the cross-vendor abstraction; fork lives one level below.
+- **Auto-spawn from dashboard**. Auto-spawning new sessions from priority list would recreate the cascade we just dismantled. Spawn buttons copy commands only.
+
+## Cross-vendor data layer
+
+Both vendors store transcripts as local JSONL with a `cwd` field. Daemon reads both, matches sessions to briefs by cwd-vs-project-dir containment, derives signals per brief, renders vendor-neutral output. Vendor only re-appears at:
+
+1. **Transcript ingestion** (per-vendor JSONL parser)
+2. **Spawn command** (per-vendor CLI invocation)
+
+Everything in between (briefs, dashboard, priority, telemetry) is vendor-agnostic markdown/HTML.
+
+## Research touchstones
+
+- **Steel, P. (2007)** — *Arousal, avoidant, and decisional procrastinators: do they exist?* Three procrastination types; foundational for the avoidance pattern definition. Identified behavioral-measurement gap: most procrastination research is self-report, telemetry is largely unexplored. This is the niche the telemetry component fills.
+- **Gollwitzer, P. (1999)** — *Implementation intentions.* Pre-committing "if X then Y" at cheap time reduces decision-point friction. Direct rationale for the `next` line discipline.
+- **Rosenbaum (2014)** — *Pre-crastination.* Doing the easy thing first to free working memory is a real mechanism, not always avoidance. Distinguishes by whether the easy task ends in 1-2 hours; if longer, it's likely the avoidance pattern.
+- **Karpathy LLM Wiki pattern** — `wiki/hot.md` of ~500 words auto-loaded at session start. Brief is our hot-cache analog.
+- **Slock.ai** — Persistent channels with transient message streams. Structural inspiration for brief/session split.
+
+## v0 → v1 roadmap
+
+- [ ] Codex JSONL parser (need a sample of Codex's schema; user has it via CLI but not yet active)
+- [ ] `attend split <jsonl-path>` CLI: LLM extracts open follow-up threads → N candidate briefs to review
+- [ ] `attend new <project>` to scaffold `projects/<project>/brief.md`
+- [ ] LLM-based priority option (env-flag)
+- [ ] Refined blocker regex (only `等[具体内容]`, not bare `等` char — currently triggers false positives on parentheticals like "(作品B 等)")
+- [ ] Dwell distribution heatmap per brief
+- [ ] In-browser brief edit (currently file-system only)
+
+## Out of scope (likely permanently)
+
+- Multi-user collaboration (Slock-style server/channel/DM)
+- Real-time push / SSE / websocket
+- Chat UI in the dashboard (sessions live in Claude Code / Codex)
+- Hierarchical task trees (briefs are flat; relations live in the `next` line as references)
+- Cloud sync (vault is local; OneDrive sync of the vault is incidental, not a feature)
+
+## How a future session onboards
+
+If you (Claude / Codex / human) are picking this up cold:
+
+1. Read this document end-to-end.
+2. Read `README.md` for run instructions.
+3. Read `brief.md` for current `next`.
+4. Open http://localhost:5050 if the daemon is running (`python daemon.py`).
+5. Pick from the brief's `next` and start.
+
+Do not add organizational layers unless you've checked them against invariant 5. Do not change telemetry output to be more "motivating" — that's invariant 3 violation; see Steel research.
