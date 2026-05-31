@@ -110,18 +110,30 @@ export function createApp(
 
 export interface RunningServer {
   url: string;
+  port: number;
   close: () => void;
 }
 
-/** Start the HTTP server; resolves once it is listening. */
-export function startServer(config: AttendConfig): Promise<RunningServer> {
+/**
+ * Start the HTTP server; resolves once it is listening. If the port is already
+ * in use, rolls forward to the next free port (up to `maxAttempts`) instead of
+ * crashing — and logs the bump so the printed URL is always the real one.
+ */
+export function startServer(config: AttendConfig, maxAttempts = 10): Promise<RunningServer> {
   const app = createApp(config);
-  return new Promise((resolve) => {
-    const server = serve({ fetch: app.fetch, hostname: config.host, port: config.port }, () => {
-      resolve({
-        url: `http://${config.host}:${config.port}`,
-        close: () => server.close(),
+  const listen = (port: number, attemptsLeft: number): Promise<RunningServer> =>
+    new Promise((resolve, reject) => {
+      const server = serve({ fetch: app.fetch, hostname: config.host, port }, () => {
+        resolve({ url: `http://${config.host}:${port}`, port, close: () => server.close() });
+      });
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EADDRINUSE" && attemptsLeft > 0) {
+          process.stderr.write(`port ${port} in use, trying ${port + 1}…\n`);
+          resolve(listen(port + 1, attemptsLeft - 1));
+        } else {
+          reject(err);
+        }
       });
     });
-  });
+  return listen(config.port, maxAttempts - 1);
 }

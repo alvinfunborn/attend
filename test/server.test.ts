@@ -1,8 +1,9 @@
+import net from "node:net";
 import os from "node:os";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
 import type { ForkVendor } from "../src/core/fork.js";
-import { type AppDeps, createApp } from "../src/server.js";
+import { type AppDeps, createApp, startServer } from "../src/server.js";
 
 function appWithSpy() {
   const calls: Array<{ vendor: ForkVendor; id: string; cwd: string }> = [];
@@ -55,5 +56,27 @@ describe("POST /fork", () => {
       },
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("startServer port rollover", () => {
+  const cleanup: Array<() => void> = [];
+  afterEach(() => {
+    for (const fn of cleanup.splice(0)) fn();
+  });
+
+  it("rolls forward to the next free port when the requested one is taken", async () => {
+    // occupy an ephemeral port, then ask attend to bind it
+    const taken = net.createServer();
+    const takenPort: number = await new Promise((resolve) => {
+      taken.listen(0, "127.0.0.1", () => resolve((taken.address() as net.AddressInfo).port));
+    });
+    cleanup.push(() => taken.close());
+
+    const config = resolveConfig({ positionals: [], port: String(takenPort), host: "127.0.0.1" });
+    const running = await startServer(config);
+    cleanup.push(() => running.close());
+
+    expect(running.port).toBeGreaterThan(takenPort);
   });
 });

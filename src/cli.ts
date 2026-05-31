@@ -75,7 +75,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`attend failed to start: ${err instanceof Error ? err.message : err}\n`);
+main().catch((err: NodeJS.ErrnoException) => {
+  if (err?.code === "EADDRINUSE") {
+    process.stderr.write(
+      "attend: no free port found near the requested one. Pass a different one, e.g. --port 15050.\n",
+    );
+  } else {
+    process.stderr.write(`attend failed to start: ${err instanceof Error ? err.message : err}\n`);
+  }
   process.exitCode = 1;
 });
