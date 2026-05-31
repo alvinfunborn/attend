@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
+import { ChatEngine } from "./chat/engine.js";
+import { readClaudeTranscript } from "./chat/transcript.js";
 import type { AttendConfig } from "./config.js";
 import { type AlignmentModel, buildAlignmentModel } from "./core/alignment.js";
 import { parseBrief, scanVault } from "./core/brief.js";
@@ -13,9 +16,9 @@ import { spawnCommand } from "./core/spawn.js";
 import { matchSessions, telemetryForBrief } from "./core/telemetry.js";
 import type { RankedBrief, RawSession } from "./core/types.js";
 import { collectSessions } from "./core/vendor/index.js";
+import { type ConsoleView, type SessionView, renderConsole } from "./ui/console.js";
 import { renderDetail } from "./ui/detail.js";
 import { renderFeed } from "./ui/feed.js";
-import { type SessionView, renderSessions } from "./ui/sessions.js";
 
 const DAY_MS = 86_400_000;
 
@@ -34,7 +37,7 @@ function ttlCache<T>(ttlMs: number, fn: () => T): () => T {
   };
 }
 
-/** Injectable so tests can assert launch wiring without spawning a real terminal. */
+/** Injectable so tests can assert wiring without spawning terminals or hitting the SDK. */
 export interface AppDeps {
   launcher: (
     action: LaunchAction,
@@ -42,6 +45,7 @@ export interface AppDeps {
     cwd: string,
     opts: { sessionId?: string; prompt?: string },
   ) => string;
+  engine: ChatEngine;
 }
 
 /** Map each session to the highest-priority brief whose dir contains it (or vice versa). */
@@ -74,6 +78,7 @@ function toSessionViews(sessions: RawSession[], ranked: RankedBrief[], now: numb
         sessionId: s.sessionId,
         title: s.title ?? "",
         cwd: s.cwd,
+        file: s.path,
         project: s.cwd ? path.basename(s.cwd) : "—",
         ageDays: s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null,
         prompts: s.prompts,
@@ -91,7 +96,11 @@ function toSessionViews(sessions: RawSession[], ranked: RankedBrief[], now: numb
     });
 }
 
-export function createApp(config: AttendConfig, deps: AppDeps = { launcher: launchSession }): Hono {
+export function createApp(
+  config: AttendConfig,
+  deps: AppDeps = { launcher: launchSession, engine: new ChatEngine() },
+): Hono {
+  const engine = deps.engine;
   const getSessions = ttlCache(30_000, () => collectSessions(config));
   const getModel = ttlCache(60_000, (): AlignmentModel => {
     const sources = config.memorySources.length
@@ -102,19 +111,88 @@ export function createApp(config: AttendConfig, deps: AppDeps = { launcher: laun
 
   const app = new Hono();
 
-  // Main view: all sessions, aggregated across vendors, with brief + priority attached.
+  // Main view: slock-style console — all sessions aggregated, chat in-browser.
   app.get("/", (c) => {
     const sessions = getSessions();
     const briefs = scanVault(config.vaultRoots, config.scanDepth);
     const ranked = rankBriefs(briefs, sessions, getModel());
-    return c.html(
-      renderSessions({
-        sessions: toSessionViews(sessions, ranked, Date.now()),
-        knownDirs: knownDirs(ranked, sessions),
-        briefCount: briefs.length,
-        memoryTerms: getModel().vocabSize,
-      }),
-    );
+    const view: ConsoleView = {
+      sessions: toSessionViews(sessions, ranked, Date.now()),
+      knownDirs: knownDirs(ranked, sessions),
+      briefCount: briefs.length,
+      memoryTerms: getModel().vocabSize,
+    };
+    return c.html(renderConsole(view));
+  });
+
+  // Static transcript of a session (history shown when you open it).
+  app.get("/chat/messages", (c) => {
+    const file = c.req.query("file");
+    if (!file || !file.endsWith(".jsonl") || !fs.existsSync(file)) return c.json([]);
+    return c.json(readClaudeTranscript(file));
+  });
+
+  // Live event stream for a session (SSE). Replays buffered events, then streams.
+  app.get("/chat/stream", (c) => {
+    const id = c.req.query("session");
+    if (!id) return c.text("missing session", 400);
+    return streamSSE(c, async (stream) => {
+      await new Promise<void>((resolve) => {
+        const unsub = engine.subscribe(id, (ev) => {
+          stream.writeSSE({ data: JSON.stringify(ev) }).catch(() => {});
+        });
+        stream.onAbort(() => {
+          unsub();
+          resolve();
+        });
+      });
+    });
+  });
+
+  // Send a user turn; starts (resumes) a live run if one isn't already running.
+  app.post("/chat/send", async (c) => {
+    const id = c.req.query("session");
+    const cwd = c.req.query("cwd");
+    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const text = body.text;
+    if (!id) return c.json({ ok: false, error: "missing session" }, 400);
+    if (!cwd || !fs.existsSync(cwd))
+      return c.json({ ok: false, error: "directory not found" }, 400);
+    if (!text || !text.trim()) return c.json({ ok: false, error: "empty message" }, 400);
+    if (!engine.get(id)) engine.start({ resume: id, cwd }).catch(() => {});
+    const sent = engine.send(id, text);
+    return c.json({ ok: sent, session: id });
+  });
+
+  // Start a brand-new session in a directory.
+  app.post("/chat/new", async (c) => {
+    const cwd = c.req.query("cwd");
+    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const text = body.text;
+    if (!cwd || !fs.existsSync(cwd))
+      return c.json({ ok: false, error: "directory not found" }, 400);
+    if (!text || !text.trim()) return c.json({ ok: false, error: "empty message" }, 400);
+    try {
+      const session = await engine.start({ cwd, firstText: text });
+      return c.json({ ok: true, session });
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // Fork (split) a session into a new branch.
+  app.post("/chat/fork", async (c) => {
+    const id = c.req.query("session");
+    const cwd = c.req.query("cwd");
+    if (!id) return c.json({ ok: false, error: "missing session" }, 400);
+    if (!cwd || !fs.existsSync(cwd))
+      return c.json({ ok: false, error: "directory not found" }, 400);
+    try {
+      const session = await engine.start({ resume: id, forkSession: true, cwd });
+      return c.json({ ok: true, session });
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+    }
   });
 
   // Brief-priority view (the original feed).

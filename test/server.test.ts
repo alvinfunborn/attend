@@ -1,6 +1,7 @@
 import net from "node:net";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { ChatEngine, type QueryFn } from "../src/chat/engine.js";
 import { resolveConfig } from "../src/config.js";
 import type { LaunchAction, LaunchVendor } from "../src/core/launch.js";
 import { type AppDeps, createApp, startServer } from "../src/server.js";
@@ -12,6 +13,16 @@ interface Call {
   opts: { sessionId?: string; prompt?: string };
 }
 
+// Fake SDK query(): yields init → assistant → result, no network.
+const fakeQuery = (() => {
+  async function* gen() {
+    yield { type: "system", subtype: "init", session_id: "fake-1" };
+    yield { type: "assistant", message: { content: [{ type: "text", text: "hi" }] }, session_id: "fake-1" };
+    yield { type: "result", subtype: "success", result: "hi", session_id: "fake-1" };
+  }
+  return gen();
+}) as unknown as QueryFn;
+
 function appWithSpy() {
   const calls: Call[] = [];
   const deps: AppDeps = {
@@ -19,6 +30,7 @@ function appWithSpy() {
       calls.push({ action, vendor, cwd, opts });
       return `${vendor} ${action}`;
     },
+    engine: new ChatEngine(fakeQuery),
   };
   return { app: createApp(resolveConfig({ positionals: [] }), deps), calls };
 }
@@ -73,6 +85,60 @@ describe("POST /launch", () => {
       { method: "POST" },
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
+  it("starts a new session and returns its id", async () => {
+    const { app } = appWithSpy();
+    const res = await app.request(`/chat/new?cwd=${tmp}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hello" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, session: "fake-1" });
+  });
+
+  it("rejects new without a directory or message", async () => {
+    const { app } = appWithSpy();
+    expect(
+      (
+        await app.request(`/chat/new?cwd=${encodeURIComponent("/no/such")}`, {
+          method: "POST",
+          body: JSON.stringify({ text: "x" }),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(`/chat/new?cwd=${tmp}`, {
+          method: "POST",
+          body: JSON.stringify({ text: "" }),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it("send requires session + existing dir + non-empty text", async () => {
+    const { app } = appWithSpy();
+    expect((await app.request(`/chat/send?cwd=${tmp}`, { method: "POST", body: "{}" })).status).toBe(400);
+    const res = await app.request(`/chat/send?session=abc&cwd=${tmp}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, session: "abc" });
+  });
+
+  it("fork returns the new session id", async () => {
+    const { app } = appWithSpy();
+    const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, session: "fake-1" });
   });
 });
 
