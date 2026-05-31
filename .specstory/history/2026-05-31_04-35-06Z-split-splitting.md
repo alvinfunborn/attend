@@ -2,7 +2,7 @@
 
 # 2026-05-31 04:35:06Z
 
-<!-- Claude Code Session 3c8e5817-0024-452f-a804-dc3f950884c3 (2026-05-31 04:35:06Z) -->
+<!-- Claude Code Session 978ce3b4-fadb-4df6-a105-800b19e97097 (2026-05-31 04:35:06Z) -->
 
 _**User (2026-05-31 04:35:06Z)**_
 
@@ -1761,3 +1761,200 @@ A fork conceptually means "branch from here and continue in a new direction" —
 The new UX: select a session, type the divergent message, click **split** → a new branch (with the parent's history) opens and runs that turn, leaving the original untouched.
 
 One thing worth confirming on your end: with the real `claude` login, run a split and verify the forked session streams a reply — the test suite uses a fake SDK, so this is the one path tests can't exercise end-to-end.
+
+---
+
+_**User (2026-05-31 04:44:49Z)**_
+
+还需要先typemessage, 再点击split?
+
+---
+
+_**Agent (claude-opus-4-8 2026-05-31 04:45:57Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 04:45:59Z)**_
+
+You're right — that's a worse UX than before. Let me make **split create the new branch immediately** (selected, empty, ready to type), and defer the actual SDK fork until your first message in that branch. So: click split → empty fork appears → type whenever. No upfront message required.
+
+The server still needs the first message to materialize the fork (that constraint is real), but the client can hold the branch as "pending" until you send. Let me read the current client code and rework it.
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:00Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+158	  function select(s){
+159	    cur=s; renderSidebar();
+160	    byId('h-title').textContent = s.title || s.project || 'session';
+161	    byId('h-sub').textContent = s.vendor+' · '+(s.cwd||'');
+162	    // in-browser fork only works for Claude sessions; Codex must use the terminal launcher
+163	    var fb=byId('forkBtn');
+164	    fb.disabled = !(s && s.sessionId && s.vendor==='claude');
+165	    fb.title = fb.disabled
+166	      ? (s && s.vendor!=='claude' ? 'in-browser split is Claude-only — use the terminal launcher for Codex' : 'select a Claude session to split')
+167	      : 'branch this session into a fork';
+168	    byId('msgs').innerHTML=''; assistantEl=null;
+169	    if(es){ es.close(); es=null; }
+170	    if(s.file){
+171	      fetch('/chat/messages?file='+encodeURIComponent(s.file)).then(function(r){return r.json();}).then(function(msgs){
+172	        if(!msgs.length) addMsg('assistant','(no history yet)');
+173	        msgs.forEach(function(m){ if(m.text) addMsg(m.role, m.text); (m.tools||[]).forEach(function(t){ addTool(t); }); });
+174	      });
+175	    }
+176	  }
+177	  function openStream(id){ if(es) es.close(); es=new EventSource('/chat/stream?session='+encodeURIComponent(id)); es.onmessage=function(e){ onEvent(JSON.parse(e.data)); }; }
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:03Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+183	  }
+184	  function send(){
+185	    var inp=byId('input'); var text=inp.value.trim(); if(!text||!cur||!cur.sessionId) return;
+186	    addMsg('user',text); inp.value=''; assistantEl=null;
+187	    var id=cur.sessionId, cwd=cur.cwd||'';
+188	    fetch('/chat/send?session='+encodeURIComponent(id)+'&cwd='+encodeURIComponent(cwd),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
+189	      .then(function(r){return r.json();}).then(function(res){ if(res.ok){ if(!es) openStream(id); } else { addMsg('error','⚠ '+(res.error||'send failed')); } });
+190	  }
+191	  function fork(){
+192	    if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
+193	    if(cur.vendor!=='claude'){ alert('In-browser split is Claude-only. Use the terminal launcher to fork a Codex session.'); return; }
+194	    // A fork diverges with a first turn — branch from here, then go a new way.
+195	    var inp=byId('input'); var text=inp.value.trim();
+196	    if(!text){ inp.focus(); inp.placeholder='type the message to branch with, then split…'; return; }
+197	    var btn=byId('forkBtn'), label=btn.textContent; btn.disabled=true; btn.textContent='splitting…';
+198	    var src=cur;
+199	    fetch('/chat/fork?session='+encodeURIComponent(src.sessionId)+'&cwd='+encodeURIComponent(src.cwd||''),
+200	      {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
+201	      .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ alert(res.error||'fork failed'); return; }
+202	        inp.value='';
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:06Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+202	        inp.value='';
+203	        var ns={vendor:'claude',sessionId:res.session,title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
+204	        SESS.unshift(ns); select(ns); addMsg('user',text); openStream(res.session); })
+205	      .catch(function(e){ alert('fork failed: '+(e&&e.message?e.message:e)); })
+206	      .finally(function(){ btn.textContent=label; if(cur) byId('forkBtn').disabled = !(cur.vendor==='claude'); });
+207	  }
+208	  function newSession(){
+209	    var dir=byId('ndfree').value.trim()||byId('ndsel').value; var text=byId('np').value.trim();
+210	    if(!dir){ byId('nmsg').textContent='pick or paste a directory'; return; }
+211	    if(!text){ byId('nmsg').textContent='type a first message'; return; }
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:10Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:10Z)**_
+
+Now I'll rework the client. First, `fork()` — create the branch instantly with no network call:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:22Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:26Z)**_
+
+Now `send()` — route a pending fork's first message to `materializeFork`:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:28Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:32Z)**_
+
+Now `select()` — disable the split button on a not-yet-real branch, and show a hint so the branch reads as intentionally empty:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:36Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:43Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:44Z)**_
+
+Now let me verify everything still checks out:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:46:59Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Typecheck, lint, full tests
+
+`npm run typecheck 2>&1 | tail -8 && echo "===LINT===" && npm run lint 2>&1 | tail -8 && echo "===TESTS===" && npx vitest run 2>&1 | tail -8`
+
+```text
+> attend@1.0.0 typecheck
+> tsc --noEmit
+
+===LINT===
+
+> attend@1.0.0 lint
+> biome check src test
+
+Checked 39 files in 14ms. No fixes applied.
+===TESTS===
+port 52991 in use, trying 52992…
+ ✓ test/server.test.ts (**11 tests**)** 31ms**
+
+ Test Files ** **15 passed** (15)
+      Tests ** **69 passed** (69)
+   Start at ** 12:46:58
+   Duration ** 734ms (transform 705ms, setup 0ms, collect 1.65s, tests 158ms, environment 3ms, prepare 1.61s)**
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:47:14Z)**_
+
+All green. 
+
+不需要了。现在的流程是:
+
+**点击 split → 立刻出现一个空的分支(已选中、可以马上打字),不用先输入。**
+
+之前我改成"先打字再 split"确实是更差的体验,已经撤掉了。新逻辑:
+
+- **`fork()`** 现在不发任何网络请求——只是在侧栏顶部插入一个 `pendingFork`(挂起的分支),选中它,光标定位到输入框。瞬间完成,按钮不会卡在 "splitting…"。分支里显示一行提示:*"(forked — type your next message to continue this branch in a new direction)"*。
+- **`send()`** 检测到当前是挂起分支时,把你的**第一条消息**走 `materializeFork()` → 调 `/chat/fork`(带上这条消息),真正创建 fork 并拿到新 session id,然后开始流式回复。之后就是普通会话。
+
+为什么第一条消息那一刻才真正 fork:真实的 Agent SDK 只有在收到一个对话回合后才会吐出新 session 的 init 消息(也就是新 id)。没有输入就没有 id,这正是原来卡死的根因。所以服务端 `/chat/fork` 仍然需要那条消息——但现在对你是无感的,你只管点 split、然后正常打字即可。
+
+行为对比:
+- 之前(坏):点 split → 卡在 "splitting…" 永不返回。
+- 我上一版(也不够好):必须先打字才能点 split。
+- 现在:点 split → 空分支立即就绪 → 想什么时候打字都行,原会话不受影响。
+
+测试我更新过的 `/chat/fork` 仍需带消息那条仍然有效(materializeFork 会带上)。69 个测试、typecheck、lint 全过。唯一测试覆盖不到的是真实 SDK 那一跳——建议你用真实 `claude` 登录点一次 split、发一条消息,确认分支能正常流式回复。

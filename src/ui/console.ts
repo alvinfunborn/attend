@@ -66,6 +66,15 @@ const STYLE = `
   .head { padding: 0.7rem 1rem; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; }
   .head .t { font-weight: 600; font-size: 0.95rem; }
   .head .s { font-size: 0.72rem; color: #9ca3af; font-family: ui-monospace, monospace; }
+  #h-sig { display: flex; gap: 0.45rem; align-items: center; flex-wrap: wrap; margin-top: 0.3rem; font-size: 0.72rem; }
+  #h-sig .score { font-weight: 600; color: #374151; }
+  #h-sig .brieftag { padding: 0.05rem 0.4rem; border-radius: 3px; background: #eef2ff; color: #3730a3; text-decoration: none; }
+  #h-sig .brieftag:hover { background: #e0e7ff; }
+  #h-sig .sig-reason { color: #9ca3af; font-style: italic; }
+  .sig { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-top: 0.3rem; font-size: 0.72rem; color: #6b7280; }
+  .sig .score { font-weight: 600; color: #374151; }
+  .sig .reason { font-style: italic; }
+  .sig .briefref { color: #2563eb; text-decoration: none; background: #eff6ff; padding: 0.05rem 0.4rem; border-radius: 3px; }
   #msgs { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
   .msg { display: flex; }
   .msg.user { justify-content: flex-end; }
@@ -110,12 +119,12 @@ export function renderConsole(v: ConsoleView): string {
 </div>
 <div class="main">
   <div class="head">
-    <div><div class="t" id="h-title">attend</div><div class="s" id="h-sub">select a session, or + new</div></div>
+    <div><div class="t" id="h-title">attend</div><div class="s" id="h-sub">select a session, or + new</div><div class="sig" id="h-sig"></div></div>
     <button id="forkBtn" title="branch this session into a fork" disabled>split ⑂</button>
   </div>
   <div id="msgs"><div class="placeholder" id="ph">Pick a session on the left to see its chat, then type below to continue it — all in the browser.</div></div>
   <div class="foot">
-    <textarea id="input" placeholder="message (Ctrl/Cmd+Enter to send)"></textarea>
+    <textarea id="input" placeholder="message (Enter to send · Shift+Enter for newline)"></textarea>
     <button class="send" id="send">send</button>
   </div>
 </div>
@@ -145,7 +154,7 @@ window.__DIRS__ = ${dirsJson};
       item.appendChild(el('div','it-title', s.title || '(no prompt)'));
       var meta=el('div','it-meta');
       if(s.pattern && s.pattern!=='unknown') meta.appendChild(el('span','pat '+s.pattern, s.pattern));
-      meta.appendChild(el('span',null, s.vendor+' · '+s.project+' · '+s.prompts+'p/'+s.actions+'a'+(s.ageDays!=null?(' · '+s.ageDays+'d'):'')+(s.brief?(' · ▸'+s.brief.name):'')));
+      meta.appendChild(el('span',null, (s.score!=null?Number(s.score).toFixed(1)+' · ':'')+s.vendor+' · '+s.project+' · '+s.prompts+'p/'+s.actions+'a'+(s.ageDays!=null?(' · '+s.ageDays+'d'):'')+(s.brief?(' · ▸'+s.brief.name):'')));
       item.appendChild(meta);
       if(s.reason) item.appendChild(el('div','it-reason', s.reason));
       item.onclick=function(){ select(s); };
@@ -159,15 +168,23 @@ window.__DIRS__ = ${dirsJson};
     cur=s; renderSidebar();
     byId('h-title').textContent = s.title || s.project || 'session';
     byId('h-sub').textContent = s.vendor+' · '+(s.cwd||'');
+    // prominent per-session signals: pattern · priority · reason · brief
+    var sig=byId('h-sig'); sig.innerHTML='';
+    if(s.pattern && s.pattern!=='unknown') sig.appendChild(el('span','pat '+s.pattern, s.pattern));
+    if(s.score!=null) sig.appendChild(el('span','score','priority '+s.score.toFixed(1)));
+    if(s.brief){ var ba=el('a','briefref','▸ '+s.brief.name); ba.href='/brief?path='+encodeURIComponent(s.brief.path); ba.target='_blank'; sig.appendChild(ba); }
+    if(s.reason && s.reason!=='no signal') sig.appendChild(el('span','reason', s.reason));
     // in-browser fork only works for Claude sessions; Codex must use the terminal launcher
     var fb=byId('forkBtn');
-    fb.disabled = !(s && s.sessionId && s.vendor==='claude');
+    fb.disabled = !(s && s.sessionId && s.vendor==='claude' && !s.pendingFork);
     fb.title = fb.disabled
       ? (s && s.vendor!=='claude' ? 'in-browser split is Claude-only — use the terminal launcher for Codex' : 'select a Claude session to split')
       : 'branch this session into a fork';
     byId('msgs').innerHTML=''; assistantEl=null;
     if(es){ es.close(); es=null; }
-    if(s.file){
+    if(s.pendingFork){
+      addMsg('assistant','(forked — type your next message to continue this branch in a new direction)');
+    } else if(s.file){
       fetch('/chat/messages?file='+encodeURIComponent(s.file)).then(function(r){return r.json();}).then(function(msgs){
         if(!msgs.length) addMsg('assistant','(no history yet)');
         msgs.forEach(function(m){ if(m.text) addMsg(m.role, m.text); (m.tools||[]).forEach(function(t){ addTool(t); }); });
@@ -182,7 +199,9 @@ window.__DIRS__ = ${dirsJson};
     else if(ev.kind==='error'){ assistantEl=null; addMsg('error','⚠ '+ev.message); }
   }
   function send(){
-    var inp=byId('input'); var text=inp.value.trim(); if(!text||!cur||!cur.sessionId) return;
+    var inp=byId('input'); var text=inp.value.trim(); if(!text||!cur) return;
+    if(cur.pendingFork){ materializeFork(cur,text); return; }
+    if(!cur.sessionId) return;
     addMsg('user',text); inp.value=''; assistantEl=null;
     var id=cur.sessionId, cwd=cur.cwd||'';
     fetch('/chat/send?session='+encodeURIComponent(id)+'&cwd='+encodeURIComponent(cwd),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
@@ -191,19 +210,24 @@ window.__DIRS__ = ${dirsJson};
   function fork(){
     if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
     if(cur.vendor!=='claude'){ alert('In-browser split is Claude-only. Use the terminal launcher to fork a Codex session.'); return; }
-    // A fork diverges with a first turn — branch from here, then go a new way.
-    var inp=byId('input'); var text=inp.value.trim();
-    if(!text){ inp.focus(); inp.placeholder='type the message to branch with, then split…'; return; }
-    var btn=byId('forkBtn'), label=btn.textContent; btn.disabled=true; btn.textContent='splitting…';
+    if(cur.pendingFork){ byId('input').focus(); return; }
+    // Open the branch immediately, empty and ready. The real fork is materialized
+    // lazily on the first message: the Agent SDK only mints the new session id once
+    // it has a turn to diverge on, so we defer the actual /chat/fork until send().
     var src=cur;
-    fetch('/chat/fork?session='+encodeURIComponent(src.sessionId)+'&cwd='+encodeURIComponent(src.cwd||''),
+    var ns={vendor:'claude',sessionId:'pending-'+Date.now(),pendingFork:{parent:src.sessionId,cwd:src.cwd||''},title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
+    SESS.unshift(ns); select(ns); byId('input').focus();
+  }
+  // Turn a pending fork into a real session using its first message.
+  function materializeFork(branch,text){
+    var inp=byId('input'); addMsg('user',text); inp.value=''; assistantEl=null;
+    fetch('/chat/fork?session='+encodeURIComponent(branch.pendingFork.parent)+'&cwd='+encodeURIComponent(branch.pendingFork.cwd),
       {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
-      .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ alert(res.error||'fork failed'); return; }
-        inp.value='';
-        var ns={vendor:'claude',sessionId:res.session,title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
-        SESS.unshift(ns); select(ns); addMsg('user',text); openStream(res.session); })
-      .catch(function(e){ alert('fork failed: '+(e&&e.message?e.message:e)); })
-      .finally(function(){ btn.textContent=label; if(cur) byId('forkBtn').disabled = !(cur.vendor==='claude'); });
+      .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ addMsg('error','⚠ '+(res.error||'fork failed')); return; }
+        branch.sessionId=res.session; branch.pendingFork=null;
+        if(cur===branch){ renderSidebar(); byId('forkBtn').disabled=false; }
+        openStream(res.session); })
+      .catch(function(e){ addMsg('error','⚠ fork failed: '+(e&&e.message?e.message:e)); });
   }
   function newSession(){
     var dir=byId('ndfree').value.trim()||byId('ndsel').value; var text=byId('np').value.trim();
@@ -223,7 +247,7 @@ window.__DIRS__ = ${dirsJson};
   byId('nbtn').onclick=newSession;
   byId('newToggle').onclick=function(){ byId('newbox').classList.toggle('open'); };
   byId('sort').onchange=function(){ sortSessions(); renderSidebar(); };
-  byId('input').addEventListener('keydown',function(e){ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); send(); } });
+  byId('input').addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); send(); } });
 })();
 </script>
 </body>
