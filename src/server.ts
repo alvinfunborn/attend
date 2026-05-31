@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import type { AttendConfig } from "./config.js";
 import { type AlignmentModel, buildAlignmentModel } from "./core/alignment.js";
 import { parseBrief, scanVault } from "./core/brief.js";
+import { type ForkVendor, launchFork } from "./core/fork.js";
 import { discoverMemorySources, loadMemoryDocs } from "./core/memory.js";
 import { evaluatePriority } from "./core/priority.js";
 import { patternCounts, rankBriefs } from "./core/rank.js";
@@ -29,7 +30,15 @@ function ttlCache<T>(ttlMs: number, fn: () => T): () => T {
   };
 }
 
-export function createApp(config: AttendConfig): Hono {
+/** Injectable so tests can assert fork wiring without spawning a real terminal. */
+export interface AppDeps {
+  forkLauncher: (vendor: ForkVendor, sessionId: string, cwd: string) => string;
+}
+
+export function createApp(
+  config: AttendConfig,
+  deps: AppDeps = { forkLauncher: launchFork },
+): Hono {
   const getSessions = ttlCache(30_000, () => collectSessions(config));
   const getModel = ttlCache(60_000, (): AlignmentModel => {
     const sources = config.memorySources.length
@@ -72,6 +81,28 @@ export function createApp(config: AttendConfig): Hono {
         spawnCodex: spawnCommand(brief, "codex"),
       }),
     );
+  });
+
+  // Fork (split) a session into a new branch via the vendor CLI, in a terminal.
+  app.post("/fork", (c) => {
+    const vendor = c.req.query("vendor");
+    const id = c.req.query("id");
+    const cwd = c.req.query("cwd");
+    if (vendor !== "claude" && vendor !== "codex") {
+      return c.json({ ok: false, error: "unknown vendor" }, 400);
+    }
+    if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) {
+      return c.json({ ok: false, error: "invalid session id" }, 400);
+    }
+    if (!cwd || !fs.existsSync(cwd)) {
+      return c.json({ ok: false, error: "cwd not found" }, 400);
+    }
+    try {
+      const command = deps.forkLauncher(vendor, id, cwd);
+      return c.json({ ok: true, command });
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+    }
   });
 
   return app;

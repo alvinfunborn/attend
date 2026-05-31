@@ -43,6 +43,15 @@ const STYLE = `
   }
   .session-row:last-child { border-bottom: none; }
   .session-row .when { color: #6b7280; }
+  .session-right { display: inline-flex; align-items: center; gap: 0.5rem; }
+  .fork-btn {
+    background: #fff; color: #1f2937; border: 1px solid #d1d5db;
+    padding: 0.1rem 0.45rem; font-size: 0.72rem; border-radius: 4px; cursor: pointer;
+  }
+  .fork-btn:hover { background: #f3f4f6; }
+  .fork-btn.ok  { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+  .fork-btn.err { color: #9a3412; border-color: #fed7aa; background: #fffbeb; }
+  .hint { font-size: 0.72rem; color: #9ca3af; margin-top: 0.4rem; }
   .path { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; }
   .body { white-space: pre-wrap; line-height: 1.5; }
 `;
@@ -69,9 +78,13 @@ function baseName(p: string): string {
 
 function sessionRow(s: RawSession): string {
   const when = s.lastTs !== null ? new Date(s.lastTs).toISOString().slice(0, 10) : "";
+  const forkBtn =
+    s.sessionId && s.cwd
+      ? `<button class="fork-btn" data-vendor="${esc(s.vendor)}" data-id="${esc(s.sessionId)}" data-cwd="${esc(s.cwd)}" onclick="forkSession(this)" title="branch this session into a new fork (opens a terminal)">split ⑂</button>`
+      : "";
   return `<div class="session-row">
     <span>${esc(baseName(s.path))}</span>
-    <span class="when">${when} · ${s.prompts}p / ${s.actions}a</span>
+    <span class="session-right"><span class="when">${when} · ${s.prompts}p / ${s.actions}a</span>${forkBtn}</span>
   </div>`;
 }
 
@@ -84,6 +97,7 @@ export function renderDetail(v: DetailView): string {
     ? `<div class="card">
   <div class="label">recent sessions (${v.sessions.length})</div>
   ${v.sessions.map(sessionRow).join("")}
+  <div class="hint">split ⑂ forks a session into a new branch via the vendor CLI in a new terminal; the fork appears here on refresh.</div>
 </div>`
     : "";
 
@@ -130,6 +144,33 @@ ${sessionsCard}
 <div class="card"><div class="label">file</div><div class="path">${esc(v.brief.path)}</div></div>
 
 <script>
+function forkSession(btn) {
+  const q = new URLSearchParams({
+    vendor: btn.dataset.vendor,
+    id: btn.dataset.id,
+    cwd: btn.dataset.cwd,
+  });
+  btn.disabled = true;
+  const orig = btn.textContent;
+  fetch("/fork?" + q.toString(), { method: "POST" })
+    .then((r) => r.json())
+    .then((res) => {
+      if (res.ok) {
+        btn.textContent = "forked ✓";
+        btn.classList.add("ok");
+      } else {
+        btn.textContent = res.error || "failed";
+        btn.classList.add("err");
+        btn.disabled = false;
+      }
+    })
+    .catch(() => {
+      btn.textContent = "failed";
+      btn.classList.add("err");
+      btn.disabled = false;
+    });
+  void orig;
+}
 function copyCmd(id) {
   const text = document.getElementById(id).textContent;
   navigator.clipboard.writeText(text).then(() => {

@@ -27,23 +27,23 @@ v1.1 (shipped 2026-05, 见 DESIGN.md "v1.1: trust + cross-vendor"):
 - [x] trust 加固: avoidance 要求持续 dwell + 证据化 reason; memory alignment 改 TF-IDF cosine
 - [x] vitest 46 测试, biome + tsc 干净
 
-仍 open:
-- [ ] `attend split <jsonl>` CLI: transcript → N 候选 brief (下一个高杠杆项; 输出是候选不是答案, 用户筛选闸门不能省)
+- [x] split = 手动 fork (无 LLM): detail 页每个 session 一个 "split ⑂" 按钮, 调 vendor fork CLI (`claude --resume <id> --fork-session` / `codex fork <id>`) 在新终端开 fork, 刷新后 split 出来 (v1.2; 显式覆盖 spawn=copy-only invariant)
 
 deferred / killed (PM review):
 - [ ] LLM-based priority (env-flag) — 推迟到启发式在真实 brief 上证明不够再做
+- ~~LLM 版 attend split~~ — 用户改为手动 fork, 不用 LLM (见上)
 - ~~dwell 热力图~~ / ~~in-browser edit~~ — 砍 (invariant 3 / 1)
 
 ## next
 
 v1.1 已 ship: Node/TS + npx, Codex parser, trust 加固 (avoidance 持续 dwell + TF-IDF alignment), `attend new`。46 测试绿。两个 PM review 结论见 DESIGN.md v1.1。
 
-下一步真二选一:
+split(手动 fork)已 ship。下一步最高优先:
 
-**A. (先做这个, 最高优先)** 用 `attend new` 给几个真实项目 (`作品B` / `lifeset` / `mcp`) 起 brief.md, 让 feed 有真实数据 —— 没数据无法验证 telemetry/priority 链, 也无法判断 trust 加固是否到位。低风险, 立刻产生信号。两个 PM 都把这个列为前置。
+**用 `attend new` 给几个真实项目 (`作品B` / `lifeset` / `mcp`) 起 brief.md**, 让 feed 有真实数据 —— 没数据无法验证 telemetry/priority/trust 加固是否到位。低风险, 立刻产生信号。两个 PM 都把这个列为前置。
 
-**B.** 写 `attend split` CLI——读 JSONL transcript, LLM 抽 N 个候选 brief, 用户筛选落 vault。剩下最高杠杆的 generative 项, 直接消化"一个 session 越聊越发散"。注意: 输出是候选不是答案, 用户筛选闸门不能省, LLM 走 env-flag。
-
-待确认: Codex parser 是按开源文档 schema 写的, 本机无 Codex 装, 需在真实 rollout 文件上验证字段 (见 `src/core/vendor/codex.ts` 注释)。
+待确认 (需真机):
+- Codex parser 按开源文档 schema 写, 本机无 Codex, 需真实 rollout 文件验证字段 (见 `src/core/vendor/codex.ts` 注释)。
+- split ⑂ 的终端启动: Windows 路径本机可测; macOS (`osascript`) 与真实 `claude/codex` fork 需你在装了 vendor 的机器上点一次确认。
 
 DESIGN.md 的 invariants 是 hard rule, 不要碰 (尤其 invariant 3 telemetry 中性表达 — Steel 2007)。定位锚点: brief(task) 是主对象, session 派生; brief ≠ spec; 跨 vendor 是唯一护城河 (vs Agent View)。

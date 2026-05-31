@@ -23,6 +23,7 @@ function session(cwd: string | null, extra: Partial<RawSession> = {}): RawSessio
   return {
     path: "s.jsonl",
     vendor: "claude",
+    sessionId: null,
     cwd,
     firstTs: null,
     lastTs: null,

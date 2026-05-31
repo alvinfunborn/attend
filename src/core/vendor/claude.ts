@@ -17,6 +17,7 @@ interface JsonlEntry {
   timestamp?: string;
   type?: string;
   isSidechain?: boolean;
+  sessionId?: string;
   message?: { content?: unknown };
 }
 
@@ -49,6 +50,7 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
   const session: RawSession = {
     path: file,
     vendor: "claude",
+    sessionId: null,
     cwd: null,
     firstTs: null,
     lastTs: null,
@@ -64,6 +66,7 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
       continue;
     }
     if (session.cwd === null && obj.cwd) session.cwd = obj.cwd;
+    if (session.sessionId === null && obj.sessionId) session.sessionId = obj.sessionId;
     const ts = parseTs(obj.timestamp);
     if (ts !== null) {
       if (session.firstTs === null) session.firstTs = ts;
@@ -88,6 +91,7 @@ function parseSessionFile(file: string): RawSession {
     return {
       path: file,
       vendor: "claude",
+      sessionId: null,
       cwd: null,
       firstTs: null,
       lastTs: null,

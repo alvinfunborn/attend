@@ -122,11 +122,11 @@ Telemetry is **descriptive, never judgmental** (Steel 2007 on procrastination se
 
 **Memory alignment** is TF-IDF cosine similarity between the brief and your Claude memory corpus (local, no model/API; CJK handled via bigrams). Each brief gets a one-line reason — including the *top matched terms* and the *evidence* behind a pattern (e.g. "5 prompts, 0 actions over 1.5h") — so the rank is auditable and you can override it. No opaque scores.
 
-## Spawn commands
+## Spawn & split
 
-Detail page generates copy-paste commands for both Claude and Codex.
-**Does not auto-spawn** — it copies to clipboard, you paste to your terminal.
-This is intentional: auto-spawn from dashboard → 4-tab cascade.
+**Spawn (fresh session from a brief):** the detail page generates copy-paste `cd … && claude/codex "<brief>"` commands. Copy-only by design — you paste to your terminal (auto-spawning the whole ranked list → 4-tab cascade).
+
+**Split ⑂ (branch an existing session):** each recent session on the detail page has a `split ⑂` button that **forks that session** via the vendor's own command (`claude --resume <id> --fork-session` / `codex fork <id>`) in a new terminal. The forked session writes its own transcript, so it appears in the feed on the next refresh. This is the one action attend actively launches; it forks one existing session per explicit click (no auto-spawn from the list).
 
 ## Architecture
 

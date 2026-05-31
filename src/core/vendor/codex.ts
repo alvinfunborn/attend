@@ -41,6 +41,7 @@ interface ResponseItem {
   role?: string;
   content?: unknown;
   cwd?: string;
+  id?: string;
 }
 
 function parseTs(value: unknown): number | null {
@@ -68,6 +69,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
   const session: RawSession = {
     path: file,
     vendor: "codex",
+    sessionId: null,
     cwd: null,
     firstTs: null,
     lastTs: null,
@@ -104,10 +106,18 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     if (kind === "session_meta") {
       const cwd = item?.cwd ?? obj.cwd;
       if (session.cwd === null && cwd) session.cwd = cwd;
+      if (session.sessionId === null && item?.id) session.sessionId = item.id;
     } else if (kind === "response_item" && item) {
       if (isUserPrompt(item)) session.prompts += 1;
       else if (item.type && ACTION_ITEM_TYPES.has(item.type)) session.actions += 1;
     }
+  }
+  // Fallback: rollout filenames embed the session UUID (rollout-<ts>-<uuid>.jsonl).
+  if (session.sessionId === null) {
+    const m = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/.exec(
+      file,
+    );
+    if (m) session.sessionId = m[1] ?? null;
   }
   return session;
 }
@@ -145,6 +155,7 @@ export class CodexSource implements SessionSource {
         return {
           path: f,
           vendor: "codex" as const,
+          sessionId: null,
           cwd: null,
           firstTs: null,
           lastTs: null,

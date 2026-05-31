@@ -112,7 +112,7 @@ Touch these only with explicit cause:
 - **LangChain Agent Inbox / push notifications**. User's diagnostic cost when polling is already near-zero; push adds noise without enabling action.
 - **Cap to 2-5 concurrent sessions**. Open ≠ active. Goal isn't reducing tab count, it's reducing re-warming cost via durable briefs.
 - **Fork as cross-vendor primitive**. Each vendor's fork is locked to its transcript format and API. Brief is the cross-vendor abstraction; fork lives one level below.
-- **Auto-spawn from dashboard**. Auto-spawning new sessions from priority list would recreate the cascade we just dismantled. Spawn buttons copy commands only.
+- **Auto-spawn from dashboard**. Auto-spawning new sessions from priority list would recreate the cascade we just dismantled. Spawn buttons copy commands only. *(Partially overridden in v1.2 — see below: a manual per-session "split ⑂" button now actively launches a vendor `fork` in a terminal. The override is narrow — one explicit click forks one existing session — and does not auto-spawn from the ranked list, so the cascade concern stays addressed.)*
 
 ## Cross-vendor data layer
 
@@ -196,3 +196,13 @@ A two-PM requirements review (workflow/behavioral lens + strategy/scope lens) re
 - memory alignment is now **TF-IDF cosine** (local, no model/API), reported with its top matched terms so the rank stays auditable and overridable.
 
 **3. Invariants are the brand, not constraints to relax.** Pull-only + descriptive-telemetry + single-surface are exactly the choices Conductor/Crystal/Agent View did *not* make (they are push + diff-review + session-centric). The review's one framing correction: the premise "10+ live sessions is normal" is softening (async/cloud delegation lowers live-session count), but "tasks outlive sessions" is *strengthening* — re-weight the pitch toward durable cross-vendor task state, keep the rule. A once-daily opt-in "needs-you" digest was considered and **rejected** (still invariant 2 / the Agent-Inbox rejected path).
+
+## v1.2: manual split = fork (2026-05)
+
+`split` was originally specced as an LLM step (transcript → N candidate briefs). The user redefined it: **no LLM** — a manual per-session **"split ⑂" button** on the brief detail page that branches that session via the vendor's own fork command, run in a new terminal:
+- Claude: `claude --resume <id> --fork-session`
+- Codex: `codex fork <id>`
+
+The forked session writes a new transcript, so it "splits out" on the next feed refresh — staying within the brief=state / JSONL-is-truth model. `src/core/fork.ts` holds the pure command builders (per-vendor command + platform terminal invocation: `cmd /k` on Windows, `osascript` Terminal on macOS, `x-terminal-emulator` on Linux); `POST /fork` validates `vendor ∈ {claude,codex}`, a safe `[\w-]+` session id, and an existing cwd before launching (the launcher is injectable, so it's unit-tested without spawning).
+
+**Invariant override (deliberate, user-requested).** This is the one place attend actively spawns a vendor process, overriding "spawn buttons copy commands only." The override is narrow: one explicit click forks one *existing* session — it does not auto-spawn from the ranked list, so the 4-tab-cascade concern that motivated the original rule still holds. The fresh-spawn-from-brief commands remain copy-only. `sessionId` is now captured per transcript (Claude `sessionId`; Codex `session_meta.id` or the rollout filename UUID) to target the fork.
