@@ -140,11 +140,25 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(await res.json()).toMatchObject({ ok: true, session: "abc" });
   });
 
-  it("fork returns the new session id", async () => {
+  it("fork branches with a first message and returns the new session id", async () => {
     const { app } = appWithSpy();
-    const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, { method: "POST" });
+    const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "try another approach" }),
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, session: "fake-1" });
+  });
+
+  it("fork requires a first message to branch with (else it would hang)", async () => {
+    const { app } = appWithSpy();
+    const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "" }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

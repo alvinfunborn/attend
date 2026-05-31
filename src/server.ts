@@ -14,7 +14,7 @@ import { evaluatePriority } from "./core/priority.js";
 import { patternCounts, rankBriefs } from "./core/rank.js";
 import { spawnCommand } from "./core/spawn.js";
 import { matchSessions, telemetryForBrief } from "./core/telemetry.js";
-import type { RankedBrief, RawSession } from "./core/types.js";
+import type { Brief, RankedBrief, RawSession, Telemetry } from "./core/types.js";
 import { collectSessions } from "./core/vendor/index.js";
 import { type ConsoleView, type SessionView, renderConsole } from "./ui/console.js";
 import { renderDetail } from "./ui/detail.js";
@@ -67,12 +67,48 @@ function knownDirs(ranked: RankedBrief[], sessions: RawSession[]): string[] {
   return [...set].filter((d) => fs.existsSync(d)).sort();
 }
 
-function toSessionViews(sessions: RawSession[], ranked: RankedBrief[], now: number): SessionView[] {
+/** Telemetry for a single session (so pattern/priority can be computed per-session). */
+function sessionTelemetry(s: RawSession, now: number): Telemetry {
+  const dwell = s.firstTs !== null && s.lastTs !== null ? (s.lastTs - s.firstTs) / 60_000 : null;
+  const ageDays = s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null;
+  return {
+    sessions: 1,
+    prompts: s.prompts,
+    actions: s.actions,
+    totalMinutes: dwell ?? 0,
+    avgSessionMin: dwell,
+    lastActionAgeDays: s.actions > 0 ? ageDays : null,
+    lastTouch: s.lastTs !== null ? new Date(s.lastTs).toISOString() : null,
+    lastTouchAgeDays: ageDays,
+  };
+}
+
+function toSessionViews(
+  sessions: RawSession[],
+  ranked: RankedBrief[],
+  model: AlignmentModel | null,
+  now: number,
+): SessionView[] {
   const byPath = briefBySession(ranked, sessions);
   return [...sessions]
     .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))
     .map((s) => {
       const r = byPath.get(s.path);
+      const tel = sessionTelemetry(s, now);
+      // Per-session signals: treat the session's title as its "what" and score it
+      // exactly like a brief, so pattern/priority/reason follow the session.
+      const synthetic: Brief = {
+        path: "",
+        projectDir: s.cwd ?? "",
+        name: s.title || (s.cwd ? path.basename(s.cwd) : "session"),
+        frontMatter: {},
+        what: s.title ?? "",
+        accept: "",
+        next: "",
+        status: "active",
+        deferUntil: null,
+      };
+      const { score, reason, pattern } = evaluatePriority(synthetic, tel, model);
       return {
         vendor: s.vendor,
         sessionId: s.sessionId,
@@ -83,15 +119,10 @@ function toSessionViews(sessions: RawSession[], ranked: RankedBrief[], now: numb
         ageDays: s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null,
         prompts: s.prompts,
         actions: s.actions,
-        brief: r
-          ? {
-              name: r.brief.name,
-              path: r.brief.path,
-              score: r.score,
-              reason: r.reason,
-              pattern: r.pattern,
-            }
-          : null,
+        pattern,
+        score,
+        reason,
+        brief: r ? { name: r.brief.name, path: r.brief.path } : null,
       };
     });
 }
@@ -117,7 +148,7 @@ export function createApp(
     const briefs = scanVault(config.vaultRoots, config.scanDepth);
     const ranked = rankBriefs(briefs, sessions, getModel());
     const view: ConsoleView = {
-      sessions: toSessionViews(sessions, ranked, Date.now()),
+      sessions: toSessionViews(sessions, ranked, getModel(), Date.now()),
       knownDirs: knownDirs(ranked, sessions),
       briefCount: briefs.length,
       memoryTerms: getModel().vocabSize,
@@ -180,15 +211,22 @@ export function createApp(
     }
   });
 
-  // Fork (split) a session into a new branch.
+  // Fork (split) a session into a new branch. A fork needs a first turn to
+  // diverge: the real Agent SDK only emits the new session id (in its init
+  // message) once it receives input, so a fork with no first message would hang
+  // forever waiting on an init that never comes.
   app.post("/chat/fork", async (c) => {
     const id = c.req.query("session");
     const cwd = c.req.query("cwd");
+    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const text = body.text;
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
     if (!cwd || !fs.existsSync(cwd))
       return c.json({ ok: false, error: "directory not found" }, 400);
+    if (!text || !text.trim())
+      return c.json({ ok: false, error: "type a message to branch with" }, 400);
     try {
-      const session = await engine.start({ resume: id, forkSession: true, cwd });
+      const session = await engine.start({ resume: id, forkSession: true, cwd, firstText: text });
       return c.json({ ok: true, session });
     } catch (err) {
       return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);

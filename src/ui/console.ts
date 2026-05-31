@@ -3,9 +3,6 @@ import type { Pattern } from "../core/types.js";
 export interface SessionBriefRef {
   name: string;
   path: string;
-  score: number;
-  reason: string;
-  pattern: Pattern;
 }
 
 export interface SessionView {
@@ -18,6 +15,11 @@ export interface SessionView {
   ageDays: number | null;
   prompts: number;
   actions: number;
+  /** per-session behavioral signals (the model now follows the session, not a brief) */
+  pattern: Pattern;
+  score: number;
+  reason: string;
+  /** optional task this session belongs to, if a brief.md matched its dir */
   brief: SessionBriefRef | null;
 }
 
@@ -50,7 +52,15 @@ const STYLE = `
   .item:hover { background: #f1f5f9; }
   .item.active { background: #eef2ff; border-left: 3px solid #6366f1; padding-left: calc(0.9rem - 3px); }
   .it-title { font-size: 0.84rem; font-weight: 600; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .it-meta { font-size: 0.7rem; color: #6b7280; margin-top: 0.15rem; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .it-meta { font-size: 0.7rem; color: #6b7280; margin-top: 0.2rem; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 0.35rem; }
+  .pat { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.02rem 0.3rem; border-radius: 3px; background: #e5e7eb; color: #374151; flex-shrink: 0; }
+  .pat.avoidance { background: #fed7aa; color: #9a3412; }
+  .pat.stalled { background: #d1d5db; color: #1f2937; }
+  .pat.healthy { background: #bbf7d0; color: #166534; }
+  .pat.active { background: #ddd6fe; color: #5b21b6; }
+  .pat.fresh { background: #bfdbfe; color: #1e3a8a; }
+  .it-reason { font-size: 0.68rem; color: #9ca3af; margin-top: 0.2rem; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sortsel { font-size: 0.72rem; border: 1px solid #d1d5db; border-radius: 4px; padding: 0.1rem 0.3rem; background: white; }
   /* main */
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: white; }
   .head { padding: 0.7rem 1rem; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; }
@@ -86,7 +96,8 @@ export function renderConsole(v: ConsoleView): string {
   <h1>attend <span class="accent">${v.sessions.length} sessions · ${v.briefCount} briefs</span></h1>
   <div class="topnav">
     <button id="newToggle">+ new</button>
-    <a href="/briefs">briefs ▸</a>
+    <select id="sort" class="sortsel" title="sort sessions"><option value="recent">recent</option><option value="priority">needs you</option></select>
+    <a href="/briefs">tasks ▸</a>
   </div>
   <div class="newbox" id="newbox">
     <select id="ndsel"><option value="">— pick a project dir —</option>${dirOptions}</select>
@@ -121,12 +132,22 @@ window.__DIRS__ = ${dirsJson};
   function scroll(){ var m=byId('msgs'); m.scrollTop=m.scrollHeight; }
   function clearPh(){ var p=byId('ph'); if(p) p.remove(); }
 
+  function sortSessions(){
+    var mode=(byId('sort')||{}).value||'recent';
+    if(mode==='priority'){ SESS.sort(function(a,b){ return (b.score||0)-(a.score||0); }); }
+    else { SESS.sort(function(a,b){ return (a.ageDays==null?1e9:a.ageDays)-(b.ageDays==null?1e9:b.ageDays); }); }
+  }
   function renderSidebar(){
     var list=byId('list'); list.innerHTML='';
     SESS.forEach(function(s){
       var item=el('div','item'+(cur&&cur.sessionId===s.sessionId?' active':''));
+      item.title = s.reason || '';
       item.appendChild(el('div','it-title', s.title || '(no prompt)'));
-      item.appendChild(el('div','it-meta', s.vendor+' · '+s.project+' · '+s.prompts+'p/'+s.actions+'a'+(s.ageDays!=null?(' · '+s.ageDays+'d'):'')));
+      var meta=el('div','it-meta');
+      if(s.pattern && s.pattern!=='unknown') meta.appendChild(el('span','pat '+s.pattern, s.pattern));
+      meta.appendChild(el('span',null, s.vendor+' · '+s.project+' · '+s.prompts+'p/'+s.actions+'a'+(s.ageDays!=null?(' · '+s.ageDays+'d'):'')+(s.brief?(' · ▸'+s.brief.name):'')));
+      item.appendChild(meta);
+      if(s.reason) item.appendChild(el('div','it-reason', s.reason));
       item.onclick=function(){ select(s); };
       list.appendChild(item);
     });
@@ -170,12 +191,17 @@ window.__DIRS__ = ${dirsJson};
   function fork(){
     if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
     if(cur.vendor!=='claude'){ alert('In-browser split is Claude-only. Use the terminal launcher to fork a Codex session.'); return; }
+    // A fork diverges with a first turn — branch from here, then go a new way.
+    var inp=byId('input'); var text=inp.value.trim();
+    if(!text){ inp.focus(); inp.placeholder='type the message to branch with, then split…'; return; }
     var btn=byId('forkBtn'), label=btn.textContent; btn.disabled=true; btn.textContent='splitting…';
     var src=cur;
-    fetch('/chat/fork?session='+encodeURIComponent(src.sessionId)+'&cwd='+encodeURIComponent(src.cwd||''),{method:'POST'})
+    fetch('/chat/fork?session='+encodeURIComponent(src.sessionId)+'&cwd='+encodeURIComponent(src.cwd||''),
+      {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ alert(res.error||'fork failed'); return; }
+        inp.value='';
         var ns={vendor:'claude',sessionId:res.session,title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
-        SESS.unshift(ns); select(ns); openStream(res.session); })
+        SESS.unshift(ns); select(ns); addMsg('user',text); openStream(res.session); })
       .catch(function(e){ alert('fork failed: '+(e&&e.message?e.message:e)); })
       .finally(function(){ btn.textContent=label; if(cur) byId('forkBtn').disabled = !(cur.vendor==='claude'); });
   }
@@ -190,11 +216,13 @@ window.__DIRS__ = ${dirsJson};
         byId('np').value=''; byId('nmsg').textContent=''; byId('newbox').classList.remove('open'); });
   }
 
+  sortSessions();
   renderSidebar();
   byId('send').onclick=send;
   byId('forkBtn').onclick=fork;
   byId('nbtn').onclick=newSession;
   byId('newToggle').onclick=function(){ byId('newbox').classList.toggle('open'); };
+  byId('sort').onchange=function(){ sortSessions(); renderSidebar(); };
   byId('input').addEventListener('keydown',function(e){ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); send(); } });
 })();
 </script>
