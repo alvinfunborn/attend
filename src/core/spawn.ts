@@ -15,7 +15,7 @@ export function spawnCommand(brief: Brief, vendor: Vendor): string {
   const next = brief.next.trim();
   const parts: string[] = [];
   if (summary) parts.push(summary);
-  if (next) parts.push(`\\n\\nNext: ${next}`);
-  const body = quote(parts.join(""));
+  if (next) parts.push(`Next: ${next}`);
+  const body = quote(parts.join(" — "));
   return `cd "${brief.projectDir}"\n${vendor} "${body}"`;
 }
