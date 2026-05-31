@@ -9,13 +9,13 @@ defer_until:
 ---
 
 ## what
-一句话 + why (为什么这事值得做).
+One line + why (why this is worth doing).
 
 ## accept
-done 的判据 (不是 todo list).
+The bar for "done" (not a todo list).
 
 ## next
-现在卡在哪 / 下一步该试什么. 每次离开 session 前更新这一行.
+Where it's stuck / what to try next. Update this line before you leave the session.
 `;
 }
 

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
 import type { SessionSource } from "./index.js";
 
@@ -79,13 +80,18 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     vendor: "codex",
     sessionId: null,
     title: null,
+    lastPrompt: null,
     lastTurnChars: 0,
+    chars: 0,
     cwd: null,
     firstTs: null,
     lastTs: null,
     prompts: 0,
     actions: 0,
+    visits: 0,
   };
+  const gapMs = VISIT_GAP_MINUTES * 60_000;
+  let prevTs: number | null = null;
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let obj: RolloutLine;
@@ -99,6 +105,9 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     if (ts !== null) {
       if (session.firstTs === null) session.firstTs = ts;
       session.lastTs = ts;
+      // A fresh burst (first activity, or resumed after a long idle gap) = a visit.
+      if (prevTs === null || ts - prevTs > gapMs) session.visits += 1;
+      prevTs = ts;
     }
 
     // Normalize wrapped vs. bare records into (kind, item).
@@ -121,7 +130,11 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       const text = userPromptText(item);
       if (text !== null) {
         session.prompts += 1;
+        // Only user-prompt chars: Codex assistant output isn't reliably parsed,
+        // and we never fabricate vendor data (DESIGN invariant 3).
+        session.chars += text.length;
         if (session.title === null) session.title = snippet(text);
+        session.lastPrompt = snippet(text);
       } else if (item.type && ACTION_ITEM_TYPES.has(item.type)) {
         session.actions += 1;
       }
@@ -172,12 +185,15 @@ export class CodexSource implements SessionSource {
           vendor: "codex" as const,
           sessionId: null,
           title: null,
+          lastPrompt: null,
           lastTurnChars: 0,
+          chars: 0,
           cwd: null,
           firstTs: null,
           lastTs: null,
           prompts: 0,
           actions: 0,
+          visits: 0,
         };
       }
     });

@@ -16,6 +16,12 @@ export interface AttendConfig {
   /** Open the browser on start. */
   open: boolean;
   scanDepth: number;
+  /** task→daemon pairing file (which sessions are hidden analyzer daemons). */
+  daemonRegistry: string;
+  /** per-task daemon analysis cache (brief/priority/eta/reason). */
+  analysisCache: string;
+  /** per-session manual overrides (priority / etaMin set by clicking the tab). */
+  overrides: string;
 }
 
 /** CLI-derived inputs (already parsed by cli.ts). */
@@ -38,6 +44,7 @@ interface ConfigFile {
 
 function platformDefaults(): AttendConfig {
   const home = os.homedir();
+  const attendHome = path.join(home, ".attend");
   return {
     vaultRoots: [process.cwd()],
     claudeProjects: path.join(home, ".claude", "projects"),
@@ -47,6 +54,9 @@ function platformDefaults(): AttendConfig {
     host: "127.0.0.1",
     open: true,
     scanDepth: 8,
+    daemonRegistry: path.join(attendHome, "daemons.json"),
+    analysisCache: path.join(attendHome, "analysis.json"),
+    overrides: path.join(attendHome, "overrides.json"),
   };
 }
 
@@ -97,5 +107,8 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     host: cli.host ?? env.ATTEND_HOST ?? file.host ?? defaults.host,
     open: cli.noOpen ? false : defaults.open,
     scanDepth: defaults.scanDepth,
+    daemonRegistry: path.resolve(env.ATTEND_DAEMON_REGISTRY ?? defaults.daemonRegistry),
+    analysisCache: path.resolve(env.ATTEND_ANALYSIS_CACHE ?? defaults.analysisCache),
+    overrides: path.resolve(env.ATTEND_OVERRIDES ?? defaults.overrides),
   };
 }

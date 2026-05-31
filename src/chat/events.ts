@@ -7,7 +7,13 @@ export type UiEvent =
   | { kind: "tool_use"; id: string | null; name: string; input: unknown }
   | { kind: "tool_result"; id: string | null; text: string; isError: boolean }
   | { kind: "result"; ok: boolean; text?: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  /** engine→client only (not from the SDK): sent once right after a subscriber
+   *  catches up on the buffer, so a reconnecting page knows whether a turn is
+   *  still generating and can restore the "生成中…" state. `startedAt` is the
+   *  epoch-ms the in-flight turn began, so a (re)connecting page resumes the
+   *  elapsed timer from the true start instead of restarting it from 0. */
+  | { kind: "sync"; turnActive: boolean; startedAt?: number };
 
 interface ContentBlock {
   type?: string;

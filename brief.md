@@ -1,6 +1,6 @@
 ---
 status: active
-last_touch: 2026-05-30
+last_touch: 2026-05-31
 defer_until:
 ---
 
@@ -28,6 +28,12 @@ v1.1 (shipped 2026-05, 见 DESIGN.md "v1.1: trust + cross-vendor"):
 - [x] vitest 46 测试, biome + tsc 干净
 
 - [x] split = 手动 fork (无 LLM): detail 页每个 session 一个 "split ⑂" 按钮, 调 vendor fork CLI (`claude --resume <id> --fork-session` / `codex fork <id>`) 在新终端开 fork, 刷新后 split 出来 (v1.2; 显式覆盖 spawn=copy-only invariant)
+
+v2 (shipped, 见 DESIGN.md "v2"→"v2.2"):
+- [x] 浏览器内 chat console: Claude Agent SDK 驱动, 续聊/新建/fork 全在页内 (SSE 流式); Codex 仍走终端 launcher
+- [x] 信号跟着 session 走 (per-session pattern/priority/telemetry), `/briefs` 降为可选 rollup
+- [x] memory/session 分层 (2026-05-31): session 推断 brief/埋点/pattern(含回避); 整个 memory 推断优先级(记忆主导, pattern 仅微调)与 ETA(按对齐深度, 不再用 transcript 字数)
+- [x] brief 顶部内联显示 (name + 单行 what summary, 服务端截短), 无需点击
 
 deferred / killed (PM review):
 - [ ] LLM-based priority (env-flag) — 推迟到启发式在真实 brief 上证明不够再做

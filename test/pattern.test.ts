@@ -7,6 +7,7 @@ function tel(over: Partial<Telemetry>): Telemetry {
     sessions: 1,
     prompts: 0,
     actions: 0,
+    visits: 1,
     totalMinutes: 0,
     avgSessionMin: null,
     lastActionAgeDays: null,
@@ -21,12 +22,24 @@ describe("classifyPattern", () => {
     expect(classifyPattern(tel({ sessions: 0 }))).toBe("fresh");
   });
 
-  it("avoidance: many prompts, zero actions, sustained dwell", () => {
-    expect(classifyPattern(tel({ prompts: 5, actions: 0, totalMinutes: 90 }))).toBe("avoidance");
+  it("avoidance: many visits over a long span but the task isn't advancing (prompts ≤ visits)", () => {
+    expect(classifyPattern(tel({ visits: 4, totalMinutes: 600, prompts: 3 }))).toBe("avoidance");
   });
 
-  it("NOT avoidance: many prompts but a short output-less session (read/plan, not avoidance)", () => {
-    expect(classifyPattern(tel({ prompts: 6, actions: 0, totalMinutes: 12 }))).not.toBe(
+  it("NOT avoidance: a single long sitting (one visit) is not decision-avoidance", () => {
+    expect(classifyPattern(tel({ visits: 1, totalMinutes: 600, prompts: 1 }))).not.toBe(
+      "avoidance",
+    );
+  });
+
+  it("NOT avoidance: many revisits but the conversation keeps advancing (prompts > visits)", () => {
+    expect(
+      classifyPattern(tel({ visits: 4, totalMinutes: 600, prompts: 20, actions: 5 })),
+    ).not.toBe("avoidance");
+  });
+
+  it("ignores AI actions: zero actions alone never triggers avoidance without the visit pattern", () => {
+    expect(classifyPattern(tel({ visits: 1, prompts: 6, actions: 0, totalMinutes: 90 }))).not.toBe(
       "avoidance",
     );
   });

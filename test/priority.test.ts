@@ -23,6 +23,7 @@ function tel(over: Partial<Telemetry>): Telemetry {
     sessions: 1,
     prompts: 0,
     actions: 0,
+    visits: 1,
     totalMinutes: 0,
     avgSessionMin: null,
     lastActionAgeDays: null,
@@ -47,12 +48,13 @@ describe("evaluatePriority", () => {
     expect(r.reason).not.toContain("memory aligned");
   });
 
-  it("avoidance adds weight and a decision-needed reason with evidence", () => {
-    const r = evaluatePriority(brief({}), tel({ prompts: 6, actions: 0, totalMinutes: 90 }), null);
+  it("avoidance adds a small nudge and a decision-point reason with evidence", () => {
+    const r = evaluatePriority(brief({}), tel({ visits: 4, totalMinutes: 600, prompts: 3 }), null);
     expect(r.pattern).toBe("avoidance");
-    expect(r.score).toBe(4);
-    expect(r.reason).toContain("needs decision");
-    expect(r.reason).toContain("6 prompts");
+    // memory-led rank: pattern only nudges now (was 4 when pattern could dominate)
+    expect(r.score).toBe(1);
+    expect(r.reason).toContain("decision point");
+    expect(r.reason).toContain("4 visits");
   });
 
   it("done is pushed to the bottom", () => {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
 import type { SessionSource } from "./index.js";
 
@@ -55,7 +56,8 @@ function countActions(content: unknown): number {
   return n;
 }
 
-/** Total length of text blocks in an assistant turn (proxy for re-read effort). */
+/** Total length of text blocks in an assistant turn (was the ETA re-read proxy;
+ *  ETA is memory-derived since v2.2 — captured but currently unused). */
 function assistantText(content: unknown): number {
   if (typeof content === "string") return content.length;
   if (!Array.isArray(content)) return 0;
@@ -76,13 +78,18 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     vendor: "claude",
     sessionId: null,
     title: null,
+    lastPrompt: null,
     lastTurnChars: 0,
+    chars: 0,
     cwd: null,
     firstTs: null,
     lastTs: null,
     prompts: 0,
     actions: 0,
+    visits: 0,
   };
+  const gapMs = VISIT_GAP_MINUTES * 60_000;
+  let prevTs: number | null = null;
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let obj: JsonlEntry;
@@ -97,6 +104,9 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     if (ts !== null) {
       if (session.firstTs === null) session.firstTs = ts;
       session.lastTs = ts;
+      // A fresh burst (first activity, or resumed after a long idle gap) = a visit.
+      if (prevTs === null || ts - prevTs > gapMs) session.visits += 1;
+      prevTs = ts;
     }
     // Skip subagent sidechain turns — they are not the user's direct prompts
     // and their tool uses shouldn't inflate the brief's action count.
@@ -105,11 +115,14 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
       const text = userPromptText(obj.message?.content);
       if (text !== null) {
         session.prompts += 1;
+        session.chars += text.length;
         if (session.title === null) session.title = snippet(text);
+        session.lastPrompt = snippet(text); // keep overwriting → ends as the latest prompt
       }
     } else if (obj.type === "assistant") {
       session.actions += countActions(obj.message?.content);
       const txt = assistantText(obj.message?.content);
+      session.chars += txt;
       if (txt > 0) session.lastTurnChars = txt;
     }
   }
@@ -125,12 +138,15 @@ function parseSessionFile(file: string): RawSession {
       vendor: "claude",
       sessionId: null,
       title: null,
+      lastPrompt: null,
       lastTurnChars: 0,
+      chars: 0,
       cwd: null,
       firstTs: null,
       lastTs: null,
       prompts: 0,
       actions: 0,
+      visits: 0,
     };
   }
 }

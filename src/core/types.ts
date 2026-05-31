@@ -30,20 +30,31 @@ export interface RawSession {
   sessionId: string | null;
   /** first user prompt, used as a human-readable title; null if none */
   title: string | null;
-  /** char length of the last assistant turn — proxy for "how much to re-read" */
+  /** latest user prompt — the second subtitle ("where the conversation is now") */
+  lastPrompt: string | null;
+  /** char length of the last assistant turn. Was the ETA "how much to re-read"
+   *  proxy; ETA is memory-derived since v2.2, so this is parsed but unused for now. */
   lastTurnChars: number;
+  /** cumulative characters processed in this session (user prompts + assistant
+   *  text). Drives the console's throughput readout (字/小时). */
+  chars: number;
   cwd: string | null;
   /** epoch ms, or null when no timestamps were found */
   firstTs: number | null;
   lastTs: number | null;
   prompts: number;
   actions: number;
+  /** distinct engagement bursts — activity separated by a long idle gap counts as
+   *  a fresh "visit" (you left and came back). Drives the avoidance pattern. */
+  visits: number;
 }
 
 export interface Telemetry {
   sessions: number;
   prompts: number;
   actions: number;
+  /** distinct engagement bursts (see RawSession.visits) — "多次停留" for avoidance. */
+  visits: number;
   totalMinutes: number;
   avgSessionMin: number | null;
   lastActionAgeDays: number | null;
