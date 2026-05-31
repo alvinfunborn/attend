@@ -1958,3 +1958,393 @@ All green.
 - 现在:点 split → 空分支立即就绪 → 想什么时候打字都行,原会话不受影响。
 
 测试我更新过的 `/chat/fork` 仍需带消息那条仍然有效(materializeFork 会带上)。69 个测试、typecheck、lint 全过。唯一测试覆盖不到的是真实 SDK 那一跳——建议你用真实 `claude` 登录点一次 split、发一条消息,确认分支能正常流式回复。
+
+---
+
+_**User (2026-05-31 04:55:00Z)**_
+
+不过我觉得先打字再split也是很好的流程, 那两种都要, split放在send按钮的左侧, 这样能更好地提醒用户, 我打完字了发现这个其实最好split出来
+
+---
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:35Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:35Z)**_
+
+You want both flows, plus a split button sitting next to **send** so it's right there when you finish typing. Let me look at the footer markup and the event wiring.
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:36Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+126	  <div class="foot">
+127	    <textarea id="input" placeholder="message (Enter to send · Shift+Enter for newline)"></textarea>
+128	    <button class="send" id="send">send</button>
+129	  </div>
+130	</div>
+131	<script>
+132	window.__SESSIONS__ = ${sessJson};
+133	window.__DIRS__ = ${dirsJson};
+134	</script>
+135	<script>
+136	(function(){
+137	  var SESS = window.__SESSIONS__ || [];
+138	  var cur = null, es = null, assistantEl = null;
+139	  function byId(id){ return document.getElementById(id); }
+140	  function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
+141	  function scroll(){ var m=byId('msgs'); m.scrollTop=m.scrollHeight; }
+142	  function clearPh(){ var p=byId('ph'); if(p) p.remove(); }
+143	
+144	  function sortSessions(){
+145	    var mode=(byId('sort')||{}).value||'recent';
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:39Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+214	    // Open the branch immediately, empty and ready. The real fork is materialized
+215	    // lazily on the first message: the Agent SDK only mints the new session id once
+216	    // it has a turn to diverge on, so we defer the actual /chat/fork until send().
+217	    var src=cur;
+218	    var ns={vendor:'claude',sessionId:'pending-'+Date.now(),pendingFork:{parent:src.sessionId,cwd:src.cwd||''},title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
+219	    SESS.unshift(ns); select(ns); byId('input').focus();
+220	  }
+221	  // Turn a pending fork into a real session using its first message.
+222	  function materializeFork(branch,text){
+223	    var inp=byId('input'); addMsg('user',text); inp.value=''; assistantEl=null;
+224	    fetch('/chat/fork?session='+encodeURIComponent(branch.pendingFork.parent)+'&cwd='+encodeURIComponent(branch.pendingFork.cwd),
+225	      {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
+226	      .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ addMsg('error','⚠ '+(res.error||'fork failed')); return; }
+227	        branch.sessionId=res.session; branch.pendingFork=null;
+228	        if(cur===branch){ renderSidebar(); byId('forkBtn').disabled=false; }
+229	        openStream(res.session); })
+230	      .catch(function(e){ addMsg('error','⚠ fork failed: '+(e&&e.message?e.message:e)); });
+231	  }
+232	  function newSession(){
+233	    var dir=byId('ndfree').value.trim()||byId('ndsel').value; var text=byId('np').value.trim();
+234	    if(!dir){ byId('nmsg').textContent='pick or paste a directory'; return; }
+235	    if(!text){ byId('nmsg').textContent='type a first message'; return; }
+236	    fetch('/chat/new?cwd='+encodeURIComponent(dir),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
+237	      .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ byId('nmsg').textContent=res.error||'failed'; return; }
+238	        var ns={vendor:'claude',sessionId:res.session,title:text,cwd:dir,project:(dir.split(/[\\\\/]/).pop()),file:'',ageDays:0,prompts:1,actions:0,brief:null};
+239	        SESS.unshift(ns); select(ns); addMsg('user',text); openStream(res.session);
+240	        byId('np').value=''; byId('nmsg').textContent=''; byId('newbox').classList.remove('open'); });
+241	  }
+242	
+243	  sortSessions();
+244	  renderSidebar();
+245	  byId('send').onclick=send;
+246	  byId('forkBtn').onclick=fork;
+247	  byId('nbtn').onclick=newSession;
+248	  byId('newToggle').onclick=function(){ byId('newbox').classList.toggle('open'); };
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:43Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+209	  }
+210	  function fork(){
+211	    if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
+212	    if(cur.vendor!=='claude'){ alert('In-browser split is Claude-only. Use the terminal launcher to fork a Codex session.'); return; }
+213	    if(cur.pendingFork){ byId('input').focus(); return; }
+214	    // Open the branch immediately, empty and ready. The real fork is materialized
+215	    // lazily on the first message: the Agent SDK only mints the new session id once
+216	    // it has a turn to diverge on, so we defer the actual /chat/fork until send().
+217	    var src=cur;
+218	    var ns={vendor:'claude',sessionId:'pending-'+Date.now(),pendingFork:{parent:src.sessionId,cwd:src.cwd||''},title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
+219	    SESS.unshift(ns); select(ns); byId('input').focus();
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:47Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:47Z)**_
+
+Now I'll wire up both flows. First, update `fork()` to materialize immediately when there's typed text, and clear the pending hint in `materializeFork()`:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:57Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:55:59Z)**_
+
+Now add the footer split button to the left of send, and a small style for it:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:02Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:07Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:11Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:12Z)**_
+
+Now sync both split buttons' enabled state in `select()`, re-enable both in `materializeFork()`, and wire the footer button's click:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:12Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+166	    });
+167	  }
+168	  function addMsg(role, text){ clearPh(); var m=el('div','msg '+role); var b=el('div','bubble',text||''); m.appendChild(b); byId('msgs').appendChild(m); scroll(); return m; }
+169	  function addTool(name){ clearPh(); byId('msgs').appendChild(el('div','tool','⚙ '+name)); scroll(); }
+170	
+171	  function select(s){
+172	    cur=s; renderSidebar();
+173	    byId('h-title').textContent = s.title || s.project || 'session';
+174	    byId('h-sub').textContent = s.vendor+' · '+(s.cwd||'');
+175	    // prominent per-session signals: pattern · priority · reason · brief
+176	    var sig=byId('h-sig'); sig.innerHTML='';
+177	    if(s.pattern && s.pattern!=='unknown') sig.appendChild(el('span','pat '+s.pattern, s.pattern));
+178	    if(s.score!=null) sig.appendChild(el('span','score','priority '+s.score.toFixed(1)));
+179	    if(s.brief){ var ba=el('a','briefref','▸ '+s.brief.name); ba.href='/brief?path='+encodeURIComponent(s.brief.path); ba.target='_blank'; sig.appendChild(ba); }
+180	    if(s.reason && s.reason!=='no signal') sig.appendChild(el('span','reason', s.reason));
+181	    // in-browser fork only works for Claude sessions; Codex must use the terminal launcher
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:16Z)**_
+
+<tool-use data-tool-type="read" data-tool-name="Read"><details>
+<summary>Tool use: **Read**</summary>
+ `./\src\ui\console.ts`
+
+```text
+181	    // in-browser fork only works for Claude sessions; Codex must use the terminal launcher
+182	    var fb=byId('forkBtn');
+183	    fb.disabled = !(s && s.sessionId && s.vendor==='claude' && !s.pendingFork);
+184	    fb.title = fb.disabled
+185	      ? (s && s.vendor!=='claude' ? 'in-browser split is Claude-only — use the terminal launcher for Codex' : 'select a Claude session to split')
+186	      : 'branch this session into a fork';
+187	    byId('msgs').innerHTML=''; assistantEl=null;
+188	    if(es){ es.close(); es=null; }
+189	    if(s.pendingFork){
+190	      addMsg('assistant','(forked — type your next message to continue this branch in a new direction)');
+191	    } else if(s.file){
+192	      fetch('/chat/messages?file='+encodeURIComponent(s.file)).then(function(r){return r.json();}).then(function(msgs){
+193	        if(!msgs.length) addMsg('assistant','(no history yet)');
+194	        msgs.forEach(function(m){ if(m.text) addMsg(m.role, m.text); (m.tools||[]).forEach(function(t){ addTool(t); }); });
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:22Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:24Z)**_
+
+Now add the `setForkEnabled` helper, use it in `materializeFork`, and wire the footer button. Let me add the helper near `addMsg`:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:27Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:32Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:35Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:38Z)**_
+
+Now verify:
+
+_**Agent (claude-opus-4-8 2026-05-31 04:56:48Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Typecheck, lint, tests
+
+`npm run typecheck 2>&1 | tail -5 && echo "===LINT===" && npm run lint 2>&1 | tail -5 && echo "===TESTS===" && npx vitest run 2>&1 | tail -6`
+
+```text
+> attend@1.0.0 typecheck
+> tsc --noEmit
+
+===LINT===
+
+> attend@1.0.0 lint
+> biome check src test
+
+Checked 39 files in 17ms. No fixes applied.
+===TESTS===
+
+ Test Files ** **15 passed** (15)
+      Tests ** **69 passed** (69)
+   Start at ** 12:56:47
+   Duration ** 770ms (transform 528ms, setup 0ms, collect 1.54s, tests 156ms, environment 3ms, prepare 1.89s)**
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 04:57:03Z)**_
+
+All green. 现在两种 split 流程都有了。
+
+## 改动
+
+**两个 split 按钮,共用一个 `fork()` 逻辑:**
+- **顶部的 `split ⑂`**(标题栏右侧)— 原来就有,适合"还没打字就想分支"。
+- **新增 `split ⑂`(send 按钮左边)**— 紫色,正好在你打完字、手还在输入区时提醒你:"这条其实更适合 split 出去"。
+
+**`fork()` 现在按输入框状态分两种行为:**
+- **输入框有文字** → 立即用这段文字作为新分支的开场白,真正创建 fork(调 `/chat/fork` 带上消息),开始流式回复。原会话不动。→ 这就是"先打字再 split"。
+- **输入框是空的** → 立刻开一个空分支(已选中、可随时打字),真正的 fork 推迟到你发第一条消息时再 materialize。→ 这就是"先 split 再打字"。
+
+**配套细节:**
+- 两个按钮的可用状态由 `setForkEnabled()` 统一管理,跟着选中的会话联动(非 Claude / 挂起分支时都禁用,footer 那个禁用时是淡紫色)。
+- `materializeFork()` 在落地前清掉 msgs 面板,所以"先打字"那条路不会同时出现占位提示和你的消息;"先 split"那条路则会把提示替换成你的第一条消息。
+- footer 按钮带 tooltip:*"branch this session into a fork (uses your draft as the opening turn)"*。
+
+typecheck / lint / 69 个测试全过。真实 SDK 那一跳(发消息后分支是否正常流式回复)还是建议你用真实 `claude` 登录手测一次确认。
+
+---
+
+_**User (2026-05-31 05:06:02Z)**_
+
+顶部的split可以去掉了呀, 如果要split, 可以按下面的按钮; 然后按钮名直接改成fork吧
+
+---
+
+_**Agent (claude-opus-4-8 2026-05-31 05:06:22Z)**_
+
+_**Agent (claude-opus-4-8 2026-05-31 05:06:24Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 05:06:28Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 05:06:31Z)**_
+
+Now simplify `setForkEnabled` to the single button and drop the `forkBtn2` wiring:
+
+_**Agent (claude-opus-4-8 2026-05-31 05:06:34Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 05:06:37Z)**_
+
+<tool-use data-tool-type="write" data-tool-name="Edit"><details>
+<summary>Tool use: **Edit**</summary>
+
+```text
+The file D:\workspace\projects\attend\src\ui\console.ts has been updated successfully. (file state is current in your context — no need to Read it back)
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 05:07:37Z)**_
+
+<tool-use data-tool-type="shell" data-tool-name="Bash"><details>
+<summary>Tool use: **Bash**</summary>
+Typecheck, lint, tests
+
+`npm run typecheck 2>&1 | tail -3 && echo "===LINT===" && npm run lint 2>&1 | tail -3 && echo "===TESTS===" && npx vitest run 2>&1 | tail -5`
+
+```text
+> attend@1.0.0 typecheck
+> tsc --noEmit
+
+===LINT===
+> biome check src test
+
+Checked 39 files in 15ms. No fixes applied.
+===TESTS===
+ Test Files ** **15 passed** (15)
+      Tests ** **69 passed** (69)
+   Start at ** 13:07:35
+   Duration ** 1.50s (transform 7.70s, setup 0ms, collect 9.13s, tests 191ms, environment 2ms, prepare 4.73s)**
+```
+</details></tool-use>
+
+_**Agent (claude-opus-4-8 2026-05-31 05:07:42Z)**_
+
+搞定。
+
+- 删掉了标题栏右侧的 split 按钮。
+- send 左边的按钮改名为 **`fork ⑂`**(原来叫 split)。
+- 把双按钮逻辑收回成单按钮:`setForkEnabled` 只管 `forkBtn`,去掉了 `forkBtn2` 的 id 和事件绑定。
+
+行为不变 —— 输入框有字就用这段话作为分支开场白立刻 fork;空着就先开一个空分支、第一条消息时再落地。typecheck / lint / 69 测试全过。

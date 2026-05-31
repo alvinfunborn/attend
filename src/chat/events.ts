@@ -4,7 +4,8 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 export type UiEvent =
   | { kind: "session"; sessionId: string }
   | { kind: "assistant_text"; text: string }
-  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_use"; id: string | null; name: string; input: unknown }
+  | { kind: "tool_result"; id: string | null; text: string; isError: boolean }
   | { kind: "result"; ok: boolean; text?: string }
   | { kind: "error"; message: string };
 
@@ -13,6 +14,21 @@ interface ContentBlock {
   text?: string;
   name?: string;
   input?: unknown;
+  id?: string;
+  tool_use_id?: string;
+  content?: unknown;
+  is_error?: boolean;
+}
+
+/** Flatten a tool_result's content (string, or array of text blocks) into text. */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as ContentBlock[])
+      .map((b) => (typeof b === "string" ? b : b?.type === "text" ? (b.text ?? "") : ""))
+      .join("");
+  }
+  return "";
 }
 
 /**
@@ -36,10 +52,27 @@ export function toUiEvents(msg: SDKMessage): UiEvent[] {
     for (const b of blocks) {
       if (b.type === "text" && b.text) out.push({ kind: "assistant_text", text: b.text });
       else if (b.type === "tool_use" && b.name) {
-        out.push({ kind: "tool_use", name: b.name, input: b.input });
+        out.push({ kind: "tool_use", id: b.id ?? null, name: b.name, input: b.input });
       }
     }
     if (msg.error) out.push({ kind: "error", message: msg.error });
+  }
+
+  // Tool results come back as user messages carrying tool_result blocks.
+  if (msg.type === "user") {
+    const content = (msg.message as { content?: unknown })?.content;
+    if (Array.isArray(content)) {
+      for (const b of content as ContentBlock[]) {
+        if (b?.type === "tool_result") {
+          out.push({
+            kind: "tool_result",
+            id: b.tool_use_id ?? null,
+            text: resultText(b.content),
+            isError: b.is_error === true,
+          });
+        }
+      }
+    }
   }
 
   if (msg.type === "result") {

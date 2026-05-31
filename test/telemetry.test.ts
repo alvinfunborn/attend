@@ -25,6 +25,7 @@ function session(cwd: string | null, extra: Partial<RawSession> = {}): RawSessio
     vendor: "claude",
     sessionId: null,
     title: null,
+    lastTurnChars: 0,
     cwd,
     firstTs: null,
     lastTs: null,

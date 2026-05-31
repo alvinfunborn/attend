@@ -122,9 +122,25 @@ function toSessionViews(
         pattern,
         score,
         reason,
+        etaMin: estimateEtaMin(
+          s.lastTurnChars,
+          s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null,
+        ),
         brief: r ? { name: r.brief.name, path: r.brief.path } : null,
       };
     });
+}
+
+/**
+ * Estimate minutes to re-engage a session: re-read its last turn + re-orient
+ * after being away. This is a property of the *session's transcript* (how much
+ * to re-read + how stale), not the memory corpus — memory drives *priority*
+ * (does this matter), the transcript drives *cost* (how long to handle it).
+ */
+function estimateEtaMin(lastTurnChars: number, ageDays: number | null): number {
+  const readMin = lastTurnChars / 500; // ~500 chars/min to re-read dense text
+  const reorientMin = Math.min(ageDays ?? 0, 14) * 0.7; // re-warming grows with staleness, capped
+  return Math.max(1, Math.round(1 + readMin + reorientMin));
 }
 
 export function createApp(

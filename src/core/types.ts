@@ -30,6 +30,8 @@ export interface RawSession {
   sessionId: string | null;
   /** first user prompt, used as a human-readable title; null if none */
   title: string | null;
+  /** char length of the last assistant turn — proxy for "how much to re-read" */
+  lastTurnChars: number;
   cwd: string | null;
   /** epoch ms, or null when no timestamps were found */
   firstTs: number | null;

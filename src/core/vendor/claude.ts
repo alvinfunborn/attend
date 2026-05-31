@@ -55,6 +55,20 @@ function countActions(content: unknown): number {
   return n;
 }
 
+/** Total length of text blocks in an assistant turn (proxy for re-read effort). */
+function assistantText(content: unknown): number {
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  let n = 0;
+  for (const c of content) {
+    if (c && typeof c === "object") {
+      const block = c as { type?: string; text?: string };
+      if (block.type === "text" && block.text) n += block.text.length;
+    }
+  }
+  return n;
+}
+
 /** Parse one Claude transcript's text into a normalized session (pure, testable). */
 export function parseClaudeTranscript(file: string, raw: string): RawSession {
   const session: RawSession = {
@@ -62,6 +76,7 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     vendor: "claude",
     sessionId: null,
     title: null,
+    lastTurnChars: 0,
     cwd: null,
     firstTs: null,
     lastTs: null,
@@ -94,6 +109,8 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
       }
     } else if (obj.type === "assistant") {
       session.actions += countActions(obj.message?.content);
+      const txt = assistantText(obj.message?.content);
+      if (txt > 0) session.lastTurnChars = txt;
     }
   }
   return session;
@@ -108,6 +125,7 @@ function parseSessionFile(file: string): RawSession {
       vendor: "claude",
       sessionId: null,
       title: null,
+      lastTurnChars: 0,
       cwd: null,
       firstTs: null,
       lastTs: null,

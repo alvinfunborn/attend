@@ -19,6 +19,8 @@ export interface SessionView {
   pattern: Pattern;
   score: number;
   reason: string;
+  /** estimated minutes to re-engage (re-read last turn + re-orient) */
+  etaMin: number;
   /** optional task this session belongs to, if a brief.md matched its dir */
   brief: SessionBriefRef | null;
 }
@@ -52,6 +54,7 @@ const STYLE = `
   .item:hover { background: #f1f5f9; }
   .item.active { background: #eef2ff; border-left: 3px solid #6366f1; padding-left: calc(0.9rem - 3px); }
   .it-title { font-size: 0.84rem; font-weight: 600; color: #111827; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .it-firstline { font-size: 0.72rem; color: #6b7280; margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .it-meta { font-size: 0.7rem; color: #6b7280; margin-top: 0.2rem; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 0.35rem; }
   .pat { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.02rem 0.3rem; border-radius: 3px; background: #e5e7eb; color: #374151; flex-shrink: 0; }
   .pat.avoidance { background: #fed7aa; color: #9a3412; }
@@ -75,6 +78,7 @@ const STYLE = `
   .sig .score { font-weight: 600; color: #374151; }
   .sig .reason { font-style: italic; }
   .sig .briefref { color: #2563eb; text-decoration: none; background: #eff6ff; padding: 0.05rem 0.4rem; border-radius: 3px; }
+  .sig .eta { color: #047857; background: #ecfdf5; padding: 0.05rem 0.4rem; border-radius: 3px; }
   #msgs { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
   .msg { display: flex; }
   .msg.user { justify-content: flex-end; }
@@ -83,10 +87,23 @@ const STYLE = `
   .msg.assistant .bubble { background: #f3f4f6; color: #111827; border-bottom-left-radius: 3px; }
   .msg.error .bubble { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
   .tool { align-self: flex-start; font-family: ui-monospace, monospace; font-size: 0.72rem; color: #5b21b6; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 6px; padding: 0.2rem 0.5rem; }
+  .toolc { align-self: flex-start; max-width: 88%; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.74rem; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 6px; }
+  .toolc > summary { cursor: pointer; padding: 0.28rem 0.6rem; color: #5b21b6; list-style: none; user-select: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .toolc > summary::-webkit-details-marker { display: none; }
+  .toolc > summary::before { content: "▸ "; color: #a78bda; }
+  .toolc[open] > summary::before { content: "▾ "; }
+  .toolc[open] > summary { border-bottom: 1px solid #ede9fe; }
+  .toolc pre { margin: 0; padding: 0.45rem 0.6rem; white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto; }
+  .toolc .tool-in { color: #4b5563; }
+  .toolc .tool-out { color: #111827; background: #fbfbfe; border-top: 1px solid #ede9fe; }
+  .toolc .tool-out.err { color: #991b1b; background: #fef2f2; }
   .placeholder { margin: auto; color: #9ca3af; text-align: center; font-size: 0.9rem; }
   .foot { border-top: 1px solid #e5e7eb; padding: 0.6rem 1rem; display: flex; gap: 0.5rem; }
   .foot textarea { flex: 1; resize: none; height: 2.4rem; padding: 0.5rem 0.6rem; border: 1px solid #d1d5db; border-radius: 6px; font: inherit; font-size: 0.88rem; }
   .foot button.send { background: #1f2937; color: white; border-color: #1f2937; padding: 0 1rem; }
+  .foot button.splitbtn { color: #5b21b6; border-color: #ddd6fe; background: #f5f3ff; padding: 0 0.8rem; }
+  .foot button.splitbtn:hover:not(:disabled) { background: #ede9fe; }
+  .foot button.splitbtn:disabled { color: #c4b5fd; background: #faf5ff; cursor: default; }
   .pill { font-size: 0.66rem; padding: 0.05rem 0.4rem; border-radius: 3px; background: #ede9fe; color: #5b21b6; }
 `;
 
@@ -105,8 +122,7 @@ export function renderConsole(v: ConsoleView): string {
   <h1>attend <span class="accent">${v.sessions.length} sessions · ${v.briefCount} briefs</span></h1>
   <div class="topnav">
     <button id="newToggle">+ new</button>
-    <select id="sort" class="sortsel" title="sort sessions"><option value="recent">recent</option><option value="priority">needs you</option></select>
-    <a href="/briefs">tasks ▸</a>
+    <a href="/briefs" title="your brief.md tasks, ranked by what needs attention">tasks ▸</a>
   </div>
   <div class="newbox" id="newbox">
     <select id="ndsel"><option value="">— pick a project dir —</option>${dirOptions}</select>
@@ -120,11 +136,11 @@ export function renderConsole(v: ConsoleView): string {
 <div class="main">
   <div class="head">
     <div><div class="t" id="h-title">attend</div><div class="s" id="h-sub">select a session, or + new</div><div class="sig" id="h-sig"></div></div>
-    <button id="forkBtn" title="branch this session into a fork" disabled>split ⑂</button>
   </div>
   <div id="msgs"><div class="placeholder" id="ph">Pick a session on the left to see its chat, then type below to continue it — all in the browser.</div></div>
   <div class="foot">
     <textarea id="input" placeholder="message (Enter to send · Shift+Enter for newline)"></textarea>
+    <button class="splitbtn" id="forkBtn" title="branch this session into a fork (uses your draft as the opening turn)" disabled>fork ⑂</button>
     <button class="send" id="send">send</button>
   </div>
 </div>
@@ -151,35 +167,68 @@ window.__DIRS__ = ${dirsJson};
     SESS.forEach(function(s){
       var item=el('div','item'+(cur&&cur.sessionId===s.sessionId?' active':''));
       item.title = s.reason || '';
-      item.appendChild(el('div','it-title', s.title || '(no prompt)'));
+      // title = brief (easy to locate by task); fall back to first prompt
+      item.appendChild(el('div','it-title', (s.brief?s.brief.name:(s.title||'(no prompt)'))));
+      // keep the session's first sentence visible as a subtitle when a brief took the title
+      if(s.brief && s.title) item.appendChild(el('div','it-firstline', s.title));
       var meta=el('div','it-meta');
       if(s.pattern && s.pattern!=='unknown') meta.appendChild(el('span','pat '+s.pattern, s.pattern));
-      meta.appendChild(el('span',null, (s.score!=null?Number(s.score).toFixed(1)+' · ':'')+s.vendor+' · '+s.project+' · '+s.prompts+'p/'+s.actions+'a'+(s.ageDays!=null?(' · '+s.ageDays+'d'):'')+(s.brief?(' · ▸'+s.brief.name):'')));
+      meta.appendChild(el('span',null, (s.score!=null?Number(s.score).toFixed(1)+' · ':'')+s.vendor+' · '+s.project+' · '+s.prompts+'p/'+s.actions+'a'+(s.ageDays!=null?(' · '+s.ageDays+'d'):'')));
       item.appendChild(meta);
       if(s.reason) item.appendChild(el('div','it-reason', s.reason));
       item.onclick=function(){ select(s); };
       list.appendChild(item);
     });
   }
+  function setForkEnabled(on, title){
+    var b=byId('forkBtn'); if(!b) return; b.disabled=!on; if(title!=null) b.title=title;
+  }
   function addMsg(role, text){ clearPh(); var m=el('div','msg '+role); var b=el('div','bubble',text||''); m.appendChild(b); byId('msgs').appendChild(m); scroll(); return m; }
-  function addTool(name){ clearPh(); byId('msgs').appendChild(el('div','tool','⚙ '+name)); scroll(); }
+  var toolEls = {}; // tool_use id -> details element (to attach the result later)
+  function toolPreview(name, input){
+    try {
+      if(!input || typeof input!=='object') return '';
+      if(name==='Bash' && input.command) return String(input.command).split('\\n')[0].slice(0,90);
+      if(input.file_path) return String(input.file_path);
+      if(input.path) return String(input.path);
+      if(input.pattern) return String(input.pattern);
+      var k=Object.keys(input)[0]; return k?(k+': '+String(input[k]).slice(0,70)):'';
+    } catch(e){ return ''; }
+  }
+  function fmt(v){ try { return typeof v==='string'?v:JSON.stringify(v,null,2); } catch(e){ return String(v); } }
+  // tc = { name, input, result?, isError? }
+  function addTool(tc){
+    clearPh();
+    var d=el('details','toolc');
+    var prev=toolPreview(tc.name, tc.input);
+    d.appendChild(el('summary',null,'⚙ '+tc.name+(prev?(' — '+prev):'')));
+    if(tc.input!=null && !(typeof tc.input==='object' && Object.keys(tc.input).length===0)){
+      d.appendChild(el('pre','tool-in', fmt(tc.input)));
+    }
+    var out=el('pre','tool-out'+(tc.isError?' err':''));
+    if(tc.result!=null && tc.result!==''){ out.textContent=String(tc.result).slice(0,8000); } else { out.style.display='none'; }
+    d.appendChild(out);
+    byId('msgs').appendChild(d); scroll();
+    return d;
+  }
 
   function select(s){
     cur=s; renderSidebar();
-    byId('h-title').textContent = s.title || s.project || 'session';
-    byId('h-sub').textContent = s.vendor+' · '+(s.cwd||'');
-    // prominent per-session signals: pattern · priority · reason · brief
+    // top shows BOTH: brief as the title (locate by task), first sentence as subtitle
+    byId('h-title').textContent = s.brief ? s.brief.name : (s.title || s.project || 'session');
+    byId('h-sub').textContent = s.title || (s.vendor+' · '+(s.cwd||''));
+    // signals inline (no click needed): brief · pattern · priority · reason
     var sig=byId('h-sig'); sig.innerHTML='';
+    sig.appendChild(el('span','briefref', s.brief ? ('task: '+s.brief.name) : 'no task brief'));
     if(s.pattern && s.pattern!=='unknown') sig.appendChild(el('span','pat '+s.pattern, s.pattern));
     if(s.score!=null) sig.appendChild(el('span','score','priority '+s.score.toFixed(1)));
-    if(s.brief){ var ba=el('a','briefref','▸ '+s.brief.name); ba.href='/brief?path='+encodeURIComponent(s.brief.path); ba.target='_blank'; sig.appendChild(ba); }
+    if(s.etaMin!=null) sig.appendChild(el('span','eta','~'+s.etaMin+'m to handle'));
     if(s.reason && s.reason!=='no signal') sig.appendChild(el('span','reason', s.reason));
     // in-browser fork only works for Claude sessions; Codex must use the terminal launcher
-    var fb=byId('forkBtn');
-    fb.disabled = !(s && s.sessionId && s.vendor==='claude' && !s.pendingFork);
-    fb.title = fb.disabled
-      ? (s && s.vendor!=='claude' ? 'in-browser split is Claude-only — use the terminal launcher for Codex' : 'select a Claude session to split')
-      : 'branch this session into a fork';
+    var canFork = !!(s && s.sessionId && s.vendor==='claude' && !s.pendingFork);
+    var ftitle = canFork ? 'branch this session into a fork'
+      : (s && s.vendor!=='claude' ? 'in-browser split is Claude-only — use the terminal launcher for Codex' : 'select a Claude session to split');
+    setForkEnabled(canFork, ftitle);
     byId('msgs').innerHTML=''; assistantEl=null;
     if(es){ es.close(); es=null; }
     if(s.pendingFork){
@@ -194,7 +243,11 @@ window.__DIRS__ = ${dirsJson};
   function openStream(id){ if(es) es.close(); es=new EventSource('/chat/stream?session='+encodeURIComponent(id)); es.onmessage=function(e){ onEvent(JSON.parse(e.data)); }; }
   function onEvent(ev){
     if(ev.kind==='assistant_text'){ if(!assistantEl) assistantEl=addMsg('assistant',''); var b=assistantEl.querySelector('.bubble'); b.textContent+=ev.text; scroll(); }
-    else if(ev.kind==='tool_use'){ assistantEl=null; addTool(ev.name); }
+    else if(ev.kind==='tool_use'){ assistantEl=null; var d=addTool({name:ev.name,input:ev.input}); if(ev.id) toolEls[ev.id]=d; }
+    else if(ev.kind==='tool_result'){ assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
+      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; }
+      else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
+      scroll(); }
     else if(ev.kind==='result'){ assistantEl=null; }
     else if(ev.kind==='error'){ assistantEl=null; addMsg('error','⚠ '+ev.message); }
   }
@@ -214,18 +267,21 @@ window.__DIRS__ = ${dirsJson};
     // Open the branch immediately, empty and ready. The real fork is materialized
     // lazily on the first message: the Agent SDK only mints the new session id once
     // it has a turn to diverge on, so we defer the actual /chat/fork until send().
-    var src=cur;
-    var ns={vendor:'claude',sessionId:'pending-'+Date.now(),pendingFork:{parent:src.sessionId,cwd:src.cwd||''},title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
-    SESS.unshift(ns); select(ns); byId('input').focus();
+    // If you'd already typed something, that becomes the branch's opening turn —
+    // "I typed this, but it's better off as a split" — and we materialize now.
+    var inp=byId('input'); var text=inp.value.trim();
+    var ns={vendor:'claude',sessionId:'pending-'+Date.now(),pendingFork:{parent:cur.sessionId,cwd:cur.cwd||''},title:'(fork) '+(cur.title||''),cwd:cur.cwd,project:cur.project,file:'',ageDays:0,prompts:0,actions:0,brief:cur.brief};
+    SESS.unshift(ns); select(ns);
+    if(text){ materializeFork(ns,text); } else { inp.focus(); }
   }
   // Turn a pending fork into a real session using its first message.
   function materializeFork(branch,text){
-    var inp=byId('input'); addMsg('user',text); inp.value=''; assistantEl=null;
+    var inp=byId('input'); byId('msgs').innerHTML=''; addMsg('user',text); inp.value=''; assistantEl=null;
     fetch('/chat/fork?session='+encodeURIComponent(branch.pendingFork.parent)+'&cwd='+encodeURIComponent(branch.pendingFork.cwd),
       {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ addMsg('error','⚠ '+(res.error||'fork failed')); return; }
         branch.sessionId=res.session; branch.pendingFork=null;
-        if(cur===branch){ renderSidebar(); byId('forkBtn').disabled=false; }
+        if(cur===branch){ renderSidebar(); setForkEnabled(true,'branch this session into a fork'); }
         openStream(res.session); })
       .catch(function(e){ addMsg('error','⚠ fork failed: '+(e&&e.message?e.message:e)); });
   }
@@ -246,7 +302,6 @@ window.__DIRS__ = ${dirsJson};
   byId('forkBtn').onclick=fork;
   byId('nbtn').onclick=newSession;
   byId('newToggle').onclick=function(){ byId('newbox').classList.toggle('open'); };
-  byId('sort').onchange=function(){ sortSessions(); renderSidebar(); };
   byId('input').addEventListener('keydown',function(e){ if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); send(); } });
 })();
 </script>

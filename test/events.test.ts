@@ -26,7 +26,7 @@ describe("toUiEvents", () => {
     );
     expect(evs).toEqual([
       { kind: "assistant_text", text: "hello" },
-      { kind: "tool_use", name: "Edit", input: { path: "a" } },
+      { kind: "tool_use", id: null, name: "Edit", input: { path: "a" } },
     ]);
   });
 
