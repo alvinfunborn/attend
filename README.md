@@ -8,10 +8,12 @@ The one place that tells a solo dev **which task to re-engage next** — across 
 
 ## What it does
 
-**Main view (`/`) — your sessions, aggregated.** Lists every Claude Code + Codex chat (newest first), each with its title (first prompt), project, prompts/actions, age, and the brief + priority it belongs to. Act on any of them in place:
-- **continue ▸** — resume the session in a new terminal
-- **split ⑂** — fork it into a branch
-- **new session ▸** — start a fresh session: pick the vendor + a project directory (dropdown of known dirs, or paste an absolute path) + an optional first prompt
+**Main view (`/`) — an in-browser chat console.** A slock-style two-pane console: a left sidebar of every Claude session (newest first; title, project, prompts/actions, age, and the brief + priority it belongs to), and a chat panel where the conversation streams **in the page** — you never drop to a terminal:
+- click a session → see its history, then type to **continue** it (streamed reply + tool-use)
+- **split ⑂** — fork the session into a new branch
+- **+ new** — start a fresh session: pick a project directory (dropdown of known dirs, or paste an absolute path) + a first message
+
+Chat is driven by the **Claude Agent SDK** using your existing Claude login (no API key). Codex sessions still appear and remain available via the terminal launcher (`/launch`) until Codex ships a streaming SDK.
 
 **Briefs view (`/briefs`) — what needs you next.** The priority feed:
 - Scans your vaults for `brief.md` files (one per task)
@@ -165,7 +167,6 @@ npm run build        # tsup → dist/cli.js
 
 ## What this is NOT (deliberately)
 
-- Not a chat UI — sessions stay in Claude Code / Codex
 - Not push notifications — pull, manual refresh
 - Not a TODO app — briefs are task-shaped, not item-shaped
 - Not multi-user — single-person attention router

@@ -32,14 +32,24 @@ The pipeline, all faithfully ported from `legacy/daemon.py`:
 3. **`src/core/vendor/`** — the extension seam. `SessionSource` interface (`index.ts`) with `ClaudeSource` (JSONL parse) and `CodexSource` (deliberate empty stub — Codex schema unknown; never fabricate data). `collectSessions()` unions all sources. **A new vendor = one new `SessionSource` impl; nothing downstream changes.**
 4. **`src/core/telemetry.ts`** — `matchSessions()` ties sessions to a brief by **bidirectional cwd containment** (normalizes `\` vs `/`); `telemetryForBrief()` aggregates sessions/prompts/actions/dwell/ages.
 5. **`src/core/pattern.ts`** / **`priority.ts`** — classifier + `score + composed reason`. `memory.ts` provides keywords: per-project Claude memory (`~/.claude/projects/*/memory/MEMORY.md`), auto-discovered and unioned — same memory model as Claude Code.
-6. **`src/server.ts`** (Hono) renders feed (`/`) + detail (`/brief?path=`) as server-rendered HTML from `src/ui/`. Sessions cached 30s, memory keywords 60s, to keep refresh cheap.
+6. **`src/server.ts`** (Hono) hosts the views + chat endpoints. Sessions cached 30s, memory model 60s.
 
-`src/core/` has **no server dependency** — that's what makes it unit-testable and is the key structural invariant. Keep vendor-specific logic confined to `src/core/vendor/` and spawn-command emission (`core/spawn.ts`); everything else is vendor-neutral.
+`src/core/` has **no server dependency** — that's what makes it unit-testable and is the key structural invariant. Keep vendor-specific logic confined to `src/core/vendor/`; everything else is vendor-neutral.
+
+## v2: in-browser chat console (current shape)
+
+The main view (`/`) is now a **slock-style chat console**, not a static list — the design pivoted through several user redirects (see DESIGN.md "v1.1"→"v2"). Read DESIGN.md for the full arc; the current shape:
+
+- **`src/chat/engine.ts`** — `ChatEngine` drives Claude via the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`, existing login, no API key). Live runs stream `query()` output; `events.ts` normalizes to a small `UiEvent` protocol; `transcript.ts` reads a session's JSONL for history. The `query` fn is injectable (tests use a fake — never hit the network in tests).
+- **`src/ui/console.ts`** — the console SPA (sidebar of all sessions + streamed chat panel + input). `src/ui/feed.ts`/`detail.ts` are the brief-priority views at `/briefs` and `/brief`.
+- **Endpoints:** `/` console · `/chat/stream` (SSE) · `/chat/send|new|fork` · `/chat/messages` · `/briefs` · `/brief` · `/launch` (terminal launcher, now Codex fallback only).
+- **Codex** has no streaming SDK → in-browser chat is **Claude-only**; Codex sessions still list + use the terminal launcher.
+- Live agent permission mode is fixed (`acceptEdits`) in v2; per-tool in-UI approval is a fast-follow.
 
 ## Design invariants (do not violate without explicit cause; see DESIGN.md)
 
 1. **brief = state, session = cache** — nothing the dashboard knows may live only in a session.
-2. **pull, not push** — no notifications/SSE/websockets.
+2. **pull, not push** — no notifications. (v2 exception: chat uses SSE to stream the live conversation; that's transport for an action the user initiated, not unsolicited push.)
 3. **descriptive telemetry, never judgmental** — pattern labels and reason strings must be observation-form, never second-person pressure. Steel 2007. Making output more "motivating" is a regression. The Codex stub returning nothing (vs. fake data) is part of this.
 4. **vendor-neutral data, vendor-locked execution** — keep vendor logic inside `core/vendor/` and `core/spawn.ts`.
 5. **single polling surface** — one localhost page. Zero-install via `npx`, browser is the UI; do NOT turn this into a downloadable native app (that's why Tauri was rejected — see DESIGN.md).

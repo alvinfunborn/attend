@@ -218,3 +218,14 @@ What changed:
 What is retained: briefs, priority, telemetry, the descriptive-not-judgmental constraint, cross-vendor neutrality, and the single localhost surface all still hold — sessions are now the lens, briefs the attached signal. The launcher is the v1.2 invariant override, generalized: attend now actively starts/continues/forks sessions (still one explicit click each; no auto-spawn of a queue).
 
 **Tension to keep in mind (PM-B):** a sessions-list + launcher overlaps Claude Code's Agent View / Conductor. attend's remaining differentiation is the *union* — cross-vendor + behavioral brief/priority attached to each session — not the session list itself.
+
+## v2: in-browser chat console (2026-05)
+
+The user's final clarification: **the chat itself runs in the page — continue / new / fork all in-browser, never a terminal** (slock.ai-style). This fully reverses the original "not a chat UI / sessions live in the CLI" stance. attend now *hosts* the agent.
+
+- **Backend:** the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) drives Claude headlessly using the existing Claude login (no API key); `query()` streams messages, with built-in `resume`/`forkSession`. Verified end-to-end (init→assistant→result streamed). `src/chat/engine.ts` tracks live runs (streaming-input queue + buffered fan-out); `src/chat/events.ts` normalizes the SDK's large message union into a small UiEvent protocol.
+- **Transport (localhost):** `GET /chat/stream` (SSE, replays the run's buffer then streams live), `POST /chat/send` (resume + feed a turn), `/chat/new` (dir + first message), `/chat/fork` (split). `GET /chat/messages` reads a session's JSONL for history.
+- **UI:** `src/ui/console.ts` — slock-style sidebar (all sessions) + chat panel (streamed user/assistant/tool-use bubbles) + input; vanilla JS over `EventSource` + `fetch`.
+- **Codex** has no streaming SDK yet (`codex exec` is one-shot), so in-browser chat is **Claude-only**; Codex sessions stay listed and fall back to the terminal launcher.
+
+This is the largest invariant reversal; what still holds: cross-vendor session aggregation, brief/priority attached to each session, single localhost surface, descriptive telemetry. Permissions for the live agent use a fixed mode (`acceptEdits`) in v2; per-tool in-UI approval is a fast-follow. Cost: after 2026-06-15, Agent-SDK usage on subscription plans draws a separate monthly Agent SDK credit.

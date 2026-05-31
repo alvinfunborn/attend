@@ -17,7 +17,11 @@ interface Call {
 const fakeQuery = (() => {
   async function* gen() {
     yield { type: "system", subtype: "init", session_id: "fake-1" };
-    yield { type: "assistant", message: { content: [{ type: "text", text: "hi" }] }, session_id: "fake-1" };
+    yield {
+      type: "assistant",
+      message: { content: [{ type: "text", text: "hi" }] },
+      session_id: "fake-1",
+    };
     yield { type: "result", subtype: "success", result: "hi", session_id: "fake-1" };
   }
   return gen();
@@ -124,7 +128,9 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
 
   it("send requires session + existing dir + non-empty text", async () => {
     const { app } = appWithSpy();
-    expect((await app.request(`/chat/send?cwd=${tmp}`, { method: "POST", body: "{}" })).status).toBe(400);
+    expect(
+      (await app.request(`/chat/send?cwd=${tmp}`, { method: "POST", body: "{}" })).status,
+    ).toBe(400);
     const res = await app.request(`/chat/send?session=abc&cwd=${tmp}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
