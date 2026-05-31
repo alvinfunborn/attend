@@ -73,6 +73,8 @@ const STYLE = `
   #h-sig .score { font-weight: 600; color: #374151; }
   #h-sig .brieftag { padding: 0.05rem 0.4rem; border-radius: 3px; background: #eef2ff; color: #3730a3; text-decoration: none; }
   #h-sig .brieftag:hover { background: #e0e7ff; }
+  #h-sig .eta { color: #b45309; background: #fffbeb; padding: 0.05rem 0.4rem; border-radius: 3px; }
+  #h-sig .briefref { color: #3730a3; background: #eef2ff; padding: 0.05rem 0.4rem; border-radius: 3px; }
   #h-sig .sig-reason { color: #9ca3af; font-style: italic; }
   .sig { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-top: 0.3rem; font-size: 0.72rem; color: #6b7280; }
   .sig .score { font-weight: 600; color: #374151; }
@@ -85,6 +87,9 @@ const STYLE = `
   .msg .bubble { max-width: 76%; padding: 0.5rem 0.75rem; border-radius: 10px; font-size: 0.88rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
   .msg.user .bubble { background: #4f46e5; color: white; border-bottom-right-radius: 3px; }
   .msg.assistant .bubble { background: #f3f4f6; color: #111827; border-bottom-left-radius: 3px; }
+  .msg.thinking .bubble { color: #6b7280; font-style: italic; background: #f9fafb; border: 1px dashed #e5e7eb; }
+  .msg.thinking .bubble::after { content: ""; display: inline-block; width: 0.5em; height: 0.5em; margin-left: 0.4em; border-radius: 50%; background: #9ca3af; animation: gpulse 1s ease-in-out infinite; }
+  @keyframes gpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
   .msg.error .bubble { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
   .tool { align-self: flex-start; font-family: ui-monospace, monospace; font-size: 0.72rem; color: #5b21b6; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 6px; padding: 0.2rem 0.5rem; }
   .toolc { align-self: flex-start; max-width: 88%; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.74rem; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 6px; }
@@ -152,10 +157,32 @@ window.__DIRS__ = ${dirsJson};
 (function(){
   var SESS = window.__SESSIONS__ || [];
   var cur = null, es = null, assistantEl = null;
+  var genEl = null, genTimer = null, genStart = 0, turnActive = false;
   function byId(id){ return document.getElementById(id); }
   function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
   function scroll(){ var m=byId('msgs'); m.scrollTop=m.scrollHeight; }
   function clearPh(){ var p=byId('ph'); if(p) p.remove(); }
+
+  // A persistent "生成中…" indicator pinned to the BOTTOM of the chat (the append
+  // point) for the whole turn — before the first token, between text chunks, and
+  // through tool calls. addMsg/addTool call keepGenLast() so it always trails the
+  // stream instead of sitting at the top.
+  function startGen(){
+    clearGen();
+    genEl=el('div','msg assistant thinking'); genEl.appendChild(el('div','bubble',''));
+    genStart=Date.now();
+    var tick=function(){ var s=Math.round((Date.now()-genStart)/1000); var b=genEl&&genEl.querySelector('.bubble');
+      if(b) b.textContent = s<20 ? ('生成中… '+s+'s') : ('生成中… '+s+'s（仍在等待回复）'); };
+    tick(); genTimer=setInterval(tick,1000);
+    clearPh(); byId('msgs').appendChild(genEl); scroll();
+  }
+  function keepGenLast(){ if(genEl) byId('msgs').appendChild(genEl); }
+  function clearGen(){ if(genTimer){ clearInterval(genTimer); genTimer=null; } if(genEl){ genEl.remove(); genEl=null; } }
+  function setInputEnabled(on){ var i=byId('input'); if(!i) return; i.disabled=!on;
+    i.placeholder = on ? 'message (Enter to send · Shift+Enter for newline)' : '生成中…等待回复完成'; if(on){ try{ i.focus(); }catch(e){} } }
+  // one turn at a time: sending mid-stream let the prior turn's tail land under the new message
+  function beginTurn(){ turnActive=true; var sb=byId('send'); if(sb) sb.disabled=true; setInputEnabled(false); startGen(); }
+  function endTurn(){ clearGen(); turnActive=false; var sb=byId('send'); if(sb) sb.disabled=false; setInputEnabled(true); }
 
   function sortSessions(){
     var mode=(byId('sort')||{}).value||'recent';
@@ -183,7 +210,7 @@ window.__DIRS__ = ${dirsJson};
   function setForkEnabled(on, title){
     var b=byId('forkBtn'); if(!b) return; b.disabled=!on; if(title!=null) b.title=title;
   }
-  function addMsg(role, text){ clearPh(); var m=el('div','msg '+role); var b=el('div','bubble',text||''); m.appendChild(b); byId('msgs').appendChild(m); scroll(); return m; }
+  function addMsg(role, text){ clearPh(); var m=el('div','msg '+role); var b=el('div','bubble',text||''); m.appendChild(b); byId('msgs').appendChild(m); keepGenLast(); scroll(); return m; }
   var toolEls = {}; // tool_use id -> details element (to attach the result later)
   function toolPreview(name, input){
     try {
@@ -208,7 +235,7 @@ window.__DIRS__ = ${dirsJson};
     var out=el('pre','tool-out'+(tc.isError?' err':''));
     if(tc.result!=null && tc.result!==''){ out.textContent=String(tc.result).slice(0,8000); } else { out.style.display='none'; }
     d.appendChild(out);
-    byId('msgs').appendChild(d); scroll();
+    byId('msgs').appendChild(d); keepGenLast(); scroll();
     return d;
   }
 
@@ -231,6 +258,7 @@ window.__DIRS__ = ${dirsJson};
     setForkEnabled(canFork, ftitle);
     byId('msgs').innerHTML=''; assistantEl=null;
     if(es){ es.close(); es=null; }
+    clearGen(); turnActive=false; var sb=byId('send'); if(sb) sb.disabled=false; setInputEnabled(true);
     if(s.pendingFork){
       addMsg('assistant','(forked — type your next message to continue this branch in a new direction)');
     } else if(s.file){
@@ -247,18 +275,21 @@ window.__DIRS__ = ${dirsJson};
     else if(ev.kind==='tool_result'){ assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
       if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; }
       else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
-      scroll(); }
-    else if(ev.kind==='result'){ assistantEl=null; }
-    else if(ev.kind==='error'){ assistantEl=null; addMsg('error','⚠ '+ev.message); }
+      keepGenLast(); scroll(); }
+    else if(ev.kind==='result'){ assistantEl=null; endTurn(); }
+    else if(ev.kind==='error'){ assistantEl=null; addMsg('error','⚠ '+ev.message); endTurn(); }
   }
   function send(){
+    if(turnActive) return; // block mid-stream sends: the prior turn's tail would land under the new message
     var inp=byId('input'); var text=inp.value.trim(); if(!text||!cur) return;
     if(cur.pendingFork){ materializeFork(cur,text); return; }
     if(!cur.sessionId) return;
     addMsg('user',text); inp.value=''; assistantEl=null;
+    beginTurn();
     var id=cur.sessionId, cwd=cur.cwd||'';
     fetch('/chat/send?session='+encodeURIComponent(id)+'&cwd='+encodeURIComponent(cwd),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text})})
-      .then(function(r){return r.json();}).then(function(res){ if(res.ok){ if(!es) openStream(id); } else { addMsg('error','⚠ '+(res.error||'send failed')); } });
+      .then(function(r){return r.json();}).then(function(res){ if(res.ok){ if(!es) openStream(id); } else { addMsg('error','⚠ '+(res.error||'send failed')); endTurn(); } })
+      .catch(function(e){ addMsg('error','⚠ network error: '+(e&&e.message?e.message:e)); endTurn(); });
   }
   function fork(){
     if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
