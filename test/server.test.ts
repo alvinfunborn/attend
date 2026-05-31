@@ -2,15 +2,22 @@ import net from "node:net";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
-import type { ForkVendor } from "../src/core/fork.js";
+import type { LaunchAction, LaunchVendor } from "../src/core/launch.js";
 import { type AppDeps, createApp, startServer } from "../src/server.js";
 
+interface Call {
+  action: LaunchAction;
+  vendor: LaunchVendor;
+  cwd: string;
+  opts: { sessionId?: string; prompt?: string };
+}
+
 function appWithSpy() {
-  const calls: Array<{ vendor: ForkVendor; id: string; cwd: string }> = [];
+  const calls: Call[] = [];
   const deps: AppDeps = {
-    forkLauncher: (vendor, id, cwd) => {
-      calls.push({ vendor, id, cwd });
-      return `${vendor} fork ${id}`;
+    launcher: (action, vendor, cwd, opts) => {
+      calls.push({ action, vendor, cwd, opts });
+      return `${vendor} ${action}`;
     },
   };
   return { app: createApp(resolveConfig({ positionals: [] }), deps), calls };
@@ -18,42 +25,52 @@ function appWithSpy() {
 
 const tmp = encodeURIComponent(os.tmpdir());
 
-describe("POST /fork", () => {
-  it("launches a fork for a valid request and echoes the command", async () => {
+describe("POST /launch", () => {
+  it("resumes a session for a valid request", async () => {
     const { app, calls } = appWithSpy();
-    const res = await app.request(`/fork?vendor=codex&id=abc-123&cwd=${tmp}`, { method: "POST" });
+    const res = await app.request(`/launch?action=resume&vendor=claude&id=abc-123&cwd=${tmp}`, {
+      method: "POST",
+    });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, command: "codex fork abc-123" });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.vendor).toBe("codex");
+    expect(await res.json()).toMatchObject({ ok: true, command: "claude resume" });
+    expect(calls[0]).toMatchObject({ action: "resume", vendor: "claude" });
   });
 
-  it("rejects an unknown vendor without launching", async () => {
-    const { app, calls } = appWithSpy();
-    const res = await app.request(`/fork?vendor=gemini&id=abc&cwd=${tmp}`, { method: "POST" });
-    expect(res.status).toBe(400);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("rejects an unsafe session id", async () => {
+  it("starts a new session without a session id, passing the prompt through", async () => {
     const { app, calls } = appWithSpy();
     const res = await app.request(
-      `/fork?vendor=claude&id=${encodeURIComponent("a; rm -rf /")}&cwd=${tmp}`,
-      {
-        method: "POST",
-      },
+      `/launch?action=new&vendor=codex&cwd=${tmp}&prompt=${encodeURIComponent("do X")}`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(200);
+    expect(calls[0]?.opts.prompt).toBe("do X");
+  });
+
+  it("rejects an unknown action / vendor", async () => {
+    const { app } = appWithSpy();
+    expect(
+      (await app.request(`/launch?action=zap&vendor=claude&cwd=${tmp}`, { method: "POST" })).status,
+    ).toBe(400);
+    expect(
+      (await app.request(`/launch?action=new&vendor=gemini&cwd=${tmp}`, { method: "POST" })).status,
+    ).toBe(400);
+  });
+
+  it("requires a safe session id for resume/fork", async () => {
+    const { app, calls } = appWithSpy();
+    const res = await app.request(
+      `/launch?action=fork&vendor=claude&id=${encodeURIComponent("a; rm -rf /")}&cwd=${tmp}`,
+      { method: "POST" },
     );
     expect(res.status).toBe(400);
     expect(calls).toHaveLength(0);
   });
 
-  it("rejects a non-existent cwd", async () => {
+  it("rejects a non-existent directory", async () => {
     const { app } = appWithSpy();
     const res = await app.request(
-      `/fork?vendor=claude&id=abc&cwd=${encodeURIComponent("/no/such/dir/xyz")}`,
-      {
-        method: "POST",
-      },
+      `/launch?action=new&vendor=claude&cwd=${encodeURIComponent("/no/such/xyz")}`,
+      { method: "POST" },
     );
     expect(res.status).toBe(400);
   });
@@ -66,7 +83,6 @@ describe("startServer port rollover", () => {
   });
 
   it("rolls forward to the next free port when the requested one is taken", async () => {
-    // occupy an ephemeral port, then ask attend to bind it
     const taken = net.createServer();
     const takenPort: number = await new Promise((resolve) => {
       taken.listen(0, "127.0.0.1", () => resolve((taken.address() as net.AddressInfo).port));

@@ -15,7 +15,8 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1100, height: 950 } });
 
 await page.goto(base, { waitUntil: "networkidle" });
-await page.screenshot({ path: path.join(out, "feed.png"), fullPage: true });
+// viewport-only (top of page) — the session list can be very long
+await page.screenshot({ path: path.join(out, "feed.png") });
 
 const sel = briefName ? `a.brief:has(.name:text-is("${briefName}"))` : "a[href^='/brief']";
 const href = await page.getAttribute(sel, "href").catch(() => null);

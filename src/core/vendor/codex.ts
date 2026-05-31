@@ -50,18 +50,26 @@ function parseTs(value: unknown): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
-function isUserPrompt(item: ResponseItem): boolean {
-  if (item.type !== "message" || item.role !== "user") return false;
+/** Return the user prompt text if this response item is a typed user message, else null. */
+function userPromptText(item: ResponseItem): string | null {
+  if (item.type !== "message" || item.role !== "user") return null;
   const c = item.content;
-  if (typeof c === "string") return c.trim() !== "";
+  if (typeof c === "string") return c.trim() !== "" ? c.trim() : null;
   if (Array.isArray(c)) {
-    return c.some((b) => {
-      if (!b || typeof b !== "object") return false;
+    for (const b of c) {
+      if (!b || typeof b !== "object") continue;
       const block = b as { type?: string; text?: string };
-      return block.type === "input_text" && !!block.text && block.text.trim() !== "";
-    });
+      if (block.type === "input_text" && block.text && block.text.trim() !== "") {
+        return block.text.trim();
+      }
+    }
   }
-  return false;
+  return null;
+}
+
+function snippet(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
 }
 
 /** Parse one Codex rollout transcript's text into a normalized session (pure, testable). */
@@ -70,6 +78,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     path: file,
     vendor: "codex",
     sessionId: null,
+    title: null,
     cwd: null,
     firstTs: null,
     lastTs: null,
@@ -108,8 +117,13 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       if (session.cwd === null && cwd) session.cwd = cwd;
       if (session.sessionId === null && item?.id) session.sessionId = item.id;
     } else if (kind === "response_item" && item) {
-      if (isUserPrompt(item)) session.prompts += 1;
-      else if (item.type && ACTION_ITEM_TYPES.has(item.type)) session.actions += 1;
+      const text = userPromptText(item);
+      if (text !== null) {
+        session.prompts += 1;
+        if (session.title === null) session.title = snippet(text);
+      } else if (item.type && ACTION_ITEM_TYPES.has(item.type)) {
+        session.actions += 1;
+      }
     }
   }
   // Fallback: rollout filenames embed the session UUID (rollout-<ts>-<uuid>.jsonl).
@@ -156,6 +170,7 @@ export class CodexSource implements SessionSource {
           path: f,
           vendor: "codex" as const,
           sessionId: null,
+          title: null,
           cwd: null,
           firstTs: null,
           lastTs: null,

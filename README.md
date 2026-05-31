@@ -8,12 +8,17 @@ The one place that tells a solo dev **which task to re-engage next** — across 
 
 ## What it does
 
+**Main view (`/`) — your sessions, aggregated.** Lists every Claude Code + Codex chat (newest first), each with its title (first prompt), project, prompts/actions, age, and the brief + priority it belongs to. Act on any of them in place:
+- **continue ▸** — resume the session in a new terminal
+- **split ⑂** — fork it into a branch
+- **new session ▸** — start a fresh session: pick the vendor + a project directory (dropdown of known dirs, or paste an absolute path) + an optional first prompt
+
+**Briefs view (`/briefs`) — what needs you next.** The priority feed:
 - Scans your vaults for `brief.md` files (one per task)
-- Reads Claude Code JSONL transcripts and matches them to briefs via `cwd`
-- Derives per-brief telemetry: sessions / prompts / actions / dwell / last touch
-- Classifies each brief into a behavioral pattern (avoidance / stalled / active / healthy / fresh)
-- Ranks briefs by `memory-alignment × pattern × explicit blocker`
-- Serves one localhost page you can poll instead of N IDE tabs
+- Reads Claude/Codex JSONL transcripts, matches them to briefs via `cwd`, derives telemetry (sessions / prompts / actions / dwell / last touch)
+- Classifies a behavioral pattern (avoidance / stalled / active / healthy / fresh) and ranks by `memory-alignment × pattern × explicit blocker`, each with a one-line auditable reason
+
+One localhost page, cross-vendor, pull-based — instead of N IDE tabs.
 
 ## Quick start
 

@@ -26,8 +26,10 @@ export interface Brief {
 export interface RawSession {
   path: string;
   vendor: string;
-  /** vendor session id, used to fork/branch the session; null if not found */
+  /** vendor session id, used to resume/fork the session; null if not found */
   sessionId: string | null;
+  /** first user prompt, used as a human-readable title; null if none */
+  title: string | null;
   cwd: string | null;
   /** epoch ms, or null when no timestamps were found */
   firstTs: number | null;

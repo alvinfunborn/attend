@@ -21,16 +21,26 @@ interface JsonlEntry {
   message?: { content?: unknown };
 }
 
-function isTextPrompt(content: unknown): boolean {
+/** Return the user prompt text if this is a real typed prompt, else null. */
+function userPromptText(content: unknown): string | null {
   if (typeof content === "string") {
-    return content.trim() !== "" && !content.startsWith("<");
+    const t = content.trim();
+    return t !== "" && !content.startsWith("<") ? t : null;
   }
   if (Array.isArray(content)) {
-    return content.some(
-      (c) => c && typeof c === "object" && (c as { type?: string }).type === "text",
-    );
+    for (const c of content) {
+      if (c && typeof c === "object" && (c as { type?: string }).type === "text") {
+        const t = (c as { text?: string }).text;
+        if (typeof t === "string" && t.trim() !== "") return t.trim();
+      }
+    }
   }
-  return false;
+  return null;
+}
+
+function snippet(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
 }
 
 function countActions(content: unknown): number {
@@ -51,6 +61,7 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     path: file,
     vendor: "claude",
     sessionId: null,
+    title: null,
     cwd: null,
     firstTs: null,
     lastTs: null,
@@ -76,7 +87,11 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     // and their tool uses shouldn't inflate the brief's action count.
     if (obj.isSidechain) continue;
     if (obj.type === "user") {
-      if (isTextPrompt(obj.message?.content)) session.prompts += 1;
+      const text = userPromptText(obj.message?.content);
+      if (text !== null) {
+        session.prompts += 1;
+        if (session.title === null) session.title = snippet(text);
+      }
     } else if (obj.type === "assistant") {
       session.actions += countActions(obj.message?.content);
     }
@@ -92,6 +107,7 @@ function parseSessionFile(file: string): RawSession {
       path: file,
       vendor: "claude",
       sessionId: null,
+      title: null,
       cwd: null,
       firstTs: null,
       lastTs: null,

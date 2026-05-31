@@ -78,13 +78,15 @@ function baseName(p: string): string {
 
 function sessionRow(s: RawSession): string {
   const when = s.lastTs !== null ? new Date(s.lastTs).toISOString().slice(0, 10) : "";
-  const forkBtn =
+  const data = `data-vendor="${esc(s.vendor)}" data-id="${esc(s.sessionId ?? "")}" data-cwd="${esc(s.cwd ?? "")}"`;
+  const btns =
     s.sessionId && s.cwd
-      ? `<button class="fork-btn" data-vendor="${esc(s.vendor)}" data-id="${esc(s.sessionId)}" data-cwd="${esc(s.cwd)}" onclick="forkSession(this)" title="branch this session into a new fork (opens a terminal)">split ⑂</button>`
+      ? `<button class="fork-btn" ${data} onclick="act(this,'resume')" title="continue this session in a terminal">continue ▸</button>
+         <button class="fork-btn" ${data} onclick="act(this,'fork')" title="branch this session into a new fork">split ⑂</button>`
       : "";
   return `<div class="session-row">
     <span>${esc(baseName(s.path))}</span>
-    <span class="session-right"><span class="when">${when} · ${s.prompts}p / ${s.actions}a</span>${forkBtn}</span>
+    <span class="session-right"><span class="when">${when} · ${s.prompts}p / ${s.actions}a</span>${btns}</span>
   </div>`;
 }
 
@@ -144,32 +146,22 @@ ${sessionsCard}
 <div class="card"><div class="label">file</div><div class="path">${esc(v.brief.path)}</div></div>
 
 <script>
-function forkSession(btn) {
-  const q = new URLSearchParams({
-    vendor: btn.dataset.vendor,
-    id: btn.dataset.id,
-    cwd: btn.dataset.cwd,
-  });
+function act(btn, action) {
+  const d = btn.dataset;
+  const q = new URLSearchParams({ action, vendor: d.vendor, id: d.id, cwd: d.cwd });
   btn.disabled = true;
-  const orig = btn.textContent;
-  fetch("/fork?" + q.toString(), { method: "POST" })
+  fetch("/launch?" + q.toString(), { method: "POST" })
     .then((r) => r.json())
     .then((res) => {
-      if (res.ok) {
-        btn.textContent = "forked ✓";
-        btn.classList.add("ok");
-      } else {
-        btn.textContent = res.error || "failed";
-        btn.classList.add("err");
-        btn.disabled = false;
-      }
+      btn.textContent = res.ok ? "opened ✓" : res.error || "failed";
+      btn.classList.add(res.ok ? "ok" : "err");
+      if (!res.ok) btn.disabled = false;
     })
     .catch(() => {
       btn.textContent = "failed";
       btn.classList.add("err");
       btn.disabled = false;
     });
-  void orig;
 }
 function copyCmd(id) {
   const text = document.getElementById(id).textContent;
