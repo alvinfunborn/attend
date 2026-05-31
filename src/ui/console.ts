@@ -100,7 +100,7 @@ export function renderConsole(v: ConsoleView): string {
 <div class="main">
   <div class="head">
     <div><div class="t" id="h-title">attend</div><div class="s" id="h-sub">select a session, or + new</div></div>
-    <button id="forkBtn" title="branch this session into a fork">split ⑂</button>
+    <button id="forkBtn" title="branch this session into a fork" disabled>split ⑂</button>
   </div>
   <div id="msgs"><div class="placeholder" id="ph">Pick a session on the left to see its chat, then type below to continue it — all in the browser.</div></div>
   <div class="foot">
@@ -138,6 +138,12 @@ window.__DIRS__ = ${dirsJson};
     cur=s; renderSidebar();
     byId('h-title').textContent = s.title || s.project || 'session';
     byId('h-sub').textContent = s.vendor+' · '+(s.cwd||'');
+    // in-browser fork only works for Claude sessions; Codex must use the terminal launcher
+    var fb=byId('forkBtn');
+    fb.disabled = !(s && s.sessionId && s.vendor==='claude');
+    fb.title = fb.disabled
+      ? (s && s.vendor!=='claude' ? 'in-browser split is Claude-only — use the terminal launcher for Codex' : 'select a Claude session to split')
+      : 'branch this session into a fork';
     byId('msgs').innerHTML=''; assistantEl=null;
     if(es){ es.close(); es=null; }
     if(s.file){
@@ -162,11 +168,16 @@ window.__DIRS__ = ${dirsJson};
       .then(function(r){return r.json();}).then(function(res){ if(res.ok){ if(!es) openStream(id); } else { addMsg('error','⚠ '+(res.error||'send failed')); } });
   }
   function fork(){
-    if(!cur||!cur.sessionId) return;
-    fetch('/chat/fork?session='+encodeURIComponent(cur.sessionId)+'&cwd='+encodeURIComponent(cur.cwd||''),{method:'POST'})
+    if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
+    if(cur.vendor!=='claude'){ alert('In-browser split is Claude-only. Use the terminal launcher to fork a Codex session.'); return; }
+    var btn=byId('forkBtn'), label=btn.textContent; btn.disabled=true; btn.textContent='splitting…';
+    var src=cur;
+    fetch('/chat/fork?session='+encodeURIComponent(src.sessionId)+'&cwd='+encodeURIComponent(src.cwd||''),{method:'POST'})
       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ alert(res.error||'fork failed'); return; }
-        var ns={vendor:'claude',sessionId:res.session,title:'(fork) '+(cur.title||''),cwd:cur.cwd,project:cur.project,file:'',ageDays:0,prompts:0,actions:0,brief:cur.brief};
-        SESS.unshift(ns); select(ns); openStream(res.session); });
+        var ns={vendor:'claude',sessionId:res.session,title:'(fork) '+(src.title||''),cwd:src.cwd,project:src.project,file:'',ageDays:0,prompts:0,actions:0,brief:src.brief};
+        SESS.unshift(ns); select(ns); openStream(res.session); })
+      .catch(function(e){ alert('fork failed: '+(e&&e.message?e.message:e)); })
+      .finally(function(){ btn.textContent=label; if(cur) byId('forkBtn').disabled = !(cur.vendor==='claude'); });
   }
   function newSession(){
     var dir=byId('ndfree').value.trim()||byId('ndsel').value; var text=byId('np').value.trim();

@@ -97,9 +97,15 @@ export class ChatEngine {
     // index immediately under resume id so /chat/send can find it before init
     if (run.sessionId) this.runs.set(run.sessionId, run);
 
+    // Default to full CLI-parity execution: the console is a local, single-user
+    // surface and the user wants the same power as running `claude` directly.
+    // `acceptEdits` (the old default) auto-denied Bash/etc., so Claude reported
+    // it was "sandboxed" and could not run anything.
+    const mode: PermissionMode = opts.permissionMode ?? "bypassPermissions";
     const options: Options = {
       cwd: opts.cwd,
-      permissionMode: opts.permissionMode ?? "acceptEdits",
+      permissionMode: mode,
+      ...(mode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.forkSession ? { forkSession: true } : {}),
     };
