@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 export type LaunchVendor = "claude" | "codex";
 export type LaunchAction = "resume" | "fork" | "new";
@@ -6,6 +7,8 @@ export type LaunchAction = "resume" | "fork" | "new";
 export interface LaunchOpts {
   sessionId?: string;
   prompt?: string;
+  model?: string;
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 function shellQuote(s: string): string {
@@ -32,8 +35,17 @@ export function buildCommand(
     return vendor === "claude" ? `claude --resume ${id} --fork-session` : `codex fork ${id}`;
   }
   // new
+  if (vendor === "claude") {
+    const modelArg = opts.model?.trim() ? ` --model ${shellQuote(opts.model.trim())}` : "";
+    const effortArg = opts.effort?.trim() ? ` --effort ${shellQuote(opts.effort.trim())}` : "";
+    const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
+    return `claude${modelArg}${effortArg}${promptArg}`;
+  }
+  const modelArg = opts.model?.trim() ? ` -c ${shellQuote(`model="${opts.model.trim()}"`)}` : "";
+  const effort = opts.effort?.trim() === "max" ? "xhigh" : opts.effort?.trim();
+  const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
   const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
-  return `${vendor}${promptArg}`;
+  return `codex${modelArg}${effortArg}${promptArg}`;
 }
 
 export interface TerminalInvocation {
@@ -82,4 +94,33 @@ export function launchSession(
   const child = spawn(file, args, { cwd, detached: true, stdio: "ignore" });
   child.unref();
   return command;
+}
+
+export interface RevealInvocation {
+  file: string;
+  args: string[];
+}
+
+/**
+ * Platform argv that reveals `target` in the OS file manager, selecting the file:
+ *   macOS  → `open -R <path>`          (Finder, highlighted)
+ *   win32  → `explorer /select,<path>` (Explorer, highlighted)
+ *   linux  → `xdg-open <dir>`          (opens the containing folder)
+ */
+export function revealCommand(platform: NodeJS.Platform, target: string): RevealInvocation {
+  if (platform === "win32") return { file: "explorer.exe", args: [`/select,${target}`] };
+  if (platform === "darwin") return { file: "open", args: ["-R", target] };
+  return { file: "xdg-open", args: [path.dirname(target)] };
+}
+
+/**
+ * Reveal a local path in the OS file manager (Finder / Explorer). Detached so it
+ * outlives the daemon. Mirrors `launchSession` — this is attend deliberately
+ * spawning a local viewer, for "click a file path in chat → open it" (the same
+ * v1.2/v1.3 "spawn is allowed when the user asks" override).
+ */
+export function revealPath(target: string, platform: NodeJS.Platform = process.platform): void {
+  const { file, args } = revealCommand(platform, target);
+  const child = spawn(file, args, { detached: true, stdio: "ignore" });
+  child.unref();
 }

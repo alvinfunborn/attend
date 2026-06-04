@@ -65,8 +65,12 @@ async function main(): Promise<void> {
   const server = await startServer(config);
 
   process.stdout.write(`attend — running at ${server.url}\n`);
-  process.stdout.write("vault roots:\n");
-  for (const root of config.vaultRoots) process.stdout.write(`  ${root}\n`);
+  if (config.scopeRoots.length > 0) {
+    process.stdout.write("scoped to sessions under:\n");
+    for (const root of config.scopeRoots) process.stdout.write(`  ${root}\n`);
+  } else {
+    process.stdout.write("scope: all sessions (pass a directory to limit)\n");
+  }
 
   if (config.open) {
     await open(server.url).catch(() => {

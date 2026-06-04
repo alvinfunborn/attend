@@ -1,11 +1,16 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { ClaudeAnalyzer } from "./chat/analyzer/claude.js";
 import { CodexAnalyzer } from "./chat/analyzer/codex.js";
+import { CodexEngine } from "./chat/codex/engine.js";
+import { makeCodexExec, makeCodexFork } from "./chat/codex/exec.js";
+import { readCodexTranscript } from "./chat/codex/transcript.js";
 import { DaemonOrchestrator } from "./chat/daemon.js";
+import type { ChatAttachment, ChatDriver, SessionEffort } from "./chat/driver.js";
 import { ChatEngine } from "./chat/engine.js";
 import { readClaudeTranscript } from "./chat/transcript.js";
 import type { AttendConfig } from "./config.js";
@@ -13,15 +18,119 @@ import { type AlignmentModel, buildAlignmentModel, scoreAlignment } from "./core
 import { AnalysisCache } from "./core/daemon/cache.js";
 import { OverrideStore } from "./core/daemon/overrides.js";
 import { DaemonRegistry } from "./core/daemon/registry.js";
-import { type LaunchAction, type LaunchVendor, launchSession } from "./core/launch.js";
+import { EngagementStore } from "./core/engagement.js";
+import { type LaunchAction, type LaunchVendor, launchSession, revealPath } from "./core/launch.js";
 import { discoverMemorySources, loadMemoryDocs } from "./core/memory.js";
-import { evaluatePriority } from "./core/priority.js";
+import { evaluatePriority, patternScoreNudge } from "./core/priority.js";
+import { SessionStatusStore } from "./core/session-status.js";
+import { TagStore } from "./core/tags.js";
 import type { Brief, RawSession, Telemetry } from "./core/types.js";
 import { detectVendors } from "./core/vendor/detect.js";
 import { collectSessions } from "./core/vendor/index.js";
 import { type ConsoleView, type SessionView, renderConsole } from "./ui/console.js";
 
 const DAY_MS = 86_400_000;
+const IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+function normalizeTagName(input: string): string {
+  return input.trim().replace(/\s+/g, " ");
+}
+
+function scopeTagList(
+  sessions: RawSession[],
+  tags: TagStore,
+  opts: { extraTags?: string[]; extraSessionIds?: string[] } = {},
+): string[] {
+  const wanted = new Set<string>();
+  for (const s of sessions) {
+    if (!s.sessionId) continue;
+    for (const tag of tags.tagsFor(s.sessionId)) wanted.add(tag);
+  }
+  for (const sessionId of opts.extraSessionIds ?? []) {
+    for (const tag of tags.tagsFor(sessionId)) wanted.add(tag);
+  }
+  for (const extra of opts.extraTags ?? []) {
+    const tag = normalizeTagName(extra);
+    if (tag) wanted.add(tag);
+  }
+  return tags.list().filter((tag) => wanted.has(tag));
+}
+
+function parseChatAttachments(input: unknown): ChatAttachment[] {
+  if (!Array.isArray(input)) return [];
+  const out: ChatAttachment[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = raw as Record<string, unknown>;
+    const kind = typeof item.kind === "string" ? item.kind : "";
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    if (!name) continue;
+    if (kind === "image") {
+      const mediaType = typeof item.mediaType === "string" ? item.mediaType : "";
+      const data = typeof item.data === "string" ? item.data : "";
+      if (IMAGE_MEDIA_TYPES.has(mediaType) && data) {
+        out.push({
+          kind: "image",
+          name,
+          mediaType: mediaType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+          data,
+        });
+      }
+      continue;
+    }
+    if (kind === "document") {
+      const data = typeof item.data === "string" ? item.data : "";
+      if (data) out.push({ kind: "document", name, mediaType: "application/pdf", data });
+      continue;
+    }
+    if (kind === "text") {
+      const text = typeof item.text === "string" ? item.text : "";
+      if (text) out.push({ kind: "text", name, text });
+    }
+  }
+  return out;
+}
+
+function validateCodexAttachments(attachments: ChatAttachment[]): string | null {
+  return attachments.some((attachment) => attachment.kind === "document")
+    ? "Codex chat does not support PDF attachments"
+    : null;
+}
+
+/**
+ * Bound the listed sessions so a long-lived directory doesn't render thousands of
+ * tabs: keep only those active within `recentDays`, most-recent first, capped at
+ * `maxSessions`. Either limit is disabled when 0. Applied to the list only — the
+ * "+ new" dir picker and throughput still see the full set.
+ */
+export function limitSessions(
+  sessions: RawSession[],
+  now: number,
+  recentDays: number,
+  maxSessions: number,
+): RawSession[] {
+  let out = sessions;
+  if (recentDays > 0) {
+    const since = now - recentDays * DAY_MS;
+    out = out.filter((s) => (s.lastTs ?? 0) >= since);
+  }
+  out = [...out].sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
+  if (maxSessions > 0 && out.length > maxSessions) out = out.slice(0, maxSessions);
+  return out;
+}
+
+/**
+ * Is a session in scope? With no roots configured, everything is (the default —
+ * `attend` with no dir args lists every session). With roots set, a session is
+ * kept only when its cwd equals or sits under one of them; a session with no cwd
+ * is excluded once a scope is active.
+ */
+export function withinScope(cwd: string | null, roots: string[]): boolean {
+  if (roots.length === 0) return true;
+  if (!cwd) return false;
+  const c = path.resolve(cwd);
+  return roots.some((r) => c === r || c.startsWith(r + path.sep));
+}
 
 /** Memoize an expensive scan so browser refreshes don't re-read every JSONL. */
 function ttlCache<T>(ttlMs: number, fn: () => T): () => T {
@@ -44,9 +153,13 @@ export interface AppDeps {
     action: LaunchAction,
     vendor: LaunchVendor,
     cwd: string,
-    opts: { sessionId?: string; prompt?: string },
+    opts: { sessionId?: string; prompt?: string; model?: string; effort?: SessionEffort },
   ) => string;
+  /** Reveal a local path in the OS file manager (Finder/Explorer). Defaulted at use site. */
+  revealer?: (target: string) => void;
   engine: ChatEngine;
+  /** Codex chat backend (driven via `codex exec`); defaulted when omitted. */
+  codex?: ChatDriver;
   orchestrator: DaemonOrchestrator;
 }
 
@@ -70,10 +183,65 @@ function knownDirs(sessions: RawSession[]): string[] {
     .map(([d]) => d);
 }
 
+/** Analyzer daemons should never appear as user sessions. Registry ids are the
+ * primary filter, but historical/partial state can leave a daemon transcript
+ * unregistered; hide those too by their standing seed / follow-up prompt shape. */
+function isLikelyDaemonSession(s: RawSession): boolean {
+  const title = String(s.title ?? "");
+  const lastPrompt = String(s.lastPrompt ?? "");
+  if (title.startsWith("You are the *attend daemon* for a single coding session.")) return true;
+  if (lastPrompt.startsWith("The session advanced. Session context:")) return true;
+  if (lastPrompt.includes("Reply with the JSON object only.")) return true;
+  return false;
+}
+
+/**
+ * Resolve a user-entered project dir. Absolute paths are kept absolute; `~/`
+ * expands to the home dir; relative inputs are resolved against each scope root
+ * (or `process.cwd()` when no scope is configured). The first existing hit wins;
+ * otherwise we return the first candidate so callers can surface a clear
+ * "directory not found" on the intended absolute path.
+ */
+function resolveProjectDir(input: string, scopeRoots: string[]): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  const roots = scopeRoots.length > 0 ? scopeRoots : [process.cwd()];
+  const candidates: string[] = [];
+  if (raw.startsWith("~/")) candidates.push(path.join(os.homedir(), raw.slice(2)));
+  else if (path.isAbsolute(raw) || /^[A-Za-z]:[\\/]/.test(raw)) candidates.push(path.resolve(raw));
+  else for (const root of roots) candidates.push(path.resolve(root, raw));
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return candidates[0] ?? null;
+}
+
+function normalizeModel(input: unknown): string | undefined {
+  const value = typeof input === "string" ? input.trim() : "";
+  return value || undefined;
+}
+
+function normalizeEffort(input: unknown): SessionEffort | undefined {
+  const value = typeof input === "string" ? input.trim().toLowerCase() : "";
+  if (
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
 /** Telemetry for a single session (so pattern/priority can be computed per-session). */
-function sessionTelemetry(s: RawSession, now: number): Telemetry {
+function sessionTelemetry(s: RawSession, now: number, engagement: EngagementStore): Telemetry {
   const dwell = s.firstTs !== null && s.lastTs !== null ? (s.lastTs - s.firstTs) / 60_000 : null;
-  const ageDays = s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null;
+  const e = s.sessionId ? engagement.get(s.sessionId) : null;
+  const lastTouchTs = Math.max(s.lastTs ?? 0, e?.lastViewedAt ?? 0) || null;
+  const ageDays = lastTouchTs !== null ? Math.floor((now - lastTouchTs) / DAY_MS) : null;
+  const lastActionAgeDays = s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null;
   return {
     sessions: 1,
     prompts: s.prompts,
@@ -81,9 +249,11 @@ function sessionTelemetry(s: RawSession, now: number): Telemetry {
     visits: s.visits,
     totalMinutes: dwell ?? 0,
     avgSessionMin: dwell,
-    lastActionAgeDays: s.actions > 0 ? ageDays : null,
-    lastTouch: s.lastTs !== null ? new Date(s.lastTs).toISOString() : null,
+    lastActionAgeDays: s.actions > 0 ? lastActionAgeDays : null,
+    lastTouch: lastTouchTs !== null ? new Date(lastTouchTs).toISOString() : null,
     lastTouchAgeDays: ageDays,
+    reviewVisits: e?.reviewVisits ?? 0,
+    reviewMinutes: (e?.reviewMs ?? 0) / 60_000,
   };
 }
 
@@ -93,11 +263,15 @@ function toSessionViews(
   now: number,
   orchestrator: DaemonOrchestrator,
   overrides: OverrideStore,
+  tags: TagStore,
+  engagement: EngagementStore,
+  sessionStatus: SessionStatusStore,
 ): SessionView[] {
   return [...sessions]
     .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))
     .map((s) => {
-      const tel = sessionTelemetry(s, now);
+      const tel = sessionTelemetry(s, now, engagement);
+      const touchTs = tel.lastTouch ? Date.parse(tel.lastTouch) : s.lastTs;
       // Pattern stays a *session-derived observation* (DESIGN v2.3 #1). Brief /
       // priority / ETA come from the session's daemon when it has one; otherwise
       // (historical / terminal-launched sessions) fall back to the heuristic.
@@ -117,8 +291,15 @@ function toSessionViews(
       // A manual override (clicked on the tab) wins over daemon/heuristic and is
       // never clobbered by the daemon's turn-end rewrite (separate store).
       const ov = s.sessionId ? overrides.get(s.sessionId) : null;
-      const baseScore = a ? a.priority : heuristic.score;
+      const baseScore = a ? a.priority + patternScoreNudge(heuristic.pattern) : heuristic.score;
       const baseEta = a ? a.etaMin : estimateEtaFromMemory(model, synthetic.what || synthetic.name);
+      const persistedStatus = s.sessionId ? sessionStatus.get(s.sessionId) : null;
+      const reason =
+        a && heuristic.pattern === "avoidance" && heuristic.reason !== "no signal"
+          ? `${heuristic.reason}; task: ${a.reason}`
+          : a
+            ? a.reason
+            : heuristic.reason;
       return {
         vendor: s.vendor,
         sessionId: s.sessionId,
@@ -129,14 +310,18 @@ function toSessionViews(
         project: s.cwd ? path.basename(s.cwd) : "—",
         ageDays: s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null,
         lastTs: s.lastTs,
+        sortTs: touchTs,
         prompts: s.prompts,
         pattern: heuristic.pattern,
         score: ov?.priority ?? baseScore,
-        reason: a ? a.reason : heuristic.reason,
+        reason: reason,
         etaMin: ov?.etaMin ?? baseEta,
         brief: a ? a.brief : null,
+        tags: s.sessionId ? tags.tagsFor(s.sessionId) : [],
         priorityset: ov?.priority !== undefined,
         etaset: ov?.etaMin !== undefined,
+        unread: persistedStatus?.state === "unread",
+        seen: persistedStatus?.state === "seen",
       };
     });
 }
@@ -187,13 +372,36 @@ export function createApp(
     orchestrator: new DaemonOrchestrator(
       new DaemonRegistry(config.daemonRegistry),
       new AnalysisCache(config.analysisCache),
-      [new ClaudeAnalyzer(config.claudeProjects), new CodexAnalyzer()],
+      [
+        new ClaudeAnalyzer(config.claudeProjects),
+        new CodexAnalyzer(
+          config.codexSessions,
+          config.codexBin ? makeCodexExec(config.codexBin) : null,
+        ),
+      ],
     ),
   },
 ): Hono {
   const engine = deps.engine;
+  // Codex chat backend. Defaulted here (not in the deps literal) so callers that
+  // pass a partial `deps` — the tests — still get a working Codex route.
+  const codex =
+    deps.codex ??
+    new CodexEngine(
+      makeCodexExec(config.codexBin ?? "codex"),
+      "danger-full-access",
+      makeCodexFork(config.codexSessions),
+    );
+  /** Pick the chat backend for a vendor (anything non-codex → Claude). */
+  const driverFor = (vendor: string | undefined): ChatDriver =>
+    vendor === "codex" ? codex : engine;
+  /** A live session's cwd, looked up across both backends. */
+  const cwdOf = (sid: string): string => engine.get(sid)?.cwd ?? codex.get(sid)?.cwd ?? "";
   const orchestrator = deps.orchestrator;
   const overrides = new OverrideStore(config.overrides);
+  const tags = new TagStore(config.tags);
+  const engagement = new EngagementStore(config.engagement);
+  const sessionStatus = new SessionStatusStore(config.sessionStatus);
   const getSessions = ttlCache(30_000, () => collectSessions(config));
   const getModel = ttlCache(60_000, (): AlignmentModel => {
     const sources = config.memorySources.length
@@ -207,33 +415,78 @@ export function createApp(
   // Hide daemon sessions from every listing: they're real Claude sessions we
   // spawned to analyze the task sessions (DESIGN v2.3 #2 — same cwd, so filtered
   // by id, not directory).
+  // Hidden daemon sessions are filtered out (by id), and — when the user launched
+  // attend with directory args — the list is scoped to sessions whose cwd is under
+  // one of those dirs. No dirs → no scope, every session is visible.
   const visibleSessions = (): RawSession[] => {
     const daemons = orchestrator.daemonIds();
-    return getSessions().filter((s) => !s.sessionId || !daemons.has(s.sessionId));
+    return getSessions().filter(
+      (s) =>
+        (!s.sessionId || !daemons.has(s.sessionId)) &&
+        !isLikelyDaemonSession(s) &&
+        withinScope(s.cwd, config.scopeRoots),
+    );
   };
 
   // When a task turn ends, re-run its daemon analysis (DESIGN v2.3 #3 — triggered
   // on completion, not polled). Daemon turns are ignored to avoid recursion.
-  engine.onTurnEnd((sid) => {
+  // Registered on both backends so Claude and Codex sessions analyze identically.
+  const onTurnEnd = (sid: string) => {
     if (orchestrator.isDaemon(sid) || !orchestrator.hasDaemon(sid)) return;
-    orchestrator.analyzeTask(sid, engine.get(sid)?.cwd ?? "").catch(() => {});
-  });
+    orchestrator.analyzeTask(sid, cwdOf(sid)).catch(() => {});
+  };
+  engine.onTurnEnd(onTurnEnd);
+  codex.onTurnEnd(onTurnEnd);
 
   const app = new Hono();
 
   // Main view: slock-style console — all sessions aggregated, chat in-browser.
   app.get("/", (c) => {
-    const sessions = visibleSessions();
-    const throughput = hourlyThroughput(sessions, Date.now());
+    const now = Date.now();
+    const all = visibleSessions();
+    // Throughput + the "+ new" dir picker see every in-scope session; the rendered
+    // tab list is further bounded (recency window + count cap) so an old directory
+    // isn't thousands of tabs.
+    const listed = limitSessions(all, now, config.recentDays, config.maxSessions);
+    const throughput = hourlyThroughput(all, now);
     const view: ConsoleView = {
-      sessions: toSessionViews(sessions, getModel(), Date.now(), orchestrator, overrides),
-      knownDirs: knownDirs(sessions),
+      sessions: toSessionViews(
+        listed,
+        getModel(),
+        now,
+        orchestrator,
+        overrides,
+        tags,
+        engagement,
+        sessionStatus,
+      ),
+      knownDirs: knownDirs(all),
+      scopeRoots: config.scopeRoots,
       sessionsPerHour: throughput.sessionsPerHour,
       charsPerHour: throughput.charsPerHour,
       vendors: getVendors(),
+      tags: scopeTagList(all, tags),
     };
     return c.html(renderConsole(view));
   });
+
+  const sessionView = (id: string): SessionView | null => {
+    const now = Date.now();
+    const found = visibleSessions().find((s) => s.sessionId === id);
+    if (!found) return null;
+    return (
+      toSessionViews(
+        [found],
+        getModel(),
+        now,
+        orchestrator,
+        overrides,
+        tags,
+        engagement,
+        sessionStatus,
+      )[0] ?? null
+    );
+  };
 
   // Latest daemon analysis for a session (brief/priority/eta/reason), or null.
   // The console polls this shortly after a turn ends to pick up the daemon's
@@ -241,6 +494,36 @@ export function createApp(
   app.get("/session/analysis", (c) => {
     const id = c.req.query("session");
     return c.json({ analysis: id ? orchestrator.analysis(id) : null });
+  });
+
+  // Resolve a session id back to its transcript source file. This is mainly for
+  // product-created sessions that were opened in the current page lifetime: the
+  // browser knows the new session id immediately, but not the eventual JSONL
+  // path, so reopening the tab later would otherwise show "(no history yet)".
+  app.get("/session/source", (c) => {
+    const id = c.req.query("session");
+    const vendor = c.req.query("vendor");
+    if (!id) return c.json({ session: null });
+    const pick = (sessions: RawSession[]) =>
+      sessions
+        .filter((s) => s.sessionId === id && (!vendor || s.vendor === vendor))
+        .filter((s) => !s.sessionId || !orchestrator.isDaemon(s.sessionId))
+        .filter((s) => !isLikelyDaemonSession(s))
+        .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))[0];
+    const match = pick(getSessions()) ?? pick(collectSessions(config));
+    if (!match) return c.json({ session: null });
+    return c.json({
+      session: {
+        vendor: match.vendor,
+        file: match.path,
+        cwd: match.cwd,
+        project: match.cwd ? path.basename(match.cwd) : "—",
+        title: match.title,
+        lastPrompt: match.lastPrompt,
+        lastTs: match.lastTs,
+        prompts: match.prompts,
+      },
+    });
   });
 
   // Manually pin a session's priority and/or ETA (set by clicking its tab). A
@@ -263,24 +546,95 @@ export function createApp(
     return c.json({ ok: true, override });
   });
 
+  app.post("/tags", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { name?: string };
+    const name = typeof body.name === "string" ? body.name : "";
+    if (!name.trim()) return c.json({ ok: false, error: "missing tag" }, 400);
+    tags.create(name);
+    return c.json({ ok: true, tags: scopeTagList(visibleSessions(), tags, { extraTags: [name] }) });
+  });
+
+  app.delete("/tags", (c) => {
+    const name = c.req.query("name") ?? "";
+    if (!name.trim()) return c.json({ ok: false, error: "missing tag" }, 400);
+    tags.delete(name);
+    return c.json({ ok: true, tags: scopeTagList(visibleSessions(), tags) });
+  });
+
+  app.post("/session/tags", async (c) => {
+    const id = c.req.query("session");
+    if (!id) return c.json({ ok: false, error: "missing session" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { tags?: unknown };
+    if (!Array.isArray(body.tags)) return c.json({ ok: false, error: "missing tags" }, 400);
+    const next = tags.setSessionTags(
+      id,
+      body.tags.filter((x): x is string => typeof x === "string"),
+    );
+    return c.json({
+      ok: true,
+      sessionTags: next,
+      tags: scopeTagList(visibleSessions(), tags, { extraSessionIds: [id] }),
+    });
+  });
+
+  app.post("/session/engagement", async (c) => {
+    const id = c.req.query("session");
+    if (!id) return c.json({ ok: false, error: "missing session" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      viewedMs?: unknown;
+      endedAt?: unknown;
+      hadMeaningfulScroll?: unknown;
+      hadSend?: unknown;
+    };
+    const record = engagement.recordVisit(id, {
+      viewedMs: Number(body.viewedMs ?? 0),
+      endedAt: body.endedAt == null ? null : Number(body.endedAt),
+      hadMeaningfulScroll: body.hadMeaningfulScroll === true,
+      hadSend: body.hadSend === true,
+    });
+    return c.json({ ok: true, record, view: sessionView(id) });
+  });
+
+  app.post("/session/status", async (c) => {
+    const id = c.req.query("session");
+    if (!id) return c.json({ ok: false, error: "missing session" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { state?: unknown; updatedAt?: unknown };
+    const state = body.state;
+    if (state !== "read" && state !== "seen" && state !== "unread") {
+      return c.json({ ok: false, error: "invalid state" }, 400);
+    }
+    const updatedAt = body.updatedAt == null ? Date.now() : Number(body.updatedAt);
+    const record = sessionStatus.set(id, state, updatedAt);
+    return c.json({ ok: true, status: record, view: sessionView(id) });
+  });
+
   // Session ids currently generating a turn — the sidebar polls this so a tab
   // shows its live status even while you're looking at a different session.
-  app.get("/chat/live", (c) => c.json({ active: engine.activeSessions() }));
+  app.get("/chat/live", (c) => {
+    const states = [...engine.activeSessionStates(), ...codex.activeSessionStates()];
+    return c.json({
+      active: states.map((s) => s.sessionId),
+      startedAt: Object.fromEntries(states.map((s) => [s.sessionId, s.startedAt])),
+    });
+  });
 
-  // Static transcript of a session (history shown when you open it).
+  // Static transcript of a session (history shown when you open it). The rollout
+  // schema differs by vendor, so the reader is picked by ?vendor (default Claude).
   app.get("/chat/messages", (c) => {
     const file = c.req.query("file");
     if (!file || !file.endsWith(".jsonl") || !fs.existsSync(file)) return c.json([]);
-    return c.json(readClaudeTranscript(file));
+    const read = c.req.query("vendor") === "codex" ? readCodexTranscript : readClaudeTranscript;
+    return c.json(read(file));
   });
 
   // Live event stream for a session (SSE). Replays buffered events, then streams.
   app.get("/chat/stream", (c) => {
     const id = c.req.query("session");
     if (!id) return c.text("missing session", 400);
+    const drv = driverFor(c.req.query("vendor"));
     return streamSSE(c, async (stream) => {
       await new Promise<void>((resolve) => {
-        const unsub = engine.subscribe(id, (ev) => {
+        const unsub = drv.subscribe(id, (ev) => {
           stream.writeSSE({ data: JSON.stringify(ev) }).catch(() => {});
         });
         stream.onAbort(() => {
@@ -295,15 +649,48 @@ export function createApp(
   app.post("/chat/send", async (c) => {
     const id = c.req.query("session");
     const cwd = c.req.query("cwd");
-    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
-    const text = body.text;
+    const body = (await c.req.json().catch(() => ({}))) as {
+      text?: string;
+      attachments?: unknown;
+    };
+    const text = body.text?.trim() ?? "";
+    const attachments = parseChatAttachments(body.attachments);
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
     if (!cwd || !fs.existsSync(cwd))
       return c.json({ ok: false, error: "directory not found" }, 400);
-    if (!text || !text.trim()) return c.json({ ok: false, error: "empty message" }, 400);
-    if (!engine.get(id)) engine.start({ resume: id, cwd }).catch(() => {});
-    const sent = engine.send(id, text);
+    if (!text && !attachments.length) return c.json({ ok: false, error: "empty message" }, 400);
+    const vendor = c.req.query("vendor");
+    if (vendor === "codex") {
+      const err = validateCodexAttachments(attachments);
+      if (err) return c.json({ ok: false, error: err }, 400);
+    }
+    const drv = driverFor(vendor);
+    if (!drv.get(id)) drv.start({ resume: id, cwd }).catch(() => {});
+    const sent = drv.send(id, { text, attachments });
     return c.json({ ok: sent, session: id });
+  });
+
+  // Answer an interactive tool call (currently Claude's AskUserQuestion) by
+  // sending a synthetic tool_result back into the live run.
+  app.post("/chat/answer", async (c) => {
+    const id = c.req.query("session");
+    const cwd = c.req.query("cwd");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      toolUseId?: string;
+      text?: string;
+      toolUseResult?: unknown;
+    };
+    const toolUseId = body.toolUseId?.trim();
+    const text = body.text?.trim();
+    if (!id) return c.json({ ok: false, error: "missing session" }, 400);
+    if (!cwd || !fs.existsSync(cwd))
+      return c.json({ ok: false, error: "directory not found" }, 400);
+    if (!toolUseId) return c.json({ ok: false, error: "missing toolUseId" }, 400);
+    if (!text) return c.json({ ok: false, error: "empty answer" }, 400);
+    const drv = driverFor(c.req.query("vendor"));
+    if (!drv.get(id)) drv.start({ resume: id, cwd }).catch(() => {});
+    const sent = drv.answer(id, { toolUseId, text, toolUseResult: body.toolUseResult });
+    return c.json({ ok: sent, session: id, toolUseId });
   });
 
   // Interrupt the in-flight turn (the Stop button). No-op (ok:false) if the
@@ -311,50 +698,72 @@ export function createApp(
   app.post("/chat/abort", async (c) => {
     const id = c.req.query("session");
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
-    const stopped = await engine.interrupt(id);
+    const stopped = await driverFor(c.req.query("vendor")).interrupt(id);
     return c.json({ ok: stopped, session: id });
   });
 
   // Start a brand-new session in a directory.
   app.post("/chat/new", async (c) => {
-    const cwd = c.req.query("cwd");
-    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const cwd = resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      text?: string;
+      model?: string;
+      effort?: string;
+    };
     const text = body.text;
+    const model = normalizeModel(body.model);
+    const effort = normalizeEffort(body.effort);
     if (!cwd || !fs.existsSync(cwd))
       return c.json({ ok: false, error: "directory not found" }, 400);
-    // First message is optional: start the run empty and ready, and only feed a
-    // first turn if one was typed. The SDK emits its init message (and thus the
-    // session id) for a fresh session without needing input, so start() resolves.
+    const vendor = c.req.query("vendor") === "codex" ? "codex" : "claude";
+    // Claude can open empty (its init message mints the id without input); Codex
+    // only mints a thread id once a turn runs, so it needs a first message —
+    // default to a greeting when none was typed.
+    const first = text?.trim() ? text : vendor === "codex" ? "hello" : undefined;
     try {
-      const session = await engine.start(text?.trim() ? { cwd, firstText: text } : { cwd });
+      const session = await driverFor(vendor).start(
+        first !== undefined ? { cwd, firstText: first, model, effort } : { cwd, model, effort },
+      );
       // Product-created session → give it an analyzer daemon (DESIGN v2.3 #5).
-      // In-browser chat is Claude-only, so the task vendor is "claude".
-      orchestrator.ensureDaemon(session, "claude", cwd).catch(() => {});
-      return c.json({ ok: true, session });
+      // No-op for vendors without an analyzer (e.g. Codex without an install).
+      orchestrator.ensureDaemon(session, vendor, cwd).catch(() => {});
+      return c.json({ ok: true, session, vendor, cwd });
     } catch (err) {
       return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
 
   // Fork (split) a session into a new branch. A fork needs a first turn to
-  // diverge: the real Agent SDK only emits the new session id (in its init
-  // message) once it receives input, so a fork with no first message would hang
-  // forever waiting on an init that never comes.
+  // diverge: Claude's SDK only emits the new id once it receives input, and Codex
+  // forks by copying the parent's rollout then resuming the copy — both need the
+  // opening message up front.
   app.post("/chat/fork", async (c) => {
     const id = c.req.query("session");
     const cwd = c.req.query("cwd");
-    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
-    const text = body.text;
+    const body = (await c.req.json().catch(() => ({}))) as { text?: string; attachments?: unknown };
+    const text = body.text?.trim() ?? "";
+    const attachments = parseChatAttachments(body.attachments);
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
     if (!cwd || !fs.existsSync(cwd))
       return c.json({ ok: false, error: "directory not found" }, 400);
-    if (!text || !text.trim())
-      return c.json({ ok: false, error: "type a message to branch with" }, 400);
+    if (!text && !attachments.length)
+      return c.json({ ok: false, error: "type a message or attach a file to branch with" }, 400);
+    const vendor = c.req.query("vendor") === "codex" ? "codex" : "claude";
+    if (vendor === "codex") {
+      const err = validateCodexAttachments(attachments);
+      if (err) return c.json({ ok: false, error: err }, 400);
+    }
     try {
-      const session = await engine.start({ resume: id, forkSession: true, cwd, firstText: text });
+      const session = await driverFor(vendor).start({
+        resume: id,
+        forkSession: true,
+        cwd,
+        firstText: text,
+        firstAttachments: attachments,
+      });
       // A fork is also a product-created session → its own analyzer daemon.
-      orchestrator.ensureDaemon(session, "claude", cwd).catch(() => {});
-      return c.json({ ok: true, session });
+      orchestrator.ensureDaemon(session, vendor, cwd).catch(() => {});
+      return c.json({ ok: true, session, vendor });
     } catch (err) {
       return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
     }
@@ -364,9 +773,14 @@ export function createApp(
   app.post("/launch", (c) => {
     const action = c.req.query("action");
     const vendor = c.req.query("vendor");
-    const cwd = c.req.query("cwd");
+    const cwd =
+      action === "new"
+        ? resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots)
+        : c.req.query("cwd");
     const id = c.req.query("id");
     const prompt = c.req.query("prompt");
+    const model = normalizeModel(c.req.query("model"));
+    const effort = normalizeEffort(c.req.query("effort"));
 
     if (action !== "resume" && action !== "fork" && action !== "new") {
       return c.json({ ok: false, error: "unknown action" }, 400);
@@ -381,8 +795,58 @@ export function createApp(
       return c.json({ ok: false, error: "invalid session id" }, 400);
     }
     try {
-      const command = deps.launcher(action, vendor, cwd, { sessionId: id, prompt });
-      return c.json({ ok: true, command });
+      const command = deps.launcher(action, vendor, cwd, { sessionId: id, prompt, model, effort });
+      return c.json({ ok: true, command, cwd });
+    } catch (err) {
+      return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  function resolveRevealPath(reqPath: string, cwd: string): string | null {
+    let resolved = reqPath.trim();
+    if (!resolved) return null;
+    if (resolved.startsWith("~/")) resolved = path.join(os.homedir(), resolved.slice(2));
+    else if (!path.isAbsolute(resolved) && !/^[A-Za-z]:[\\/]/.test(resolved)) {
+      if (!cwd) return null;
+      resolved = path.resolve(cwd, resolved);
+    }
+    let candidate = resolved;
+    while (candidate) {
+      if (fs.existsSync(candidate)) return candidate;
+      const stripped = candidate.replace(/:\d+(?::\d+)?$/, "");
+      if (stripped !== candidate) {
+        candidate = stripped;
+        continue;
+      }
+      const parent = path.dirname(candidate);
+      const root = path.parse(candidate).root;
+      if (!parent || parent === candidate || parent === root) break;
+      candidate = parent;
+    }
+    return null;
+  }
+
+  // Reveal a local file (clicked in a chat message) in the OS file manager. A
+  // relative path is resolved against the session's cwd; `~/` against $HOME.
+  // `file.md:12` / `file.md:12:4` are accepted and strip their line suffix. If
+  // the file is gone, fall back to the nearest existing parent directory.
+  app.post("/open", (c) => {
+    const reqPath = c.req.query("path");
+    const cwd = c.req.query("cwd") ?? "";
+    if (!reqPath) return c.json({ ok: false, error: "no path" }, 400);
+    if (
+      !cwd &&
+      !reqPath.startsWith("~/") &&
+      !path.isAbsolute(reqPath) &&
+      !/^[A-Za-z]:[\\/]/.test(reqPath)
+    ) {
+      return c.json({ ok: false, error: "no cwd to resolve relative path" }, 400);
+    }
+    const resolved = resolveRevealPath(reqPath, cwd);
+    if (!resolved) return c.json({ ok: false, error: "file not found" }, 404);
+    try {
+      (deps.revealer ?? revealPath)(resolved);
+      return c.json({ ok: true, path: resolved });
     } catch (err) {
       return c.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 500);
     }

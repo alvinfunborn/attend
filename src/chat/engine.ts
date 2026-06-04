@@ -5,6 +5,15 @@ import {
   type SDKUserMessage,
   query,
 } from "@anthropic-ai/claude-agent-sdk";
+import type { ContentBlockParam, MessageParam, TextBlockParam } from "@anthropic-ai/sdk/resources";
+import type {
+  ActiveSessionState,
+  ChatAttachment,
+  ChatDriver,
+  StartOpts,
+  ToolAnswer,
+  UserTurn,
+} from "./driver.js";
 import { type UiEvent, toUiEvents } from "./events.js";
 
 /** A pushable async queue of user messages — the streaming-input prompt for query(). */
@@ -13,15 +22,57 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   private waiters: Array<(r: IteratorResult<SDKUserMessage>) => void> = [];
   private closed = false;
 
-  push(text: string): void {
-    const msg: SDKUserMessage = {
-      type: "user",
-      message: { role: "user", content: text },
-      parent_tool_use_id: null,
-    };
+  private push(msg: SDKUserMessage): void {
     const w = this.waiters.shift();
     if (w) w({ value: msg, done: false });
     else this.items.push(msg);
+  }
+
+  private attachmentBlock(att: ChatAttachment): ContentBlockParam {
+    if (att.kind === "image") {
+      return {
+        type: "image",
+        source: { type: "base64", media_type: att.mediaType, data: att.data },
+      };
+    }
+    if (att.kind === "document") {
+      return {
+        type: "document",
+        title: att.name,
+        source: { type: "base64", media_type: att.mediaType, data: att.data },
+      };
+    }
+    return {
+      type: "document",
+      title: att.name,
+      source: { type: "text", media_type: "text/plain", data: att.text },
+    };
+  }
+
+  pushTurn(turn: UserTurn): void {
+    const text = turn.text ?? "";
+    const attachments = turn.attachments ?? [];
+    const textBlock: TextBlockParam | null = text ? { type: "text", text } : null;
+    const content: MessageParam["content"] = attachments.length
+      ? [...(textBlock ? [textBlock] : []), ...attachments.map((att) => this.attachmentBlock(att))]
+      : text;
+    this.push({
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+    });
+  }
+
+  pushToolResult(toolUseId: string, text: string, toolUseResult?: unknown): void {
+    this.push({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", content: text, tool_use_id: toolUseId }],
+      },
+      parent_tool_use_id: toolUseId,
+      ...(toolUseResult !== undefined ? { tool_use_result: toolUseResult } : {}),
+    });
   }
 
   close(): void {
@@ -63,25 +114,24 @@ export interface LiveRun {
   interrupt: (() => Promise<void>) | null;
 }
 
-export interface StartOpts {
-  cwd: string;
-  resume?: string;
-  forkSession?: boolean;
-  firstText?: string;
-  permissionMode?: PermissionMode;
-}
+export type { StartOpts } from "./driver.js";
 
 /** Injectable so tests can drive the engine without the real SDK / network. */
 export type QueryFn = typeof query;
 
 const MAX_BUFFER = 2000;
 
+function shouldReplayBufferedEvents(run: LiveRun): boolean {
+  return run.turnActive;
+}
+
 /**
  * Runs and tracks live Claude sessions via the Agent SDK. Each run streams SDK
  * messages, normalizes them to UiEvents, buffers them (so a (re)connecting SSE
  * client catches up), and re-emits for live subscribers. No terminal involved.
  */
-export class ChatEngine {
+export class ChatEngine implements ChatDriver {
+  readonly vendor = "claude";
   private runs = new Map<string, LiveRun>();
   /** subscribers parked on a session id whose run isn't live yet (e.g. after a
    *  server restart: the SSE reconnects before /chat/send resumes the run). */
@@ -109,6 +159,14 @@ export class ChatEngine {
     return ids;
   }
 
+  activeSessionStates(): ActiveSessionState[] {
+    const states: ActiveSessionState[] = [];
+    for (const [id, run] of this.runs) {
+      if (run.turnActive && !run.done) states.push({ sessionId: id, startedAt: run.turnStartedAt });
+    }
+    return states;
+  }
+
   /** Index a run under an id, flushing any subscribers parked on it (replay the
    *  buffer, then attach for live events) so a stream opened before the run
    *  existed re-binds automatically instead of staying silent. */
@@ -118,7 +176,9 @@ export class ChatEngine {
     if (!waiting) return;
     this.pending.delete(id);
     for (const onEvent of waiting) {
-      for (const ev of run.events) onEvent(ev);
+      if (shouldReplayBufferedEvents(run)) {
+        for (const ev of run.events) onEvent(ev);
+      }
       onEvent({ kind: "sync", turnActive: run.turnActive, startedAt: run.turnStartedAt });
       run.emitter.on("event", onEvent);
     }
@@ -129,6 +189,7 @@ export class ChatEngine {
    * reports it (from the init message). For resume, the id is known up front.
    */
   start(opts: StartOpts): Promise<string> {
+    const hasFirstTurn = opts.firstText !== undefined || !!opts.firstAttachments?.length;
     const run: LiveRun = {
       sessionId: opts.resume && !opts.forkSession ? opts.resume : null,
       cwd: opts.cwd,
@@ -137,8 +198,8 @@ export class ChatEngine {
       events: [],
       emitter: new EventEmitter(),
       done: false,
-      turnActive: opts.firstText !== undefined,
-      turnStartedAt: opts.firstText !== undefined ? Date.now() : 0,
+      turnActive: hasFirstTurn,
+      turnStartedAt: hasFirstTurn ? Date.now() : 0,
       interrupt: null,
     };
     // index immediately under resume id so /chat/send can find it before init
@@ -152,6 +213,8 @@ export class ChatEngine {
     const options: Options = {
       cwd: opts.cwd,
       permissionMode: mode,
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
       ...(mode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.forkSession ? { forkSession: true } : {}),
@@ -173,6 +236,9 @@ export class ChatEngine {
           const sid = run.sessionId;
           if (sid) for (const cb of this.turnEndListeners) cb(sid);
         }
+        if (ev.kind === "tool_use" && ev.name === "AskUserQuestion") {
+          run.turnActive = false;
+        }
         if (ev.kind === "session" && ev.sessionId) {
           run.sessionId = ev.sessionId;
           this.index(ev.sessionId, run);
@@ -189,7 +255,12 @@ export class ChatEngine {
           // method, hence the runtime guard.
           run.interrupt =
             typeof stream.interrupt === "function" ? stream.interrupt.bind(stream) : null;
-          if (opts.firstText !== undefined) run.input.push(opts.firstText);
+          if (hasFirstTurn) {
+            run.input.pushTurn({
+              text: opts.firstText ?? "",
+              attachments: opts.firstAttachments,
+            });
+          }
           for await (const msg of stream) {
             for (const ev of toUiEvents(msg)) emit(ev);
           }
@@ -208,12 +279,21 @@ export class ChatEngine {
   }
 
   /** Send a user turn to a live run. Returns false if the session isn't live. */
-  send(sessionId: string, text: string): boolean {
+  send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runs.get(sessionId);
     if (!run || run.done) return false;
     run.turnActive = true;
     run.turnStartedAt = Date.now();
-    run.input.push(text);
+    run.input.pushTurn(turn);
+    return true;
+  }
+
+  answer(sessionId: string, answer: ToolAnswer): boolean {
+    const run = this.runs.get(sessionId);
+    if (!run || run.done) return false;
+    run.turnActive = true;
+    run.turnStartedAt = Date.now();
+    run.input.pushToolResult(answer.toolUseId, answer.text, answer.toolUseResult);
     return true;
   }
 
@@ -245,7 +325,9 @@ export class ChatEngine {
   subscribe(sessionId: string, onEvent: (ev: UiEvent) => void): () => void {
     const run = this.runs.get(sessionId);
     if (run) {
-      for (const ev of run.events) onEvent(ev);
+      if (shouldReplayBufferedEvents(run)) {
+        for (const ev of run.events) onEvent(ev);
+      }
       onEvent({ kind: "sync", turnActive: run.turnActive, startedAt: run.turnStartedAt });
       run.emitter.on("event", onEvent);
     } else {

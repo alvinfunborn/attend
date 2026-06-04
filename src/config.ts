@@ -1,14 +1,22 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { resolveCodexBin } from "./core/vendor/detect.js";
 
 export interface AttendConfig {
-  /** Directories scanned recursively for brief.md. */
-  vaultRoots: string[];
+  /**
+   * Scope the listing to sessions whose cwd is within one of these dirs (or a
+   * subdir). Empty = no scope, list every session. Sourced from the positional
+   * dir args (`attend <dir>…`) > `ATTEND_VAULTS` > config-file `vaultRoots`.
+   */
+  scopeRoots: string[];
   /** ~/.claude/projects */
   claudeProjects: string;
   /** ~/.codex/sessions */
   codexSessions: string;
+  /** resolved `codex` binary (PATH or app bundle), or null when not installed —
+   *  gates in-browser Codex chat / the Codex daemon. */
+  codexBin: string | null;
   /** Explicit memory files; when empty, per-project memory is auto-discovered. */
   memorySources: string[];
   port: number;
@@ -22,6 +30,16 @@ export interface AttendConfig {
   analysisCache: string;
   /** per-session manual overrides (priority / etaMin set by clicking the tab). */
   overrides: string;
+  /** global tags + per-session tag assignments. */
+  tags: string;
+  /** per-session engagement telemetry (view/scroll/review behavior). */
+  engagement: string;
+  /** per-session unfinished/attention state, cleared only when dismissed to gray. */
+  sessionStatus: string;
+  /** only list sessions with activity within this many days (0 = no limit). */
+  recentDays: number;
+  /** cap the listed sessions to the N most-recent (0 = no limit). */
+  maxSessions: number;
 }
 
 /** CLI-derived inputs (already parsed by cli.ts). */
@@ -46,9 +64,10 @@ function platformDefaults(): AttendConfig {
   const home = os.homedir();
   const attendHome = path.join(home, ".attend");
   return {
-    vaultRoots: [process.cwd()],
+    scopeRoots: [],
     claudeProjects: path.join(home, ".claude", "projects"),
     codexSessions: path.join(home, ".codex", "sessions"),
+    codexBin: resolveCodexBin(),
     memorySources: [],
     port: 5050,
     host: "127.0.0.1",
@@ -57,7 +76,19 @@ function platformDefaults(): AttendConfig {
     daemonRegistry: path.join(attendHome, "daemons.json"),
     analysisCache: path.join(attendHome, "analysis.json"),
     overrides: path.join(attendHome, "overrides.json"),
+    tags: path.join(attendHome, "tags.json"),
+    engagement: path.join(attendHome, "engagement.json"),
+    sessionStatus: path.join(attendHome, "session-status.json"),
+    recentDays: 30,
+    maxSessions: 200,
   };
+}
+
+/** Parse a non-negative integer env override, falling back to `dflt`. */
+function intOr(value: string | undefined, dflt: number): number {
+  if (value === undefined) return dflt;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : dflt;
 }
 
 function readConfigFile(explicitPath: string | undefined): ConfigFile {
@@ -80,28 +111,31 @@ function splitPaths(value: string | undefined): string[] | undefined {
 
 /**
  * Resolve config with precedence: CLI args > env > config file > platform defaults.
- * Vault roots / session dirs / port can all be specified, satisfying "可指定目录".
+ * Scope dirs / session dirs / port can all be specified, satisfying "可指定目录".
  */
 export function resolveConfig(cli: CliInputs): AttendConfig {
   const defaults = platformDefaults();
   const file = readConfigFile(cli.config);
   const env = process.env;
 
-  const vaultRoots =
+  // The positional dir args (or ATTEND_VAULTS / config `vaultRoots`) scope the
+  // listing to sessions under those dirs. Empty when none given → list everything.
+  const scopeRoots =
     cli.positionals.length > 0
       ? cli.positionals
-      : (splitPaths(env.ATTEND_VAULTS) ?? file.vaultRoots ?? defaults.vaultRoots);
+      : (splitPaths(env.ATTEND_VAULTS) ?? file.vaultRoots ?? defaults.scopeRoots);
 
   const port = Number(cli.port ?? env.ATTEND_PORT ?? file.port ?? defaults.port);
 
   return {
-    vaultRoots: vaultRoots.map((p) => path.resolve(p)),
+    scopeRoots: scopeRoots.map((p) => path.resolve(p)),
     claudeProjects: path.resolve(
       env.ATTEND_CLAUDE_PROJECTS ?? file.claudeProjects ?? defaults.claudeProjects,
     ),
     codexSessions: path.resolve(
       env.ATTEND_CODEX_SESSIONS ?? file.codexSessions ?? defaults.codexSessions,
     ),
+    codexBin: env.ATTEND_CODEX_BIN ?? defaults.codexBin,
     memorySources: (file.memorySources ?? defaults.memorySources).map((p) => path.resolve(p)),
     port: Number.isFinite(port) ? port : defaults.port,
     host: cli.host ?? env.ATTEND_HOST ?? file.host ?? defaults.host,
@@ -110,5 +144,10 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     daemonRegistry: path.resolve(env.ATTEND_DAEMON_REGISTRY ?? defaults.daemonRegistry),
     analysisCache: path.resolve(env.ATTEND_ANALYSIS_CACHE ?? defaults.analysisCache),
     overrides: path.resolve(env.ATTEND_OVERRIDES ?? defaults.overrides),
+    tags: path.resolve(env.ATTEND_TAGS ?? defaults.tags),
+    engagement: path.resolve(env.ATTEND_ENGAGEMENT ?? defaults.engagement),
+    sessionStatus: path.resolve(env.ATTEND_SESSION_STATUS ?? defaults.sessionStatus),
+    recentDays: intOr(env.ATTEND_RECENT_DAYS, defaults.recentDays),
+    maxSessions: intOr(env.ATTEND_MAX_SESSIONS, defaults.maxSessions),
   };
 }

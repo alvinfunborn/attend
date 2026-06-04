@@ -1,11 +1,22 @@
 import { type AlignmentModel, scoreAlignment } from "./alignment.js";
-import { classifyPattern } from "./pattern.js";
+import {
+  AVOIDANCE_REVIEW_MIN_MINUTES,
+  AVOIDANCE_REVIEW_MIN_VISITS,
+  classifyPattern,
+} from "./pattern.js";
 import type { Brief, Pattern, Telemetry } from "./types.js";
 
 export interface PriorityResult {
   score: number;
   reason: string;
   pattern: Pattern;
+}
+
+export function patternScoreNudge(pattern: Pattern): number {
+  if (pattern === "avoidance") return 1;
+  if (pattern === "stalled") return 0.7;
+  if (pattern === "healthy") return -0.3;
+  return 0;
 }
 
 /** Blocker present in `next`. Refines daemon.py's bare-"等" check so that a
@@ -31,7 +42,7 @@ const ALIGN_MIN_COSINE = 0.05;
 
 /**
  * Heuristic priority, memory-led: memory alignment is the primary driver; the
- * behavioral pattern (avoidance / stalled / …) only nudges it, and brief status
+ * behavioral pattern (avoidance / stalled / healthy) only nudges it, and brief status
  * (deferred / done) and an explicit blocker still apply as overrides. Returns a
  * composed, human-readable reason carrying the evidence (DESIGN.md: no opaque
  * scores — the user must be able to audit and override the rank).
@@ -57,22 +68,24 @@ export function evaluatePriority(
   // Pattern is a session-level observation; it only nudges the memory-led rank
   // (small weights) so a behavioral signal can't outrank what memory says matters.
   const pattern = classifyPattern(tel);
+  score += patternScoreNudge(pattern);
   if (pattern === "avoidance") {
-    score += 1;
-    reasons.push(
-      `avoidance signal (${tel.visits} visits over ${fmtDwell(tel.totalMinutes)}, ${tel.prompts} prompts) — returned to repeatedly without advancing, a decision point not more work`,
-    );
+    if (
+      tel.reviewVisits >= AVOIDANCE_REVIEW_MIN_VISITS &&
+      tel.reviewMinutes >= AVOIDANCE_REVIEW_MIN_MINUTES
+    ) {
+      reasons.push(
+        `avoidance signal (${tel.reviewVisits} review visits over ${fmtDwell(tel.reviewMinutes)}) — repeatedly re-read with meaningful scroll and no send, a decision point not more work`,
+      );
+    } else {
+      reasons.push(
+        `avoidance signal (${tel.visits} visits over ${fmtDwell(tel.totalMinutes)}, ${tel.prompts} prompts) — returned to repeatedly without advancing, a decision point not more work`,
+      );
+    }
   } else if (pattern === "stalled") {
-    score += 0.7;
     const touch = tel.lastTouchAgeDays !== null ? `, last touch ${tel.lastTouchAgeDays}d` : "";
     reasons.push(`stalled (${tel.prompts} prompts, 0 actions${touch}) — needs unblock or kill`);
-  } else if (pattern === "fresh") {
-    score += 0.3;
-    reasons.push("fresh — no entries yet");
-  } else if (pattern === "active") {
-    score += 0.1;
   } else if (pattern === "healthy") {
-    score -= 0.3;
     reasons.push("healthy — in flow, don't interrupt");
   }
 

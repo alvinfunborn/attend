@@ -17,7 +17,7 @@ const fakeQuery = ((_args: unknown) => {
 }) as unknown as QueryFn;
 
 describe("ChatEngine", () => {
-  it("starts a run, resolves the session id, and buffers events for late subscribers", async () => {
+  it("starts a run, resolves the session id, and does not replay finished-turn buffer to late subscribers", async () => {
     const engine = new ChatEngine(fakeQuery);
     const id = await engine.start({ cwd: ".", firstText: "hello" });
     expect(id).toBe("sess-9");
@@ -25,16 +25,204 @@ describe("ChatEngine", () => {
     // start() resolves at the init event; let the rest of the stream drain
     await new Promise((r) => setTimeout(r, 50));
 
-    // a late subscriber should still replay the full buffer
+    // Finished turns should come from the persisted transcript, not be replayed
+    // again over SSE when a tab re-opens later.
     const got: UiEvent[] = [];
     engine.subscribe(id, (ev) => got.push(ev));
-    expect(got).toContainEqual({ kind: "assistant_text", text: "hi" });
-    expect(got.some((e) => e.kind === "result")).toBe(true);
+    expect(got).toEqual([{ kind: "sync", turnActive: false, startedAt: expect.any(Number) }]);
   });
 
   it("send returns false for an unknown session", () => {
     const engine = new ChatEngine(fakeQuery);
-    expect(engine.send("nope", "x")).toBe(false);
+    expect(engine.send("nope", { text: "x" })).toBe(false);
+  });
+
+  it("sends Claude attachment blocks alongside the text summary", async () => {
+    const seen: unknown[] = [];
+    const attachmentQuery = ((args: { prompt: AsyncIterable<unknown> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-att" };
+        for await (const msg of args.prompt) {
+          seen.push(msg);
+          yield { type: "result", subtype: "success", result: "ok", session_id: "sess-att" };
+          return;
+        }
+      }
+      return gen();
+    }) as unknown as QueryFn;
+
+    const engine = new ChatEngine(attachmentQuery);
+    const id = await engine.start({ cwd: "." });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(
+      engine.send(id, {
+        text: "See attachments",
+        attachments: [
+          { kind: "image", name: "diagram.png", mediaType: "image/png", data: "abcd" },
+          { kind: "document", name: "brief.pdf", mediaType: "application/pdf", data: "efgh" },
+          { kind: "text", name: "notes.md", text: "# hello" },
+        ],
+      }),
+    ).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(seen[0]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "text", text: "See attachments" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "abcd" } },
+          {
+            type: "document",
+            title: "brief.pdf",
+            source: { type: "base64", media_type: "application/pdf", data: "efgh" },
+          },
+          {
+            type: "document",
+            title: "notes.md",
+            source: { type: "text", media_type: "text/plain", data: "# hello" },
+          },
+        ],
+      },
+      parent_tool_use_id: null,
+    });
+  });
+
+  it("sends Claude attachment blocks on the very first turn too", async () => {
+    const seen: unknown[] = [];
+    const attachmentQuery = ((args: { prompt: AsyncIterable<unknown> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-att-first" };
+        for await (const msg of args.prompt) {
+          seen.push(msg);
+          yield {
+            type: "result",
+            subtype: "success",
+            result: "ok",
+            session_id: "sess-att-first",
+          };
+          return;
+        }
+      }
+      return gen();
+    }) as unknown as QueryFn;
+
+    const engine = new ChatEngine(attachmentQuery);
+    const id = await engine.start({
+      cwd: ".",
+      firstText: "",
+      firstAttachments: [{ kind: "text", name: "notes.md", text: "# hello fork" }],
+    });
+    expect(id).toBe("sess-att-first");
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(seen[0]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            title: "notes.md",
+            source: { type: "text", media_type: "text/plain", data: "# hello fork" },
+          },
+        ],
+      },
+      parent_tool_use_id: null,
+    });
+  });
+
+  it("answers AskUserQuestion with a tool_result payload and clears activeSessions while waiting", async () => {
+    const seen: unknown[] = [];
+    const questionQuery = ((args: { prompt: AsyncIterable<unknown> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-q" };
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu-q1",
+                name: "AskUserQuestion",
+                input: {
+                  questions: [
+                    {
+                      question: "Pick one?",
+                      header: "Choice",
+                      multiSelect: false,
+                      options: [
+                        { label: "A", description: "first" },
+                        { label: "B", description: "second" },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          session_id: "sess-q",
+        };
+        for await (const msg of args.prompt) {
+          seen.push(msg);
+          if (seen.length === 2) {
+            yield { type: "result", subtype: "success", result: "done", session_id: "sess-q" };
+            return;
+          }
+        }
+      }
+      return gen();
+    }) as unknown as QueryFn;
+
+    const engine = new ChatEngine(questionQuery);
+    const id = await engine.start({ cwd: ".", firstText: "hello" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(engine.activeSessions()).toHaveLength(0);
+    expect(
+      engine.answer(id, {
+        toolUseId: "toolu-q1",
+        text: 'Your questions have been answered: "Pick one?"="A".',
+        toolUseResult: {
+          questions: [
+            {
+              question: "Pick one?",
+              header: "Choice",
+              multiSelect: false,
+              options: [
+                { label: "A", description: "first" },
+                { label: "B", description: "second" },
+              ],
+            },
+          ],
+          answers: { "Pick one?": "A" },
+        },
+      }),
+    ).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(seen[0]).toMatchObject({
+      type: "user",
+      message: { role: "user", content: "hello" },
+      parent_tool_use_id: null,
+    });
+    expect(seen[1]).toMatchObject({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            content: 'Your questions have been answered: "Pick one?"="A".',
+            tool_use_id: "toolu-q1",
+          },
+        ],
+      },
+      parent_tool_use_id: "toolu-q1",
+      tool_use_result: { answers: { "Pick one?": "A" } },
+    });
   });
 
   it("fires onTurnEnd with the session id when a turn completes", async () => {

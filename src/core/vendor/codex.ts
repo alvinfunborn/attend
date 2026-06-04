@@ -51,26 +51,40 @@ function parseTs(value: unknown): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
-/** Return the user prompt text if this response item is a typed user message, else null. */
+/**
+ * Return the *real* user prompt text for a typed user message, else null. Codex
+ * injects synthetic user turns before each real one (`<environment_context>`,
+ * `<permissions…>`, etc.) — all `<…>`-wrapped — which would otherwise become the
+ * session's title/first prompt. Skip them, mirroring the Claude source and the
+ * Codex transcript reader.
+ */
 function userPromptText(item: ResponseItem): string | null {
   if (item.type !== "message" || item.role !== "user") return null;
   const c = item.content;
-  if (typeof c === "string") return c.trim() !== "" ? c.trim() : null;
+  const real = (t: string): string | null => {
+    const s = t.trim();
+    return s !== "" && !s.startsWith("<") ? s : null;
+  };
+  if (typeof c === "string") return real(c);
   if (Array.isArray(c)) {
     for (const b of c) {
       if (!b || typeof b !== "object") continue;
       const block = b as { type?: string; text?: string };
-      if (block.type === "input_text" && block.text && block.text.trim() !== "") {
-        return block.text.trim();
+      if (block.type === "input_text" && block.text) {
+        const t = real(block.text);
+        if (t) return t;
       }
     }
   }
   return null;
 }
 
+// Collapse to one line but keep the full prompt (bounded only against pathological
+// pastes): the tab truncates visually via CSS, while the hover tooltip + chat
+// header show the whole thing — so we must not truncate the data here.
 function snippet(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
+  return oneLine.length > 2000 ? `${oneLine.slice(0, 1999)}…` : oneLine;
 }
 
 /** Parse one Codex rollout transcript's text into a normalized session (pure, testable). */

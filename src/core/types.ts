@@ -1,6 +1,6 @@
 /** Shared domain types. session = cache, brief = state. */
 
-export type Pattern = "fresh" | "avoidance" | "stalled" | "healthy" | "active" | "unknown";
+export type Pattern = "avoidance" | "stalled" | "healthy" | "unknown";
 
 export interface BriefFrontMatter {
   status?: string;
@@ -61,6 +61,9 @@ export interface Telemetry {
   /** ISO string of most recent touch, or null */
   lastTouch: string | null;
   lastTouchAgeDays: number | null;
+  /** repeated long read-only reviews: meaningful scroll + long dwell + no send */
+  reviewVisits: number;
+  reviewMinutes: number;
 }
 
 export interface RankedBrief {

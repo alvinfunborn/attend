@@ -15,7 +15,7 @@ v0 (shipped):
 - [x] daemon 跑在 localhost:5050
 - [x] 扫描 vault, 渲染 ranked feed
 - [x] Claude JSONL telemetry: sessions / prompts / actions / dwell / last_touch
-- [x] pattern 分类 (avoidance / stalled / healthy / active / fresh), 中性表达
+- [x] pattern 分类收敛为 3 个可见信号 (avoidance / stalled / healthy), 中性表达
 - [x] 优先级综合 memory keyword × pattern × 显式 blocker, 每条带 reason
 - [x] detail 页 spawn 命令 (copy to clipboard)
 

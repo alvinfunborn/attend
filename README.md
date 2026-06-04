@@ -47,9 +47,9 @@ A deliberate split: *what you can read off one session* vs. *what needs your who
 | **brief** | analyzer daemon (LLM) | one-line "what / where I'm stuck" — *resume state*, not a spec |
 | **priority** | analyzer daemon (LLM) | "is this worth re-engaging now" |
 | **ETA** | analyzer daemon (LLM) | est. minutes to reload context + reply thoughtfully |
-| **pattern** | session JSONL (heuristic) | behavioral observation — `fresh` / `avoidance` / `stalled` / `active` / `healthy` |
+| **pattern** | session JSONL (heuristic) | behavioral observation — `avoidance` / `stalled` / `healthy` (everything else stays unbadged) |
 
-**The analyzer daemon (v2.3).** Every session you create *inside* `attend` (`/chat/new`, `/chat/fork`) gets a paired **daemon session** — a *normal* Claude session, sharing the task's working directory, re-run on each turn-end. It reads the condensed transcript and replies with one JSON object `{brief, priority, etaMin, reason}`. Daemons run on a cheap model (`haiku`), read-only tools (`Read`/`Grep`/`Glob`), and are filtered out of every listing via a registry (`~/.attend/daemons.json`). They are a **vendor seam** — a session is analyzed by its own vendor's analyzer (`ClaudeAnalyzer` is real; `CodexAnalyzer` is a deliberate stub that returns nothing rather than fabricate).
+**The analyzer daemon (v2.3).** Every session you create *inside* `attend` (`/chat/new`, `/chat/fork`) gets a paired **daemon session** — a normal vendor session, sharing the task's working directory, re-run on each turn-end. It reads the condensed transcript and replies with one JSON object `{brief, priority, etaMin, reason}`. Daemons are filtered out of every listing via a registry (`~/.attend/daemons.json`). They are a **vendor seam** — a session is analyzed by its own vendor's analyzer, and the daemon intentionally does **not** pin a separate model/effort profile; it follows the vendor's normal defaults for that environment.
 
 **Fallback (no daemon).** Historical / terminal-launched sessions that have no daemon fall back to a local heuristic: **memory-led** priority — TF-IDF cosine similarity against your Claude memory corpus (local, no API; CJK via bigrams), with small pattern nudges that can't outrank it — and a memory-derived ETA. Every rank carries a one-line, auditable reason (top matched terms + the pattern's evidence). No opaque scores.
 
@@ -57,11 +57,9 @@ A deliberate split: *what you can read off one session* vs. *what needs your who
 
 | Pattern | Trigger | Meaning |
 |---|---|---|
-| `fresh` | 0 sessions | work exists, nothing started |
-| `avoidance` | ≥5 prompts, 0 actions, sustained (≥1h dwell) | a long output-less stretch — possible decision avoidance |
+| `avoidance` | repeated long review visits, or ≥3 revisits over ≥1h without advancing | likely a decision point, not more "work" |
 | `stalled` | 0 actions, last touch ≥ 7 days | cold, no recent activity |
 | `healthy` | actions > 0, avg dwell ≥ 10 min, touch ≤ 3 days | in flow — don't interrupt |
-| `active` | some actions, otherwise | generic in-progress |
 
 Telemetry is **descriptive, never judgmental** (Steel 2007: judgmental feedback on procrastination *worsens* it). All labels are observations, never second-person pressure.
 
@@ -125,6 +123,8 @@ Optional `attend.config.json` (in the cwd, or via `--config`):
 ```
 
 `memorySources` empty → per-project Claude memory (`~/.claude/projects/*/memory/MEMORY.md`) is auto-discovered and unioned — the same memory model as Claude Code.
+
+`vaultRoots` (also `attend <dir>…` positional args, or `ATTEND_VAULTS`) **scopes the listing**: only sessions whose cwd is within one of these dirs (or a subdir) are shown. Omit it → every session is listed. Sessions themselves are always read from the vendor stores (`claudeProjects` / `codexSessions`); this only narrows which ones appear.
 
 ### Endpoints
 
@@ -243,9 +243,9 @@ Touch these only with explicit cause (see `DESIGN.md`):
 | **brief** | 分析守护进程（LLM） | 一句话"做什么 / 卡在哪" —— 是*恢复状态*，不是规格说明 |
 | **priority（优先级）** | 分析守护进程（LLM） | "现在值不值得重新接手" |
 | **ETA** | 分析守护进程（LLM） | 重新加载上下文 + 认真回复预计要花的分钟数 |
-| **pattern（行为模式）** | 会话 JSONL（启发式） | 行为观察 —— `fresh` / `avoidance` / `stalled` / `active` / `healthy` |
+| **pattern（行为模式）** | 会话 JSONL（启发式） | 行为观察 —— `avoidance` / `stalled` / `healthy`（其余情况不打 badge） |
 
-**分析守护进程（v2.3）。** 每个你在 `attend` *内部*创建的会话（`/chat/new`、`/chat/fork`）都会配一个**守护会话** —— 一个*普通的* Claude 会话，与任务共享同一工作目录，在每轮结束时重跑。它读取压缩后的对话，回一个 JSON `{brief, priority, etaMin, reason}`。守护进程跑在便宜模型（`haiku`）上，只用只读工具（`Read`/`Grep`/`Glob`），并通过注册表（`~/.attend/daemons.json`）从所有列表中过滤掉。它是一个**厂商接缝** —— 每个会话由它自己厂商的分析器分析（`ClaudeAnalyzer` 真实可用；`CodexAnalyzer` 是刻意的空桩，宁可不返回也不编造）。
+**分析守护进程（v2.3）。** 每个你在 `attend` *内部*创建的会话（`/chat/new`、`/chat/fork`）都会配一个**守护会话** —— 一个普通的同厂商会话，与任务共享同一工作目录，在每轮结束时重跑。它读取压缩后的对话，回一个 JSON `{brief, priority, etaMin, reason}`。守护进程会通过注册表（`~/.attend/daemons.json`）从所有列表中过滤掉。它是一个**厂商接缝** —— 每个会话由它自己厂商的分析器分析，并且 daemon 不再固定单独的 model/effort 配置，而是跟随当前环境下该厂商会话的默认配置。
 
 **回退（无守护进程）。** 历史会话 / 终端启动的会话没有守护进程，会回退到本地启发式：**记忆主导**的优先级 —— 对你的 Claude 记忆语料做 TF-IDF 余弦相似度（本地、无 API；中文用 bigram），辅以无法盖过它的小幅 pattern 微调 —— 以及一个记忆推导的 ETA。每条排序都带一行可审计的理由（命中关键词 + pattern 的证据）。没有不透明的分数。
 
@@ -253,11 +253,9 @@ Touch these only with explicit cause (see `DESIGN.md`):
 
 | 模式 | 触发条件 | 含义 |
 |---|---|---|
-| `fresh` | 0 个会话 | 工作存在，尚未开始 |
-| `avoidance` | ≥5 prompts、0 actions、且持续（驻留 ≥1h） | 长时间只输入不产出 —— 可能在回避决策 |
+| `avoidance` | 反复长时间 review，或 ≥3 次回访且累计 ≥1h 仍未推进 | 更像是卡在决策点，而不是缺少更多“工作” |
 | `stalled` | 0 actions、最后接触 ≥ 7 天 | 冷却，近期无活动 |
 | `healthy` | actions > 0、平均驻留 ≥ 10 分钟、接触 ≤ 3 天 | 心流中 —— 别打扰 |
-| `active` | 有一些 actions，其余情况 | 一般性进行中 |
 
 埋点遵循**描述性、绝不评判**（Steel 2007：对拖延的评判式反馈反而会加重它）。所有标签都是观察，绝不用第二人称施压。
 

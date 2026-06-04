@@ -13,17 +13,23 @@ function tel(over: Partial<Telemetry>): Telemetry {
     lastActionAgeDays: null,
     lastTouch: null,
     lastTouchAgeDays: null,
+    reviewVisits: 0,
+    reviewMinutes: 0,
     ...over,
   };
 }
 
 describe("classifyPattern", () => {
-  it("fresh when no sessions", () => {
-    expect(classifyPattern(tel({ sessions: 0 }))).toBe("fresh");
+  it("no sessions is left unbadged", () => {
+    expect(classifyPattern(tel({ sessions: 0 }))).toBe("unknown");
   });
 
   it("avoidance: many visits over a long span but the task isn't advancing (prompts ≤ visits)", () => {
     expect(classifyPattern(tel({ visits: 4, totalMinutes: 600, prompts: 3 }))).toBe("avoidance");
+  });
+
+  it("avoidance: repeated long review visits with meaningful scroll and no send", () => {
+    expect(classifyPattern(tel({ reviewVisits: 2, reviewMinutes: 25 }))).toBe("avoidance");
   });
 
   it("NOT avoidance: a single long sitting (one visit) is not decision-avoidance", () => {
@@ -54,9 +60,9 @@ describe("classifyPattern", () => {
     );
   });
 
-  it("active: actions present but not healthy", () => {
+  it("generic in-progress work is left unbadged", () => {
     expect(classifyPattern(tel({ actions: 1, avgSessionMin: 4, lastTouchAgeDays: 5 }))).toBe(
-      "active",
+      "unknown",
     );
   });
 });

@@ -1,0 +1,122 @@
+import fs from "node:fs";
+import type { ToolCall, TranscriptMsg } from "../transcript.js";
+
+/**
+ * Read a Codex rollout transcript (`~/.codex/sessions/**​/rollout-*.jsonl`) into the
+ * same display messages the Claude reader produces, so the console renders a Codex
+ * session's history identically. Schema (codex-cli 0.133, captured from real
+ * rollouts — never fabricated, DESIGN invariant 3): each line is
+ *   {"timestamp","type":<session_meta|response_item|event_msg|…>,"payload":{…}}
+ * and a `response_item` payload is an OpenAI Responses item:
+ *   - message role=user    content=[{type:"input_text",text}]
+ *   - message role=assistant content=[{type:"output_text",text}]
+ *   - function_call         {name,arguments,call_id}
+ *   - function_call_output  {call_id,output}
+ * Synthetic user turns (environment/permission context, all `<…>`-wrapped) and
+ * developer/reasoning items are dropped, mirroring the Claude reader.
+ */
+interface ContentBlock {
+  type?: string;
+  text?: string;
+}
+interface Payload {
+  type?: string;
+  role?: string;
+  content?: unknown;
+  name?: string;
+  arguments?: unknown;
+  input?: unknown;
+  call_id?: string;
+  id?: string;
+  output?: unknown;
+  replacement_history?: unknown;
+}
+interface Line {
+  type?: string;
+  payload?: Payload;
+}
+
+function textOf(content: unknown, kind: string): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as ContentBlock[])
+      .filter((b) => b?.type === kind && b.text)
+      .map((b) => b.text)
+      .join("");
+  }
+  return "";
+}
+
+function parseToolInput(input: unknown): unknown {
+  if (typeof input !== "string") return input;
+  try {
+    return JSON.parse(input);
+  } catch {
+    return input;
+  }
+}
+
+function applyItem(p: Payload, msgs: TranscriptMsg[], toolById: Map<string, ToolCall>): void {
+  if (p.type === "message" && p.role === "user") {
+    const text = textOf(p.content, "input_text").trim();
+    // skip the synthetic <environment_context>/<permissions…> turns
+    if (text && !text.startsWith("<")) msgs.push({ role: "user", text, tools: [] });
+  } else if (p.type === "message" && p.role === "assistant") {
+    const text = textOf(p.content, "output_text").trim();
+    if (text) msgs.push({ role: "assistant", text, tools: [] });
+  } else if (
+    p.type === "function_call" ||
+    p.type === "custom_tool_call" ||
+    p.type === "local_shell_call"
+  ) {
+    const tc: ToolCall = {
+      id: p.call_id ?? p.id ?? null,
+      name: p.name ?? p.type ?? "tool",
+      input: parseToolInput(p.arguments ?? p.input),
+    };
+    if (p.call_id) toolById.set(p.call_id, tc);
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === "assistant") last.tools.push(tc);
+    else msgs.push({ role: "assistant", text: "", tools: [tc] });
+  } else if (
+    (p.type === "function_call_output" || p.type === "custom_tool_call_output") &&
+    p.call_id
+  ) {
+    const tc = toolById.get(p.call_id);
+    if (tc) tc.result = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
+  }
+}
+
+export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch {
+    return [];
+  }
+  const msgs: TranscriptMsg[] = [];
+  const toolById = new Map<string, ToolCall>();
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let o: Line;
+    try {
+      o = JSON.parse(line) as Line;
+    } catch {
+      continue;
+    }
+    const p = o.payload;
+    if (!p) continue;
+    if (o.type === "response_item") {
+      applyItem(p, msgs, toolById);
+    } else if (o.type === "compacted" && Array.isArray(p.replacement_history)) {
+      msgs.length = 0;
+      toolById.clear();
+      for (const item of p.replacement_history) {
+        if (!item || typeof item !== "object") continue;
+        applyItem(item as Payload, msgs, toolById);
+      }
+    }
+  }
+  return msgs.slice(-limit);
+}

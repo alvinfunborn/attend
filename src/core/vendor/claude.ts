@@ -39,9 +39,12 @@ function userPromptText(content: unknown): string | null {
   return null;
 }
 
+// Collapse to one line but keep the full prompt (bounded only against pathological
+// pastes): the tab truncates visually via CSS, while the hover tooltip + chat
+// header show the whole thing — so we must not truncate the data here.
 function snippet(text: string): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
+  return oneLine.length > 2000 ? `${oneLine.slice(0, 1999)}…` : oneLine;
 }
 
 function countActions(content: unknown): number {

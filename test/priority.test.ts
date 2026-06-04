@@ -29,6 +29,8 @@ function tel(over: Partial<Telemetry>): Telemetry {
     lastActionAgeDays: null,
     lastTouch: null,
     lastTouchAgeDays: null,
+    reviewVisits: 0,
+    reviewMinutes: 0,
     ...over,
   };
 }
@@ -55,6 +57,13 @@ describe("evaluatePriority", () => {
     expect(r.score).toBe(1);
     expect(r.reason).toContain("decision point");
     expect(r.reason).toContain("4 visits");
+  });
+
+  it("prefers engagement-backed avoidance evidence when review telemetry exists", () => {
+    const r = evaluatePriority(brief({}), tel({ reviewVisits: 3, reviewMinutes: 42 }), null);
+    expect(r.pattern).toBe("avoidance");
+    expect(r.reason).toContain("3 review visits");
+    expect(r.reason).toContain("meaningful scroll");
   });
 
   it("done is pushed to the bottom", () => {

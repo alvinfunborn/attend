@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCommand, buildTerminalInvocation } from "../src/core/launch.js";
+import { buildCommand, buildTerminalInvocation, revealCommand } from "../src/core/launch.js";
 
 describe("buildCommand", () => {
   it("resume", () => {
@@ -17,6 +17,16 @@ describe("buildCommand", () => {
     expect(buildCommand("new", "codex", { prompt: "fix the bug" })).toBe('codex "fix the bug"');
     expect(buildCommand("new", "claude", { prompt: 'say "hi"' })).toBe('claude "say \\"hi\\""');
   });
+  it("new, with model and effort overrides", () => {
+    expect(buildCommand("new", "claude", { model: "sonnet", effort: "high" })).toBe(
+      'claude --model "sonnet" --effort "high"',
+    );
+    expect(
+      buildCommand("new", "codex", { model: "gpt-5.2-codex", effort: "medium", prompt: "fix it" }),
+    ).toBe(
+      'codex -c "model=\\"gpt-5.2-codex\\"" -c "model_reasoning_effort=\\"medium\\"" "fix it"',
+    );
+  });
 });
 
 describe("buildTerminalInvocation", () => {
@@ -33,5 +43,26 @@ describe("buildTerminalInvocation", () => {
   });
   it("falls back to x-terminal-emulator on linux", () => {
     expect(buildTerminalInvocation("linux", "/p", "codex").file).toBe("x-terminal-emulator");
+  });
+});
+
+describe("revealCommand", () => {
+  it("reveals (selects) the file in Finder on macOS", () => {
+    expect(revealCommand("darwin", "/p/report.md")).toEqual({
+      file: "open",
+      args: ["-R", "/p/report.md"],
+    });
+  });
+  it("selects the file in Explorer on Windows", () => {
+    expect(revealCommand("win32", "D:\\proj\\a.ogg")).toEqual({
+      file: "explorer.exe",
+      args: ["/select,D:\\proj\\a.ogg"],
+    });
+  });
+  it("opens the containing folder on linux", () => {
+    expect(revealCommand("linux", "/p/sub/a.md")).toEqual({
+      file: "xdg-open",
+      args: ["/p/sub"],
+    });
   });
 });

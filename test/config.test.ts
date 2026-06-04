@@ -10,6 +10,8 @@ const ENV_KEYS = [
   "ATTEND_HOST",
   "ATTEND_CLAUDE_PROJECTS",
   "ATTEND_CODEX_SESSIONS",
+  "ATTEND_TAGS",
+  "ATTEND_ENGAGEMENT",
 ];
 
 afterEach(() => {
@@ -17,18 +19,24 @@ afterEach(() => {
 });
 
 describe("resolveConfig precedence", () => {
-  it("falls back to platform defaults (cwd vault, port 5050, localhost)", () => {
+  it("falls back to platform defaults (no scope, port 5050, localhost)", () => {
     const c = resolveConfig({ positionals: [] });
     expect(c.port).toBe(5050);
     expect(c.host).toBe("127.0.0.1");
-    expect(c.vaultRoots).toEqual([path.resolve(process.cwd())]);
+    expect(c.scopeRoots).toEqual([]); // no dirs → list every session
     expect(c.open).toBe(true);
   });
 
-  it("uses positional dirs as vault roots over env/defaults", () => {
+  it("uses positional dirs as scope roots over env/defaults", () => {
     process.env.ATTEND_VAULTS = "/should/be/ignored";
     const c = resolveConfig({ positionals: ["foo", "bar"] });
-    expect(c.vaultRoots).toEqual([path.resolve("foo"), path.resolve("bar")]);
+    expect(c.scopeRoots).toEqual([path.resolve("foo"), path.resolve("bar")]);
+  });
+
+  it("scopes from ATTEND_VAULTS when no positional dirs are given", () => {
+    process.env.ATTEND_VAULTS = ["/a", "/b"].join(path.delimiter);
+    const c = resolveConfig({ positionals: [] });
+    expect(c.scopeRoots).toEqual([path.resolve("/a"), path.resolve("/b")]);
   });
 
   it("env beats config file; CLI beats env for port", () => {
@@ -53,5 +61,17 @@ describe("resolveConfig precedence", () => {
 
   it("--no-open disables auto-open", () => {
     expect(resolveConfig({ positionals: [], noOpen: true }).open).toBe(false);
+  });
+
+  it("resolves the tag store path from env", () => {
+    process.env.ATTEND_TAGS = "/tmp/attend-tags.json";
+    expect(resolveConfig({ positionals: [] }).tags).toBe(path.resolve("/tmp/attend-tags.json"));
+  });
+
+  it("resolves the engagement store path from env", () => {
+    process.env.ATTEND_ENGAGEMENT = "/tmp/attend-engagement.json";
+    expect(resolveConfig({ positionals: [] }).engagement).toBe(
+      path.resolve("/tmp/attend-engagement.json"),
+    );
   });
 });
