@@ -25,6 +25,18 @@ describe("renderConsole", () => {
     expect(html).toContain("if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t);");
   });
 
+  it("themes the new-session choosers and commits dropdown picks on click", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("applyVendorChooserTheme(input.value);");
+    expect(html).toContain("applyDirChooserTheme(input.value);");
+    expect(html).toContain(
+      "opt.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); choose(info.vendor); };",
+    );
+    expect(html).toContain(
+      "opt.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); choose(dir); };",
+    );
+  });
+
   // Regression guard: the whole page (inline <script> included) is one template
   // literal, so node eats single backslashes — a regex written `/\/x/` or `/\b/`
   // in source reaches the browser as `//x/` / a backspace char and the resulting

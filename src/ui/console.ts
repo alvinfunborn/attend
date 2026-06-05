@@ -1495,6 +1495,12 @@ window.__TAGS__ = ${tagsJson};
     node.style.backgroundColor=theme.bg;
     node.style.borderColor=theme.border;
   }
+  function clearTheme(node){
+    if(!node) return;
+    node.style.color='';
+    node.style.backgroundColor='';
+    node.style.borderColor='';
+  }
   function isAbsolutePathLike(p){ return /^(?:~\\/|\\/|[A-Za-z]:[\\\\/])/.test(String(p||'')); }
   function normalizePathish(p){ return String(p||'').replace(/\\\\/g,'/'); }
   function relativeToRoot(dir){
@@ -1515,6 +1521,21 @@ window.__TAGS__ = ${tagsJson};
     return vendor==='claude'
       ? { fg:'#c2410c', bg:'#fff7ed', border:'#fdba74' }
       : { fg:'#3730a3', bg:'#eef2ff', border:'#a5b4fc' };
+  }
+  function themeChooserInput(input, theme){
+    if(!input) return;
+    if(theme) styleTheme(input, theme);
+    else clearTheme(input);
+  }
+  function applyVendorChooserTheme(value){
+    var input=byId('nvendor');
+    var vendor=String(value||'').trim().toLowerCase();
+    themeChooserInput(input, vendorInfo(vendor) ? vendorTheme(vendor) : null);
+  }
+  function applyDirChooserTheme(value){
+    var input=byId('ndir');
+    var dir=String(value||'').trim();
+    themeChooserInput(input, dir ? projectTheme(dirDisplayLabel(dir) || dir) : null);
   }
   function vendorBadge(vendor){
     return el('span','vtag '+vendor,vendor);
@@ -1605,6 +1626,7 @@ window.__TAGS__ = ${tagsJson};
     function hide(){ active=-1; drop.hidden=true; }
     function choose(vendor, keepOpenUntilClick){
       input.value=vendor||'';
+      applyVendorChooserTheme(input.value);
       applyNewSessionPrefs(true);
       if(keepOpenUntilClick) window.setTimeout(hide, 0);
       else hide();
@@ -1616,13 +1638,14 @@ window.__TAGS__ = ${tagsJson};
         var opt=el('div','chooser-opt');
         opt.setAttribute('data-value', info.vendor);
         var line=el('div','chooser-opt-line');
+        styleTheme(opt, vendorTheme(info.vendor));
         var label=el('div','chooser-opt-label', info.vendor);
         line.appendChild(label);
         if(info.chat===false) line.appendChild(el('span','chooser-opt-note','terminal'));
         opt.appendChild(line);
         opt.appendChild(el('div','chooser-opt-meta', info.chat===false ? 'opens a real terminal session' : 'starts in-browser chat'));
-        opt.onmousedown=function(ev){ ev.preventDefault(); ev.stopPropagation(); choose(info.vendor, true); };
-        opt.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); };
+        opt.onmousedown=function(ev){ ev.preventDefault(); ev.stopPropagation(); };
+        opt.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); choose(info.vendor); };
         drop.appendChild(opt);
       });
       if(!hits.length) drop.appendChild(el('div','chooser-empty','No available vendors'));
@@ -1633,7 +1656,7 @@ window.__TAGS__ = ${tagsJson};
     }
     input.addEventListener('click', function(ev){ ev.stopPropagation(); });
     input.addEventListener('focus', function(){ render(true, ''); });
-    input.addEventListener('input', function(){ active=-1; render(true, input.value); });
+    input.addEventListener('input', function(){ active=-1; applyVendorChooserTheme(input.value); render(true, input.value); });
     input.addEventListener('keydown', function(ev){
       if(isImeConfirming(ev)) return;
       var opts=items(), n=opts.length;
@@ -1642,7 +1665,7 @@ window.__TAGS__ = ${tagsJson};
       else if(ev.key==='Enter'){ var val=input.value.trim(); var info=vendorInfo(val); if(!val) return; if(n && active>=0 && opts[active]) choose(opts[active].getAttribute('data-value')); else if(info) choose(info.vendor); }
       else if(ev.key==='Escape'){ hide(); }
     });
-    input.addEventListener('blur', function(){ var info=vendorInfo(input.value.trim()); if(info) choose(info.vendor); });
+    input.addEventListener('blur', function(){ var info=vendorInfo(input.value.trim()); if(info) choose(info.vendor); else applyVendorChooserTheme(input.value); });
     drop.addEventListener('mousedown', function(ev){ ev.stopPropagation(); });
     drop.addEventListener('click', function(ev){ ev.stopPropagation(); });
     document.addEventListener('click', function(ev){ if(!byId('nvendorBox') || byId('nvendorBox').contains(ev.target)) return; hide(); });
@@ -1658,6 +1681,7 @@ window.__TAGS__ = ${tagsJson};
     function hide(){ active=-1; drop.hidden=true; }
     function choose(dir, keepOpenUntilClick){
       input.value=dir||'';
+      applyDirChooserTheme(input.value);
       if(keepOpenUntilClick) window.setTimeout(hide, 0);
       else hide();
     }
@@ -1667,10 +1691,11 @@ window.__TAGS__ = ${tagsJson};
       hits.forEach(function(dir){
         var opt=el('div','chooser-opt');
         opt.setAttribute('data-value', dir);
+        styleTheme(opt, projectTheme(dirDisplayLabel(dir) || dir));
         opt.appendChild(el('div','chooser-opt-label', dirDisplayLabel(dir)));
         opt.appendChild(el('div','chooser-opt-meta', dir));
-        opt.onmousedown=function(ev){ ev.preventDefault(); ev.stopPropagation(); choose(dir, true); };
-        opt.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); };
+        opt.onmousedown=function(ev){ ev.preventDefault(); ev.stopPropagation(); };
+        opt.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); choose(dir); };
         drop.appendChild(opt);
       });
       if(!hits.length){
@@ -1684,7 +1709,7 @@ window.__TAGS__ = ${tagsJson};
     }
     input.addEventListener('click', function(ev){ ev.stopPropagation(); });
     input.addEventListener('focus', function(){ render(true, ''); });
-    input.addEventListener('input', function(){ active=-1; render(true, input.value); });
+    input.addEventListener('input', function(){ active=-1; applyDirChooserTheme(input.value); render(true, input.value); });
     input.addEventListener('keydown', function(ev){
       if(isImeConfirming(ev)) return;
       var opts=items(), n=opts.length;
@@ -1696,7 +1721,7 @@ window.__TAGS__ = ${tagsJson};
     drop.addEventListener('mousedown', function(ev){ ev.stopPropagation(); });
     drop.addEventListener('click', function(ev){ ev.stopPropagation(); });
     document.addEventListener('click', function(ev){ if(!byId('ndirBox') || byId('ndirBox').contains(ev.target)) return; hide(); });
-    if(DIRS[0]) input.value=DIRS[0];
+    if(DIRS[0]) choose(DIRS[0]);
   }
   function tooltipRoot(){ return byId('tabtip'); }
   function hideTabTip(){
