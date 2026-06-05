@@ -17,6 +17,14 @@ describe("renderConsole", () => {
     expect(html).toContain("dispatchSend({ text:v, attachments:[] }, v);");
   });
 
+  it("only marks AskUserQuestion as answered when a non-empty result arrives", () => {
+    const html = renderConsole(view);
+    expect(html).toContain(
+      "if(tc.name==='AskUserQuestion' && hasQuestionAnswerResult(tc.result, tc.isError)) lockQuestionTool(d);",
+    );
+    expect(html).toContain("if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t);");
+  });
+
   // Regression guard: the whole page (inline <script> included) is one template
   // literal, so node eats single backslashes — a regex written `/\/x/` or `/\b/`
   // in source reaches the browser as `//x/` / a backspace char and the resulting

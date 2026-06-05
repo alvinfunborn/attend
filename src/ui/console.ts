@@ -2930,6 +2930,9 @@ window.__TAGS__ = ${tagsJson};
     var body=d.querySelector('.rq');
     if(body) setQuestionBusy(body, true, 'answered');
   }
+  function hasQuestionAnswerResult(result, isError){
+    return !isError && typeof result==='string' && !!result.trim();
+  }
   // tc = { id?, name, input, result?, isError? }
   function addTool(tc){
     if(tc.id && toolEls[tc.id]) return toolEls[tc.id];
@@ -2962,7 +2965,7 @@ window.__TAGS__ = ${tagsJson};
     var out=el('pre','tool-out'+(tc.isError?' err':''));
     if(tc.result!=null && tc.result!==''){ out.textContent=String(tc.result).slice(0,8000); } else { out.style.display='none'; }
     d.appendChild(out);
-    if(tc.name==='AskUserQuestion' && tc.result) lockQuestionTool(d);
+    if(tc.name==='AskUserQuestion' && hasQuestionAnswerResult(tc.result, tc.isError)) lockQuestionTool(d);
     var target=renderTarget || byId('msgs');
     target.appendChild(d);
     if(tc.id) toolEls[tc.id]=d;
@@ -3178,7 +3181,7 @@ window.__TAGS__ = ${tagsJson};
     }
     else if(ev.kind==='tool_result'){ assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
       cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
-      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; lockQuestionTool(t); }
+      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t); }
       else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
       keepGenLast(); scroll(); scheduleLatestPin(); }
     else if(ev.kind==='result'){ assistantEl=null; turnEnded(); }
