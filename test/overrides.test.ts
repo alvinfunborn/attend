@@ -36,12 +36,21 @@ describe("OverrideStore", () => {
     expect(store.get("s1")).toEqual({ priority: 7, etaMin: 30 });
   });
 
+  it("pins state and pattern overrides", () => {
+    const store = new OverrideStore(tmpFile());
+    expect(store.set("s1", { state: "needs_review" })).toEqual({ state: "needs_review" });
+    expect(store.set("s1", { pattern: "avoidance" })).toEqual({
+      state: "needs_review",
+      pattern: "avoidance",
+    });
+  });
+
   it("null clears a single pin; clearing both removes the entry", () => {
     const store = new OverrideStore(tmpFile());
-    store.set("s1", { priority: 5, etaMin: 20 });
+    store.set("s1", { priority: 5, etaMin: 20, state: "done", pattern: "avoidance" });
     expect(store.set("s1", { priority: null })?.etaMin).toBe(20);
     expect(store.get("s1")?.priority).toBeUndefined();
-    expect(store.set("s1", { etaMin: null })).toBeNull();
+    expect(store.set("s1", { etaMin: null, state: null, pattern: null })).toBeNull();
     expect(store.get("s1")).toBeNull();
   });
 

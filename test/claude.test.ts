@@ -65,4 +65,24 @@ describe("parseClaudeTranscript", () => {
     expect(s.prompts).toBe(0);
     expect(s.cwd).toBeNull();
   });
+
+  it("does not let metadata rows refresh the activity timestamp", () => {
+    const raw = jsonl(
+      {
+        type: "user",
+        timestamp: "2026-05-01T10:00:00Z",
+        message: { content: "open a PR" },
+      },
+      {
+        type: "assistant",
+        timestamp: "2026-05-01T10:05:00Z",
+        message: { content: "done" },
+      },
+      { type: "pr-link", timestamp: "2026-05-02T12:00:00Z", url: "https://example.test/pr/1" },
+      { type: "attachment", timestamp: "2026-05-03T12:00:00Z", fileName: "artifact.txt" },
+    );
+    const s = parseClaudeTranscript("s.jsonl", raw);
+    expect(s.firstTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
+    expect(s.lastTs).toBe(Date.parse("2026-05-01T10:05:00Z"));
+  });
 });

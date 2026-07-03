@@ -27,14 +27,22 @@ import type { SessionSource } from "./index.js";
 
 const ACTION_ITEM_TYPES = new Set(["function_call", "local_shell_call", "custom_tool_call"]);
 
+type Payload = ResponseItem & SessionMeta & EventPayload;
+
 interface RolloutLine {
   timestamp?: string;
   type?: string;
-  payload?: ResponseItem & { cwd?: string };
+  payload?: Payload;
   // tolerate bare (pre-RolloutLine) records that omit the wrapper
   cwd?: string;
   role?: string;
   content?: unknown;
+}
+
+interface SessionMeta {
+  cwd?: string;
+  thread_source?: string;
+  source?: { subagent?: unknown };
 }
 
 interface ResponseItem {
@@ -43,12 +51,35 @@ interface ResponseItem {
   content?: unknown;
   cwd?: string;
   id?: string;
+  phase?: string;
 }
+
+interface EventPayload {
+  turn_id?: string;
+  started_at?: number;
+  completed_at?: number;
+  phase?: string;
+}
+
+interface ActiveTurn {
+  turnId: string | null;
+  startedAt: number | null;
+}
+
+const TERMINAL_EVENT_TYPES = new Set(["task_complete", "task_failed", "task_cancelled"]);
 
 function parseTs(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const t = Date.parse(value);
   return Number.isNaN(t) ? null : t;
+}
+
+function secondsToMs(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.floor(value * 1000) : null;
+}
+
+function isFinalAnswer(item: Payload): boolean {
+  return item.phase === "final_answer";
 }
 
 /**
@@ -87,6 +118,23 @@ function snippet(text: string): string {
   return oneLine.length > 2000 ? `${oneLine.slice(0, 1999)}…` : oneLine;
 }
 
+/** Codex team-mode workers are execution details of the parent session. */
+export function isCodexSubagentTranscript(raw: string): boolean {
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let obj: RolloutLine;
+    try {
+      obj = JSON.parse(line) as RolloutLine;
+    } catch {
+      continue;
+    }
+    if (obj.type !== "session_meta") continue;
+    const meta = obj.payload;
+    return meta?.thread_source === "subagent" || !!meta?.source?.subagent;
+  }
+  return false;
+}
+
 /** Parse one Codex rollout transcript's text into a normalized session (pure, testable). */
 export function parseCodexTranscript(file: string, raw: string): RawSession {
   const session: RawSession = {
@@ -106,6 +154,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
   };
   const gapMs = VISIT_GAP_MINUTES * 60_000;
   let prevTs: number | null = null;
+  let activeTurn: ActiveTurn | null = null;
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let obj: RolloutLine;
@@ -126,7 +175,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
 
     // Normalize wrapped vs. bare records into (kind, item).
     let kind = obj.type;
-    let item: ResponseItem | undefined = obj.payload;
+    let item: Payload | undefined = obj.payload;
     if (item === undefined) {
       // bare record: infer kind from its own shape
       if (obj.cwd !== undefined && obj.type === undefined) kind = "session_meta";
@@ -140,6 +189,22 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       const cwd = item?.cwd ?? obj.cwd;
       if (session.cwd === null && cwd) session.cwd = cwd;
       if (session.sessionId === null && item?.id) session.sessionId = item.id;
+    } else if (kind === "event_msg" && item) {
+      if (item.type === "task_started") {
+        activeTurn = {
+          turnId: item.turn_id ?? null,
+          startedAt: secondsToMs(item.started_at) ?? ts,
+        };
+      } else if (isFinalAnswer(item)) {
+        activeTurn = null;
+      } else if (
+        activeTurn &&
+        item.type &&
+        TERMINAL_EVENT_TYPES.has(item.type) &&
+        (!activeTurn.turnId || !item.turn_id || item.turn_id === activeTurn.turnId)
+      ) {
+        activeTurn = null;
+      }
     } else if (kind === "response_item" && item) {
       const text = userPromptText(item);
       if (text !== null) {
@@ -152,6 +217,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       } else if (item.type && ACTION_ITEM_TYPES.has(item.type)) {
         session.actions += 1;
       }
+      if (isFinalAnswer(item)) activeTurn = null;
     }
   }
   // Fallback: rollout filenames embed the session UUID (rollout-<ts>-<uuid>.jsonl).
@@ -160,6 +226,10 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       file,
     );
     if (m) session.sessionId = m[1] ?? null;
+  }
+  if (activeTurn) {
+    session.active = true;
+    session.activeStartedAt = activeTurn.startedAt;
   }
   return session;
 }
@@ -190,11 +260,14 @@ export class CodexSource implements SessionSource {
 
   scan(): RawSession[] {
     if (!fs.existsSync(this.sessionsDir)) return [];
-    return findJsonl(this.sessionsDir).map((f) => {
+    const sessions: RawSession[] = [];
+    for (const f of findJsonl(this.sessionsDir)) {
       try {
-        return parseCodexTranscript(f, fs.readFileSync(f, "utf-8"));
+        const raw = fs.readFileSync(f, "utf-8");
+        if (isCodexSubagentTranscript(raw)) continue;
+        sessions.push(parseCodexTranscript(f, raw));
       } catch {
-        return {
+        sessions.push({
           path: f,
           vendor: "codex" as const,
           sessionId: null,
@@ -208,8 +281,9 @@ export class CodexSource implements SessionSource {
           prompts: 0,
           actions: 0,
           visits: 0,
-        };
+        });
       }
-    });
+    }
+    return sessions;
   }
 }

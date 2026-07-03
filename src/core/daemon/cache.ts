@@ -1,10 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
+export type AnalysisState =
+  | "continue_ready"
+  | "needs_decision"
+  | "needs_input"
+  | "blocked"
+  | "needs_review"
+  | "followup_suggested"
+  | "done";
+
 /** The daemon's structured verdict for one task session. */
 export interface Analysis {
   /** ≤8-word headline — the tab title */
   brief: string;
+  /** why the assistant handed control back, or null for older cached verdicts */
+  state: AnalysisState | null;
   /** 0–10, higher = more deserving of attention now */
   priority: number;
   /** estimated minutes to re-engage (re-read last turn + reply) */

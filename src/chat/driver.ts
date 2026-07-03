@@ -29,13 +29,29 @@ export interface PdfAttachment {
   data: string;
 }
 
+export type FileAttachmentMediaType =
+  | "application/vnd.ms-excel"
+  | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  | "application/vnd.ms-excel.sheet.macroEnabled.12"
+  | "application/vnd.ms-excel.sheet.binary.macroEnabled.12"
+  | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+  | "application/vnd.ms-excel.template.macroEnabled.12"
+  | "application/vnd.ms-excel.addin.macroEnabled.12";
+
+export interface FileAttachment {
+  kind: "file";
+  name: string;
+  mediaType: FileAttachmentMediaType;
+  data: string;
+}
+
 export interface TextAttachment {
   kind: "text";
   name: string;
   text: string;
 }
 
-export type ChatAttachment = ImageAttachment | PdfAttachment | TextAttachment;
+export type ChatAttachment = ImageAttachment | PdfAttachment | FileAttachment | TextAttachment;
 
 export interface UserTurn {
   text: string;

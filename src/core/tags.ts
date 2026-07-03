@@ -21,6 +21,19 @@ export class TagStore {
 
   constructor(private readonly file: string) {}
 
+  private keys(input: string | string[]): string[] {
+    const raw = Array.isArray(input) ? input : [input];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const key of raw) {
+      const next = key.trim();
+      if (!next || seen.has(next)) continue;
+      seen.add(next);
+      out.push(next);
+    }
+    return out;
+  }
+
   private load(): void {
     if (this.loaded) return;
     this.loaded = true;
@@ -58,9 +71,13 @@ export class TagStore {
     return [...this.tags];
   }
 
-  tagsFor(sessionId: string): string[] {
+  tagsFor(sessionId: string | string[]): string[] {
     this.load();
-    return [...(this.bySession.get(sessionId) ?? [])];
+    const assigned = new Set<string>();
+    for (const key of this.keys(sessionId)) {
+      for (const tag of this.bySession.get(key) ?? []) assigned.add(tag);
+    }
+    return this.tags.filter((tag) => assigned.has(tag));
   }
 
   create(name: string): string[] {
@@ -90,8 +107,10 @@ export class TagStore {
     return this.list();
   }
 
-  setSessionTags(sessionId: string, tags: string[]): string[] {
+  setSessionTags(sessionId: string | string[], tags: string[]): string[] {
     this.load();
+    const keys = this.keys(sessionId);
+    if (!keys.length) return [];
     const next: string[] = [];
     const used = new Set<string>();
     for (const raw of tags) {
@@ -101,8 +120,10 @@ export class TagStore {
       next.push(tag);
       if (!this.tags.includes(tag)) this.tags.push(tag);
     }
-    if (next.length) this.bySession.set(sessionId, next);
-    else this.bySession.delete(sessionId);
+    for (const key of keys) {
+      if (next.length) this.bySession.set(key, next);
+      else this.bySession.delete(key);
+    }
     this.persist();
     return [...next];
   }

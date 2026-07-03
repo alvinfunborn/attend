@@ -27,7 +27,7 @@ const fakeQuery = ((args: {
           content: [
             {
               type: "text",
-              text: '{"brief":"refactor parser","priority":7,"etaMin":12,"reason":"two questions, no edits"}',
+              text: '{"brief":"refactor parser","state":"needs_decision","priority":7,"etaMin":12,"reason":"two questions, no edits"}',
             },
           ],
         },
@@ -40,7 +40,10 @@ const fakeQuery = ((args: {
         type: "assistant",
         message: {
           content: [
-            { type: "text", text: '{"brief":"new session","priority":0,"etaMin":0,"reason":""}' },
+            {
+              type: "text",
+              text: '{"brief":"new session","state":"done","priority":0,"etaMin":0,"reason":""}',
+            },
           ],
         },
         session_id: "daemon-1",
@@ -63,7 +66,7 @@ const fakeCodexExec: CodexExecFn = (req) => {
           type: "item.completed",
           item: {
             type: "agent_message",
-            text: '{"brief":"codex task","priority":6,"etaMin":9,"reason":"exploring files"}',
+            text: '{"brief":"codex task","state":"continue_ready","priority":6,"etaMin":9,"reason":"exploring files"}',
           },
         },
         { type: "turn.completed" },
@@ -74,7 +77,7 @@ const fakeCodexExec: CodexExecFn = (req) => {
           type: "item.completed",
           item: {
             type: "agent_message",
-            text: '{"brief":"new session","priority":0,"etaMin":0,"reason":""}',
+            text: '{"brief":"new session","state":"done","priority":0,"etaMin":0,"reason":""}',
           },
         },
         { type: "turn.completed" },
@@ -128,6 +131,7 @@ describe("DaemonOrchestrator", () => {
     await orch.ensureDaemon("task-1", "claude", os.tmpdir());
     const a = await orch.analyzeTask("task-1", os.tmpdir());
     expect(a?.brief).toBe("refactor parser");
+    expect(a?.state).toBe("needs_decision");
     expect(a?.priority).toBe(7);
     expect(orch.analysis("task-1")?.brief).toBe("refactor parser");
   });
@@ -158,6 +162,7 @@ describe("DaemonOrchestrator", () => {
     expect(orch.isDaemon("cx-daemon-1")).toBe(true);
     const a = await orch.analyzeTask("cx-1", os.tmpdir());
     expect(a?.brief).toBe("codex task");
+    expect(a?.state).toBe("continue_ready");
     expect(a?.priority).toBe(6);
   });
 
@@ -219,8 +224,106 @@ describe("DaemonOrchestrator", () => {
     const analyzer = new ClaudeAnalyzer(base, fakeQuery);
     await analyzer.analyze("daemon-1", os.tmpdir(), sessionId);
     const prompt = String(claudeCalls.at(-1)?.prompt ?? "");
-    expect(prompt).toContain("Opening user goal: 查看codebase的livekit接电话的实现情况");
-    expect(prompt).toContain("Latest user request: 那就这样, 前后端创建分支提交并创建pr");
-    expect(prompt).not.toContain("Opening user goal: 只改1吧");
+    expect(prompt).toContain('"brief" is the best glance label for a crowded session list');
+    expect(prompt).toContain(
+      '"state":"<continue_ready|needs_decision|needs_input|blocked|needs_review|followup_suggested|done>"',
+    );
+    expect(prompt).toContain('"priority" is workspace-level business importance');
+    expect(prompt).toContain("An activity can be the glance label");
+    expect(prompt).toContain(
+      "Initial user goal (historical context only): 查看codebase的livekit接电话的实现情况",
+    );
+    expect(prompt).toContain("Current/latest user request: 那就这样, 前后端创建分支提交并创建pr");
+    expect(prompt.indexOf("Current/latest user request:")).toBeLessThan(
+      prompt.indexOf("Initial user goal"),
+    );
+    expect(prompt).not.toContain("Initial user goal (historical context only): 只改1吧");
+  });
+
+  it("keeps a mid-session user pivot buried under later activity (memory anchor)", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const base = path.join(os.tmpdir(), `attend-claude-proj-${uniq}`);
+    const proj = path.join(base, "proj");
+    const sessionId = `task-pivot-${uniq}`;
+    const file = path.join(proj, `${sessionId}.jsonl`);
+    fs.mkdirSync(proj, { recursive: true });
+    cleanup.push(file);
+    cleanup.push(base);
+
+    const lines: unknown[] = [
+      { type: "user", message: { content: "帮我调查登录超时的问题" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "开始排查登录链路。" }] } },
+      // The real pivot — a NEW task introduced early, then buried under filler so a
+      // naive "last N messages" window would drop it entirely.
+      { type: "user", message: { content: "先放一放，改成做暗色主题切换" } },
+    ];
+    for (let i = 0; i < 205; i++) {
+      lines.push({
+        type: "assistant",
+        message: { content: [{ type: "text", text: `filler-${i}` }] },
+      });
+    }
+    // Latest turn is a routine admin action; it must NOT become the brief on its own.
+    lines.push({ type: "user", message: { content: "打包看看" } });
+    fs.writeFileSync(file, lines.map((x) => JSON.stringify(x)).join("\n"));
+
+    const analyzer = new ClaudeAnalyzer(base, fakeQuery);
+    await analyzer.analyze("daemon-1", os.tmpdir(), sessionId);
+    const prompt = String(claudeCalls.at(-1)?.prompt ?? "");
+    // The buried pivot survives condensation because user turns are anchor candidates.
+    expect(prompt).toContain("先放一放，改成做暗色主题切换");
+    // The opening goal is still available as historical context, and the latest admin
+    // action is surfaced as the current request (not lost, but not the only signal).
+    expect(prompt).toContain("Initial user goal (historical context only): 帮我调查登录超时的问题");
+    expect(prompt).toContain("Current/latest user request: 打包看看");
+  });
+
+  it("pairs a short choice reply with the question it answers", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const base = path.join(os.tmpdir(), `attend-claude-proj-${uniq}`);
+    const proj = path.join(base, "proj");
+    const sessionId = `task-choice-${uniq}`;
+    const file = path.join(proj, `${sessionId}.jsonl`);
+    fs.mkdirSync(proj, { recursive: true });
+    cleanup.push(file);
+    cleanup.push(base);
+
+    const lines: unknown[] = [
+      { type: "user", message: { content: "帮我设计缓存层" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "开始设计缓存层。" }] } },
+      // The assistant poses a multiple-choice question; the user's answer is just "B",
+      // which is meaningless without this question.
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "text",
+              text: "缓存方案可选:\nA) 内存 LRU\nB) Redis 外部缓存\nC) 无缓存直接查库\n你选哪个?",
+            },
+          ],
+        },
+      },
+      { type: "user", message: { content: "B" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "好，用 Redis。" }] } },
+    ];
+    // Bury the exchange so it is NOT in the trailing window — it must survive purely via
+    // the user-turn pairing.
+    for (let i = 0; i < 205; i++) {
+      lines.push({
+        type: "assistant",
+        message: { content: [{ type: "text", text: `filler-${i}` }] },
+      });
+    }
+    lines.push({ type: "user", message: { content: "打包看看" } });
+    fs.writeFileSync(file, lines.map((x) => JSON.stringify(x)).join("\n"));
+
+    const analyzer = new ClaudeAnalyzer(base, fakeQuery);
+    await analyzer.analyze("daemon-1", os.tmpdir(), sessionId);
+    const prompt = String(claudeCalls.at(-1)?.prompt ?? "");
+    // The bare "B" reply survives...
+    expect(prompt).toContain("User: B");
+    // ...alongside the question that gives it meaning, even though it is buried under filler.
+    expect(prompt).toContain("Redis 外部缓存");
   });
 });

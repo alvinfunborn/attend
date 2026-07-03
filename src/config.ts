@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { defaultCodexModelsCachePath } from "./core/vendor/codex-models.js";
 import { resolveCodexBin } from "./core/vendor/detect.js";
 
 export interface AttendConfig {
@@ -12,8 +13,12 @@ export interface AttendConfig {
   scopeRoots: string[];
   /** ~/.claude/projects */
   claudeProjects: string;
+  /** Models shown for Claude new-session overrides. Empty = UI fallback list. */
+  claudeModels: string[];
   /** ~/.codex/sessions */
   codexSessions: string;
+  /** ~/.codex/models_cache.json */
+  codexModelsCache: string;
   /** resolved `codex` binary (PATH or app bundle), or null when not installed —
    *  gates in-browser Codex chat / the Codex daemon. */
   codexBin: string | null;
@@ -54,7 +59,9 @@ export interface CliInputs {
 interface ConfigFile {
   vaultRoots?: string[];
   claudeProjects?: string;
+  claudeModels?: string[];
   codexSessions?: string;
+  codexModelsCache?: string;
   memorySources?: string[];
   port?: number;
   host?: string;
@@ -66,7 +73,9 @@ function platformDefaults(): AttendConfig {
   return {
     scopeRoots: [],
     claudeProjects: path.join(home, ".claude", "projects"),
+    claudeModels: ["fable", "opus", "sonnet", "haiku", "claude-fable-5"],
     codexSessions: path.join(home, ".codex", "sessions"),
+    codexModelsCache: defaultCodexModelsCachePath(),
     codexBin: resolveCodexBin(),
     memorySources: [],
     port: 5050,
@@ -109,6 +118,14 @@ function splitPaths(value: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
+function splitCsv(value: string | undefined): string[] | undefined {
+  if (!value) return undefined;
+  return value
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
 /**
  * Resolve config with precedence: CLI args > env > config file > platform defaults.
  * Scope dirs / session dirs / port can all be specified, satisfying "可指定目录".
@@ -132,8 +149,12 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     claudeProjects: path.resolve(
       env.ATTEND_CLAUDE_PROJECTS ?? file.claudeProjects ?? defaults.claudeProjects,
     ),
+    claudeModels: splitCsv(env.ATTEND_CLAUDE_MODELS) ?? file.claudeModels ?? defaults.claudeModels,
     codexSessions: path.resolve(
       env.ATTEND_CODEX_SESSIONS ?? file.codexSessions ?? defaults.codexSessions,
+    ),
+    codexModelsCache: path.resolve(
+      env.ATTEND_CODEX_MODELS_CACHE ?? file.codexModelsCache ?? defaults.codexModelsCache,
     ),
     codexBin: env.ATTEND_CODEX_BIN ?? defaults.codexBin,
     memorySources: (file.memorySources ?? defaults.memorySources).map((p) => path.resolve(p)),

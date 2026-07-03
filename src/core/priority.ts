@@ -14,8 +14,6 @@ export interface PriorityResult {
 
 export function patternScoreNudge(pattern: Pattern): number {
   if (pattern === "avoidance") return 1;
-  if (pattern === "stalled") return 0.7;
-  if (pattern === "healthy") return -0.3;
   return 0;
 }
 
@@ -42,10 +40,10 @@ const ALIGN_MIN_COSINE = 0.05;
 
 /**
  * Heuristic priority, memory-led: memory alignment is the primary driver; the
- * behavioral pattern (avoidance / stalled / healthy) only nudges it, and brief status
- * (deferred / done) and an explicit blocker still apply as overrides. Returns a
- * composed, human-readable reason carrying the evidence (DESIGN.md: no opaque
- * scores — the user must be able to audit and override the rank).
+ * behavioral pattern (avoidance) only nudges it, and brief status (deferred /
+ * done) and an explicit blocker still apply as overrides. Returns a composed,
+ * human-readable reason carrying the evidence (DESIGN.md: no opaque scores —
+ * the user must be able to audit and override the rank).
  */
 export function evaluatePriority(
   brief: Brief,
@@ -82,11 +80,6 @@ export function evaluatePriority(
         `avoidance signal (${tel.visits} visits over ${fmtDwell(tel.totalMinutes)}, ${tel.prompts} prompts) — returned to repeatedly without advancing, a decision point not more work`,
       );
     }
-  } else if (pattern === "stalled") {
-    const touch = tel.lastTouchAgeDays !== null ? `, last touch ${tel.lastTouchAgeDays}d` : "";
-    reasons.push(`stalled (${tel.prompts} prompts, 0 actions${touch}) — needs unblock or kill`);
-  } else if (pattern === "healthy") {
-    reasons.push("healthy — in flow, don't interrupt");
   }
 
   if (brief.status === "deferred") {

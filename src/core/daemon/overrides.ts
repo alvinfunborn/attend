@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { Pattern } from "../types.js";
+import type { AnalysisState } from "./cache.js";
 
 /** A user's manual override for a session's rank, set by clicking its tab. Each
  *  field is optional: only the ones the user edited are pinned, the rest still
@@ -9,6 +11,10 @@ export interface Override {
   priority?: number;
   /** pinned ETA in minutes, wins over daemon/heuristic until cleared */
   etaMin?: number;
+  /** pinned daemon handoff state, wins over daemon until cleared */
+  state?: AnalysisState;
+  /** pinned behavioral pattern, wins over telemetry heuristic until cleared */
+  pattern?: Exclude<Pattern, "unknown">;
 }
 
 const PRIORITY_MIN = 0;
@@ -54,7 +60,12 @@ export class OverrideStore {
    */
   set(
     sessionId: string,
-    patch: { priority?: number | null; etaMin?: number | null },
+    patch: {
+      priority?: number | null;
+      etaMin?: number | null;
+      state?: AnalysisState | null;
+      pattern?: Exclude<Pattern, "unknown"> | null;
+    },
   ): Override | null {
     this.load();
     const next: Override = { ...(this.map.get(sessionId) ?? {}) };
@@ -64,8 +75,17 @@ export class OverrideStore {
     if (patch.etaMin === null) next.etaMin = undefined;
     else if (typeof patch.etaMin === "number" && Number.isFinite(patch.etaMin))
       next.etaMin = clamp(Math.round(patch.etaMin), ETA_MIN, ETA_MAX);
+    if (patch.state === null) next.state = undefined;
+    else if (isAnalysisState(patch.state)) next.state = patch.state;
+    if (patch.pattern === null) next.pattern = undefined;
+    else if (isPattern(patch.pattern)) next.pattern = patch.pattern;
 
-    if (next.priority === undefined && next.etaMin === undefined) {
+    if (
+      next.priority === undefined &&
+      next.etaMin === undefined &&
+      next.state === undefined &&
+      next.pattern === undefined
+    ) {
       this.map.delete(sessionId);
       this.persist();
       return null;
@@ -85,4 +105,22 @@ export class OverrideStore {
       // best-effort persistence
     }
   }
+}
+
+const ANALYSIS_STATES = new Set<AnalysisState>([
+  "continue_ready",
+  "needs_decision",
+  "needs_input",
+  "blocked",
+  "needs_review",
+  "followup_suggested",
+  "done",
+]);
+
+function isAnalysisState(v: unknown): v is AnalysisState {
+  return typeof v === "string" && ANALYSIS_STATES.has(v as AnalysisState);
+}
+
+function isPattern(v: unknown): v is Exclude<Pattern, "unknown"> {
+  return v === "avoidance";
 }

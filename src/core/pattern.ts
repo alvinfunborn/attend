@@ -21,24 +21,14 @@ export const AVOIDANCE_REVIEW_MIN_VISITS = 2;
 export const AVOIDANCE_REVIEW_MIN_MINUTES = 20;
 
 /**
- * Map telemetry to a behavioral pattern. We deliberately surface only the three
- * product-bearing states: avoidance / stalled / healthy. Everything else is
- * folded into `unknown` so the UI doesn't dilute the wedge with generic badges.
+ * Map telemetry to the one behavioral pattern we still surface: avoidance.
+ * Everything else is folded into `unknown` so the UI doesn't dilute the wedge
+ * with generic badges.
  * Labels are descriptive observations, never verdicts (DESIGN.md invariant 3,
  * Steel 2007).
  */
 export function classifyPattern(tel: Telemetry): Pattern {
-  const {
-    sessions,
-    actions,
-    prompts,
-    visits,
-    avgSessionMin,
-    lastTouchAgeDays,
-    totalMinutes,
-    reviewVisits,
-    reviewMinutes,
-  } = tel;
+  const { sessions, prompts, visits, totalMinutes, reviewVisits, reviewMinutes } = tel;
   if (sessions === 0) return "unknown";
   if (
     reviewVisits >= AVOIDANCE_REVIEW_MIN_VISITS &&
@@ -52,16 +42,6 @@ export function classifyPattern(tel: Telemetry): Pattern {
     prompts <= visits
   ) {
     return "avoidance";
-  }
-  if (actions === 0 && lastTouchAgeDays !== null && lastTouchAgeDays >= 7) return "stalled";
-  if (
-    actions > 0 &&
-    avgSessionMin !== null &&
-    avgSessionMin >= 10 &&
-    lastTouchAgeDays !== null &&
-    lastTouchAgeDays <= 3
-  ) {
-    return "healthy";
   }
   return "unknown";
 }

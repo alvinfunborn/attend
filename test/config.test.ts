@@ -9,7 +9,9 @@ const ENV_KEYS = [
   "ATTEND_PORT",
   "ATTEND_HOST",
   "ATTEND_CLAUDE_PROJECTS",
+  "ATTEND_CLAUDE_MODELS",
   "ATTEND_CODEX_SESSIONS",
+  "ATTEND_CODEX_MODELS_CACHE",
   "ATTEND_TAGS",
   "ATTEND_ENGAGEMENT",
 ];
@@ -48,15 +50,33 @@ describe("resolveConfig precedence", () => {
   it("reads a config file when given, but CLI/env still win", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-cfg-"));
     const cfg = path.join(dir, "attend.config.json");
-    fs.writeFileSync(cfg, JSON.stringify({ port: 8123, host: "0.0.0.0" }), "utf-8");
+    fs.writeFileSync(
+      cfg,
+      JSON.stringify({
+        port: 8123,
+        host: "0.0.0.0",
+        claudeModels: ["opus", "claude-fable-5"],
+      }),
+      "utf-8",
+    );
     try {
       const c = resolveConfig({ positionals: [], config: cfg });
       expect(c.port).toBe(8123);
       expect(c.host).toBe("0.0.0.0");
+      expect(c.claudeModels).toEqual(["opus", "claude-fable-5"]);
       expect(resolveConfig({ positionals: [], config: cfg, port: "9000" }).port).toBe(9000);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("lets env override Claude model options", () => {
+    process.env.ATTEND_CLAUDE_MODELS = "fable, opus, claude-fable-5";
+    expect(resolveConfig({ positionals: [] }).claudeModels).toEqual([
+      "fable",
+      "opus",
+      "claude-fable-5",
+    ]);
   });
 
   it("--no-open disables auto-open", () => {

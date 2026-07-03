@@ -67,6 +67,9 @@ class FakeCodexDriver implements ChatDriver {
   readonly vendor = "codex";
   readonly starts: StartOpts[] = [];
   readonly sends: Array<{ sessionId: string; turn: UserTurn }> = [];
+  readonly interrupts: string[] = [];
+  interruptResult = false;
+  active: Array<{ sessionId: string; startedAt: number }> = [];
 
   get(_sessionId: string): { cwd: string } | undefined {
     return { cwd: os.tmpdir() };
@@ -87,7 +90,8 @@ class FakeCodexDriver implements ChatDriver {
   }
 
   interrupt(_sessionId: string): Promise<boolean> {
-    return Promise.resolve(false);
+    this.interrupts.push(_sessionId);
+    return Promise.resolve(this.interruptResult);
   }
 
   subscribe(_sessionId: string, _onEvent: (ev: UiEvent) => void): () => void {
@@ -95,11 +99,11 @@ class FakeCodexDriver implements ChatDriver {
   }
 
   activeSessions(): string[] {
-    return [];
+    return this.active.map((s) => s.sessionId);
   }
 
   activeSessionStates(): Array<{ sessionId: string; startedAt: number }> {
-    return [];
+    return this.active;
   }
 
   onTurnEnd(_cb: (sessionId: string) => void): () => void {
@@ -279,6 +283,16 @@ describe("POST /session/override", () => {
     expect(await res.json()).toMatchObject({ ok: true, override: { priority: 4, etaMin: 25 } });
   });
 
+  it("pins state and pattern overrides", async () => {
+    const app = appWithOverrides();
+    const res = await post(app, "?session=s1", { state: "blocked", pattern: "avoidance" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      override: { state: "blocked", pattern: "avoidance" },
+    });
+  });
+
   it("rejects a missing session or an empty patch", async () => {
     const app = appWithOverrides();
     expect((await post(app, "", { priority: 5 })).status).toBe(400);
@@ -329,12 +343,66 @@ describe("tag routes", () => {
     });
   });
 
+  it("persists session tags under the daemon brief key", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-claude-${uniq}-`));
+    const tagFile = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+    const cwd = path.join(os.tmpdir(), `attend-test-project-${uniq}`);
+    fs.mkdirSync(cwd, { recursive: true });
+    const projectDir = path.join(claudeProjects, "project");
+    fs.mkdirSync(projectDir);
+    fs.writeFileSync(
+      path.join(projectDir, "s1.jsonl"),
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-06-01T00:00:00.000Z",
+        cwd,
+        sessionId: "s1",
+        message: { content: "first prompt" },
+      }),
+    );
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      claudeProjects,
+      tags: tagFile,
+      overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+    };
+    const cache = new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`));
+    cache.set("s1", {
+      brief: "Shared task",
+      state: "needs_review",
+      priority: 5,
+      etaMin: 2,
+      reason: "test",
+    });
+    const orchestrator = new DaemonOrchestrator(
+      new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
+      cache,
+      [new ClaudeAnalyzer(os.tmpdir(), fakeQuery)],
+    );
+    const app = createApp(config, {
+      launcher: () => "noop",
+      engine: new ChatEngine(fakeQuery),
+      orchestrator,
+    });
+
+    await post(app, "/session/tags?session=s1", { tags: ["work"] });
+
+    const persisted = JSON.parse(fs.readFileSync(tagFile, "utf-8")) as {
+      sessions: Record<string, string[]>;
+    };
+    expect(persisted.sessions.s1).toEqual(["work"]);
+    expect(persisted.sessions[`brief:claude:${cwd}:Shared task`]).toEqual(["work"]);
+    fs.rmSync(claudeProjects, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
   it("deletes a global tag", async () => {
     const app = appWithTags();
     await post(app, "/session/tags?session=s1", { tags: ["work", "urgent"] });
     const res = await app.request("/tags?name=urgent", { method: "DELETE" });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, tags: [] });
+    expect(await res.json()).toMatchObject({ ok: true, tags: ["work"] });
   });
 
   it("rejects missing tag names and missing session ids", async () => {
@@ -369,8 +437,11 @@ describe("engagement routes", () => {
   async function appWithTrackedSession(endedAt = 1234) {
     const uniq = Math.random().toString(36).slice(2);
     const claudeProjects = path.join(os.tmpdir(), `attend-test-projects-${uniq}`);
+    const root = path.join(os.tmpdir(), `attend-test-root-${uniq}`);
+    const cwd = path.join(root, "child");
     const projectDir = path.join(claudeProjects, "-tmp-proj");
     const transcript = path.join(projectDir, "s1.jsonl");
+    await fs.promises.mkdir(cwd, { recursive: true });
     await fs.promises.mkdir(projectDir, { recursive: true });
     await fs.promises.writeFile(
       transcript,
@@ -378,14 +449,14 @@ describe("engagement routes", () => {
         JSON.stringify({
           type: "user",
           sessionId: "s1",
-          cwd: "/tmp/proj",
+          cwd,
           timestamp: "2026-06-03T03:06:02.640Z",
           message: { content: "first prompt" },
         }),
         JSON.stringify({
           type: "assistant",
           sessionId: "s1",
-          cwd: "/tmp/proj",
+          cwd,
           timestamp: "2026-06-03T03:06:12.429Z",
           message: { content: [{ type: "text", text: "reply" }] },
         }),
@@ -393,9 +464,11 @@ describe("engagement routes", () => {
     );
     const config = {
       ...resolveConfig({ positionals: [] }),
+      scopeRoots: [root],
       claudeProjects,
       codexSessions: path.join(os.tmpdir(), `attend-test-codex-${uniq}`),
       engagement: path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`),
+      sessionStatus: path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
     };
@@ -420,7 +493,7 @@ describe("engagement routes", () => {
       }),
     });
     expect(res.status).toBe(200);
-    return { app, transcript, endedAt };
+    return { app, transcript, root, cwd, endedAt };
   }
 
   it("records a view visit and returns the engagement aggregate", async () => {
@@ -443,7 +516,7 @@ describe("engagement routes", () => {
     });
   });
 
-  it("keeps the displayed lastTs on real activity and exposes a separate sortTs", async () => {
+  it("keeps opening a session from changing the recent sort timestamp", async () => {
     const endedAt = Date.parse("2026-06-04T06:00:00.000Z");
     const { app } = await appWithTrackedSession(endedAt);
     const res = await app.request("/");
@@ -453,10 +526,60 @@ describe("engagement routes", () => {
     expect(match?.[1]).toBeTruthy();
     const sessions = JSON.parse(match?.[1] ?? "[]") as Array<Record<string, unknown>>;
     const s1 = sessions.find((s) => s.sessionId === "s1");
+    const activityAt = Date.parse("2026-06-03T03:06:12.429Z");
     expect(s1).toMatchObject({
-      lastTs: Date.parse("2026-06-03T03:06:12.429Z"),
-      sortTs: endedAt,
+      lastTs: activityAt,
+      sortTs: activityAt,
     });
+  });
+
+  it("stores unfinished tab state under the scope root and deletes it when grayed", async () => {
+    const { app, root, cwd } = await appWithTrackedSession();
+    const statusFile = path.join(root, ".attend", "session-status.json");
+    const childStatusFile = path.join(cwd, ".attend", "session-status.json");
+
+    const markAlreadyRead = await app.request(
+      `/session/status?session=s1&cwd=${encodeURIComponent(cwd)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "read", updatedAt: 1111 }),
+      },
+    );
+    expect(markAlreadyRead.status).toBe(200);
+    expect(fs.existsSync(statusFile)).toBe(false);
+    expect(fs.existsSync(childStatusFile)).toBe(false);
+
+    const markSeen = await app.request(
+      `/session/status?session=s1&cwd=${encodeURIComponent(cwd)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "seen", updatedAt: 1234 }),
+      },
+    );
+    expect(markSeen.status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(statusFile, "utf-8"))).toMatchObject({
+      sessions: { s1: { state: "seen", updatedAt: 1234 } },
+    });
+    expect(fs.existsSync(childStatusFile)).toBe(false);
+
+    const res = await app.request("/");
+    const html = await res.text();
+    const match = /window\.__SESSIONS__ = (\[[\s\S]*?\]);/.exec(html);
+    const sessions = JSON.parse(match?.[1] ?? "[]") as Array<Record<string, unknown>>;
+    expect(sessions.find((s) => s.sessionId === "s1")).toMatchObject({ seen: true });
+
+    const markRead = await app.request(
+      `/session/status?session=s1&cwd=${encodeURIComponent(cwd)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: "read", updatedAt: 2345 }),
+      },
+    );
+    expect(markRead.status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(statusFile, "utf-8"))).toEqual({ sessions: {} });
   });
 
   it("rejects a missing session id", async () => {
@@ -536,6 +659,176 @@ describe("session status routes", () => {
         })
       ).status,
     ).toBe(400);
+  });
+});
+
+describe("external Codex active state", () => {
+  function appWithExternalCodexSession() {
+    const uniq = Math.random().toString(36).slice(2);
+    const codexSessions = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-codex-${uniq}-`));
+    const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-claude-${uniq}-`));
+    const startedAt = Date.now() - 10_000;
+    const touchedAt = Date.now() - 5_000;
+    fs.writeFileSync(
+      path.join(codexSessions, "rollout-live.jsonl"),
+      [
+        JSON.stringify({
+          timestamp: new Date(startedAt).toISOString(),
+          type: "session_meta",
+          payload: { id: "cx-live", cwd: os.tmpdir() },
+        }),
+        JSON.stringify({
+          timestamp: new Date(startedAt).toISOString(),
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "turn-live",
+            started_at: Math.floor(startedAt / 1000),
+          },
+        }),
+        JSON.stringify({
+          timestamp: new Date(touchedAt).toISOString(),
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "fix the status dot" }],
+          },
+        }),
+        JSON.stringify({
+          timestamp: new Date(touchedAt).toISOString(),
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            arguments: '{"cmd":"pwd"}',
+            call_id: "call-live",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      claudeProjects,
+      codexSessions,
+      engagement: path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`),
+      sessionStatus: path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`),
+      tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+      overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+    };
+    const calls: Call[] = [];
+    const codex = new FakeCodexDriver();
+    const orchestrator = new DaemonOrchestrator(
+      new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
+      new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)),
+      [new ClaudeAnalyzer(os.tmpdir(), fakeQuery)],
+    );
+    return {
+      app: createApp(config, {
+        launcher: (action, vendor, cwd, opts) => {
+          calls.push({ action, vendor, cwd, opts });
+          return `${vendor} ${action}`;
+        },
+        engine: new ChatEngine(fakeQuery),
+        codex,
+        orchestrator,
+      }),
+      calls,
+      config,
+      codex,
+    };
+  }
+
+  function appendCodexActivityAfterStop(config: ReturnType<typeof resolveConfig>) {
+    const rollout = path.join(config.codexSessions, "rollout-live.jsonl");
+    fs.appendFileSync(
+      rollout,
+      `\n${JSON.stringify({
+        timestamp: new Date(Date.now() + 1_000).toISOString(),
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call-live",
+          output: "late buffered output",
+        },
+      })}`,
+    );
+  }
+
+  it("marks externally-running Codex rollouts generating in the initial page", async () => {
+    const { app } = appWithExternalCodexSession();
+    const res = await app.request("/");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const match = /window\.__SESSIONS__ = (\[[\s\S]*?\]);/.exec(html);
+    const sessions = JSON.parse(match?.[1] ?? "[]") as Array<Record<string, unknown>>;
+    expect(sessions.find((s) => s.sessionId === "cx-live")).toMatchObject({
+      generating: true,
+    });
+  });
+
+  it("includes externally-running Codex rollouts in /chat/live", async () => {
+    const { app } = appWithExternalCodexSession();
+    const res = await app.request("/chat/live");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      active: expect.arrayContaining(["cx-live"]),
+    });
+  });
+
+  it("suppresses stale transcript active state after a local Codex stop", async () => {
+    const { app, codex } = appWithExternalCodexSession();
+    codex.interruptResult = true;
+
+    const before = await app.request("/chat/live");
+    expect(await before.json()).toMatchObject({ active: expect.arrayContaining(["cx-live"]) });
+
+    const stop = await app.request("/chat/abort?session=cx-live&vendor=codex", { method: "POST" });
+    expect(await stop.json()).toMatchObject({ ok: true, session: "cx-live" });
+
+    const live = (await (await app.request("/chat/live")).json()) as { active: string[] };
+    expect(live.active).not.toContain("cx-live");
+
+    const page = await app.request("/");
+    const html = await page.text();
+    const match = /window\.__SESSIONS__ = (\[[\s\S]*?\]);/.exec(html);
+    const sessions = JSON.parse(match?.[1] ?? "[]") as Array<Record<string, unknown>>;
+    expect(sessions.find((s) => s.sessionId === "cx-live")).toMatchObject({
+      generating: false,
+    });
+  });
+
+  it("keeps a stopped external turn suppressed when late transcript lines arrive", async () => {
+    const { app, codex, config } = appWithExternalCodexSession();
+    codex.interruptResult = true;
+
+    const stop = await app.request("/chat/abort?session=cx-live&vendor=codex", { method: "POST" });
+    expect(await stop.json()).toMatchObject({ ok: true, session: "cx-live" });
+    appendCodexActivityAfterStop(config);
+
+    const live = (await (await app.request("/chat/live")).json()) as { active: string[] };
+    expect(live.active).not.toContain("cx-live");
+  });
+
+  it("suppresses stale transcript active state even when no live run is interruptible", async () => {
+    const { app } = appWithExternalCodexSession();
+
+    const stop = await app.request("/chat/abort?session=cx-live&vendor=codex", { method: "POST" });
+    expect(await stop.json()).toMatchObject({ ok: false, session: "cx-live" });
+
+    const live = (await (await app.request("/chat/live")).json()) as { active: string[] };
+    expect(live.active).not.toContain("cx-live");
+  });
+
+  it("routes abort by session id when the vendor query is missing or stale", async () => {
+    const { app, codex } = appWithExternalCodexSession();
+    codex.active = [{ sessionId: "cx-live", startedAt: Date.now() - 1000 }];
+    codex.interruptResult = true;
+
+    const stop = await app.request("/chat/abort?session=cx-live", { method: "POST" });
+    expect(await stop.json()).toMatchObject({ ok: true, session: "cx-live" });
+    expect(codex.interrupts).toContain("cx-live");
   });
 });
 
@@ -657,6 +950,76 @@ describe("GET /session/source", () => {
   });
 });
 
+describe("GET /search", () => {
+  it("finds transcript content in listed sessions", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const claudeProjects = path.join(os.tmpdir(), `attend-test-projects-${uniq}`);
+    const codexSessions = path.join(os.tmpdir(), `attend-test-codex-${uniq}`);
+    const projectDir = path.join(claudeProjects, "-tmp-proj");
+    const transcript = path.join(projectDir, "s1.jsonl");
+    await fs.promises.mkdir(projectDir, { recursive: true });
+    await fs.promises.writeFile(
+      transcript,
+      [
+        JSON.stringify({
+          type: "user",
+          sessionId: "s1",
+          cwd: "/tmp/proj",
+          timestamp: new Date(Date.now() - 10_000).toISOString(),
+          message: { content: "first prompt" },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          sessionId: "s1",
+          cwd: "/tmp/proj",
+          timestamp: new Date(Date.now() - 5_000).toISOString(),
+          message: {
+            content: [{ type: "text", text: "The deploy failed because port 5050 was busy." }],
+          },
+        }),
+      ].join("\n"),
+    );
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      claudeProjects,
+      codexSessions,
+      overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+      tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+      engagement: path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`),
+      sessionStatus: path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`),
+    };
+    const orchestrator = new DaemonOrchestrator(
+      new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
+      new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)),
+      [new ClaudeAnalyzer(claudeProjects, fakeQuery)],
+    );
+    const app = createApp(config, {
+      launcher: () => "noop",
+      engine: new ChatEngine(fakeQuery),
+      orchestrator,
+    });
+
+    try {
+      const res = await app.request(`/search?q=${encodeURIComponent("port 5050")}`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        results: [
+          {
+            vendor: "claude",
+            sessionId: "s1",
+            file: transcript,
+            count: 1,
+            hits: [{ role: "assistant", text: "The deploy failed because port 5050 was busy." }],
+          },
+        ],
+      });
+    } finally {
+      fs.rmSync(claudeProjects, { recursive: true, force: true });
+      fs.rmSync(codexSessions, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
   function appWithCodexSpy() {
     const codex = new FakeCodexDriver();
@@ -679,6 +1042,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         orchestrator,
       }),
       codex,
+      config,
     };
   }
 
@@ -702,6 +1066,151 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     });
     expect(res.status).toBe(200);
     expect(queryCalls[0]?.options).toMatchObject({ model: "sonnet", effort: "high" });
+  });
+
+  it("passes model and effort through in-browser fork sessions", async () => {
+    const { app } = appWithSpy();
+    const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "try another approach", model: "sonnet", effort: "xhigh" }),
+    });
+    expect(res.status).toBe(200);
+    expect(queryCalls[0]?.options).toMatchObject({
+      resume: "abc",
+      forkSession: true,
+      model: "sonnet",
+      effort: "xhigh",
+    });
+  });
+
+  it("passes model and effort through same-session configured sends", async () => {
+    const { app } = appWithSpy();
+    const res = await app.request(`/chat/send?session=abc&cwd=${tmp}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "continue here",
+        runConfig: true,
+        model: "opus",
+        effort: "high",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, session: "abc" });
+    expect(queryCalls[0]?.options).toMatchObject({
+      resume: "abc",
+      model: "opus",
+      effort: "high",
+    });
+  });
+
+  it("persists inherited tags when forking a session", async () => {
+    const { app, config } = appWithCodexSpy();
+    const uniq = Math.random().toString(36).slice(2);
+    const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-claude-${uniq}-`));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-cwd-${uniq}-`));
+    const projectDir = path.join(claudeProjects, "project");
+    fs.mkdirSync(projectDir);
+    fs.writeFileSync(
+      path.join(projectDir, "parent-1.jsonl"),
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-06-01T00:00:00.000Z",
+        cwd,
+        sessionId: "parent-1",
+        message: { content: "parent prompt" },
+      }),
+    );
+    config.claudeProjects = claudeProjects;
+    fs.writeFileSync(
+      config.tags,
+      JSON.stringify({ tags: ["work"], sessions: { "parent-1": ["work"] } }),
+    );
+
+    const res = await app.request(
+      `/chat/fork?session=parent-1&cwd=${encodeURIComponent(cwd)}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "branch" }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    const persisted = JSON.parse(fs.readFileSync(config.tags, "utf-8")) as {
+      sessions: Record<string, string[]>;
+    };
+    expect(persisted.sessions["cx-1"]).toEqual(["work"]);
+  });
+
+  it("passes codex new-session attachments through to the codex driver", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const res = await app.request(`/chat/new?cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        attachments: [
+          { kind: "text", name: "notes.md", text: "# start here" },
+          { kind: "image", name: "ui.png", mediaType: "image/png", data: "abcd" },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(codex.starts[0]).toMatchObject({
+      cwd: os.tmpdir(),
+      firstText: "",
+      firstAttachments: [
+        { kind: "text", name: "notes.md", text: "# start here" },
+        { kind: "image", name: "ui.png", mediaType: "image/png", data: "abcd" },
+      ],
+    });
+  });
+
+  it("passes Excel attachments through to the codex driver", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const res = await app.request(`/chat/new?cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        attachments: [
+          {
+            kind: "file",
+            name: "budget.xlsx",
+            mediaType: "application/octet-stream",
+            data: "abcd",
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(codex.starts[0]).toMatchObject({
+      firstAttachments: [
+        {
+          kind: "file",
+          name: "budget.xlsx",
+          mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          data: "abcd",
+        },
+      ],
+    });
+  });
+
+  it("rejects codex PDF attachments on new sessions", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const res = await app.request(`/chat/new?cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        attachments: [{ kind: "document", name: "brief.pdf", data: "abcd" }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      error: "Codex chat does not support PDF attachments",
+    });
+    expect(codex.starts).toHaveLength(0);
   });
 
   it("resolves a vault-relative cwd for new chat sessions", async () => {
@@ -757,6 +1266,61 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         { kind: "image", name: "ui.png", mediaType: "image/png", data: "abcd" },
       ],
     });
+  });
+
+  it("starts a transcript-context fork when switching providers", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    const uniq = Math.random().toString(36).slice(2);
+    const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-claude-${uniq}-`));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-cwd-${uniq}-`));
+    const projectDir = path.join(claudeProjects, "project");
+    fs.mkdirSync(projectDir);
+    fs.writeFileSync(
+      path.join(projectDir, "parent-ctx.jsonl"),
+      [
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-06-01T00:00:00.000Z",
+          cwd,
+          sessionId: "parent-ctx",
+          message: { content: "original task" },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-06-01T00:00:01.000Z",
+          cwd,
+          sessionId: "parent-ctx",
+          message: { content: [{ type: "text", text: "previous answer" }] },
+        }),
+      ].join("\n"),
+    );
+    config.claudeProjects = claudeProjects;
+
+    const res = await app.request(
+      `/chat/fork?session=parent-ctx&cwd=${encodeURIComponent(cwd)}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "branch with Codex", model: "gpt-5.5", effort: "high" }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      session: "cx-1",
+      forkMode: "provider-context",
+    });
+    expect(codex.starts[0]).toMatchObject({
+      cwd,
+      model: "gpt-5.5",
+      effort: "high",
+    });
+    expect(codex.starts[0]?.resume).toBeUndefined();
+    expect(codex.starts[0]?.forkSession).toBeUndefined();
+    expect(codex.starts[0]?.firstText).toContain("originally ran in claude");
+    expect(codex.starts[0]?.firstText).toContain("original task");
+    expect(codex.starts[0]?.firstText).toContain("branch with Codex");
   });
 
   it("rejects codex PDF attachments instead of silently dropping them", async () => {

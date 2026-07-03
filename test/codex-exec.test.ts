@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildArgs, prepareCodexExecInput } from "../src/chat/codex/exec.js";
+import { buildArgs, makeCodexFork, prepareCodexExecInput } from "../src/chat/codex/exec.js";
 
 const cleanup: Array<() => void> = [];
 
@@ -26,6 +28,32 @@ describe("prepareCodexExecInput", () => {
     expect(prepared.imagePaths).toHaveLength(1);
     expect(fs.existsSync(prepared.imagePaths[0] ?? "")).toBe(true);
     expect(fs.readFileSync(prepared.imagePaths[0] ?? "", "utf-8")).toBe("hello");
+  });
+
+  it("materializes Excel attachments and points the prompt at the local file", () => {
+    const prepared = prepareCodexExecInput({
+      cwd: ".",
+      prompt: "Review this sheet",
+      attachments: [
+        {
+          kind: "file",
+          name: "budget.xlsx",
+          mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          data: "aGVsbG8=",
+        },
+      ],
+    });
+    cleanup.push(prepared.cleanup);
+
+    expect(prepared.prompt).toContain("[Attached file: budget.xlsx]");
+    expect(prepared.prompt).toContain(
+      "MIME type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    const filePath = prepared.prompt.match(/Local path: (.+)/)?.[1]?.trim() ?? "";
+    expect(filePath).toBeTruthy();
+    expect(fs.existsSync(filePath)).toBe(true);
+    expect(fs.readFileSync(filePath, "utf-8")).toBe("hello");
+    expect(prepared.imagePaths).toHaveLength(0);
   });
 
   it("rejects PDF attachments with a clear error", () => {
@@ -56,7 +84,10 @@ describe("buildArgs", () => {
       "-C",
       "/tmp/proj",
       "--image",
-      "/tmp/a.png,/tmp/b.jpg",
+      "/tmp/a.png",
+      "--image",
+      "/tmp/b.jpg",
+      "--",
       "hello",
     ]);
 
@@ -75,7 +106,29 @@ describe("buildArgs", () => {
       "--skip-git-repo-check",
       "--image",
       "/tmp/c.png",
+      "--",
       "again",
     ]);
+  });
+});
+
+describe("makeCodexFork", () => {
+  it("rewrites every session id field in the copied rollout metadata", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-fork-"));
+    cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    fs.writeFileSync(
+      path.join(dir, "rollout-2026-06-01T00-00-00-parent-1.jsonl"),
+      `${JSON.stringify({
+        type: "session_meta",
+        payload: { id: "parent-1", session_id: "parent-1", cwd: dir },
+      })}\n`,
+    );
+
+    const child = makeCodexFork(dir)("parent-1");
+    expect(child).toBeTruthy();
+    const forkFile = fs.readdirSync(dir).find((name) => child && name.endsWith(`${child}.jsonl`));
+    expect(forkFile).toBeTruthy();
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, forkFile ?? ""), "utf-8"));
+    expect(meta.payload).toMatchObject({ id: child, session_id: child });
   });
 });

@@ -24,13 +24,38 @@ interface CodexRun {
   turnActive: boolean;
   turnStartedAt: number;
   child: CodexExecHandle | null;
+  /** Codex request_user_input is not answerable through `codex exec`; when it
+   * appears we stop the current exec turn and resume with the user's answer. */
+  awaitingInputToolUseId: string | null;
+  stoppingForInput: boolean;
+  queuedAnswer: ToolAnswer | null;
   /** resolve/reject the start() promise once the first turn yields (or fails) */
   settle: ((id: string) => void) | null;
   fail: ((err: Error) => void) | null;
 }
 
 function shouldReplayBufferedEvents(run: CodexRun): boolean {
-  return run.turnActive;
+  return run.turnActive || !!run.awaitingInputToolUseId;
+}
+
+function isCodexInputTool(name: string, input: unknown): boolean {
+  const base = name.split(".").pop();
+  return (
+    base === "request_user_input" &&
+    !!input &&
+    typeof input === "object" &&
+    Array.isArray((input as { questions?: unknown }).questions)
+  );
+}
+
+function isTurnEvent(ev: UiEvent): boolean {
+  return (
+    ev.kind === "assistant_text" ||
+    ev.kind === "tool_use" ||
+    ev.kind === "tool_result" ||
+    ev.kind === "result" ||
+    ev.kind === "error"
+  );
 }
 
 /**
@@ -113,6 +138,9 @@ export class CodexEngine implements ChatDriver {
       turnActive: false,
       turnStartedAt: 0,
       child: null,
+      awaitingInputToolUseId: null,
+      stoppingForInput: false,
+      queuedAnswer: null,
       settle: null,
       fail: null,
     };
@@ -152,19 +180,39 @@ export class CodexEngine implements ChatDriver {
     return true;
   }
 
-  answer(_sessionId: string, _answer: ToolAnswer): boolean {
-    return false;
+  answer(sessionId: string, answer: ToolAnswer): boolean {
+    const run = this.runs.get(sessionId);
+    if (!run || !run.awaitingInputToolUseId) return false;
+    if (answer.toolUseId !== run.awaitingInputToolUseId) return false;
+    run.awaitingInputToolUseId = null;
+    run.queuedAnswer = answer;
+    if (run.child) {
+      run.stoppingForInput = true;
+      try {
+        run.child.kill();
+      } catch {
+        return false;
+      }
+    } else {
+      const queued = run.queuedAnswer;
+      run.queuedAnswer = null;
+      this.runTurn(run, queued.text);
+    }
+    return true;
   }
 
   async interrupt(sessionId: string): Promise<boolean> {
     const run = this.runs.get(sessionId);
-    if (!run || !run.child) return false;
+    if (!run || !run.child || !run.turnActive) return false;
+    const child = run.child;
     try {
-      run.child.kill();
-      return true;
+      child.kill();
     } catch {
-      return false;
+      // A failed process signal must not leave the browser stuck in Generating.
     }
+    if (run.child === child) run.child = null;
+    this.emit(run, { kind: "result", ok: false, text: "interrupted" });
+    return true;
   }
 
   subscribe(sessionId: string, onEvent: (ev: UiEvent) => void): () => void {
@@ -195,6 +243,7 @@ export class CodexEngine implements ChatDriver {
 
   /** Run one turn as its own `codex exec` process, streaming its events. */
   private runTurn(run: CodexRun, text: string, attachments: UserTurn["attachments"] = []): void {
+    run.events = [];
     run.turnActive = true;
     run.turnStartedAt = Date.now();
     const handle = this.execFn({
@@ -212,30 +261,75 @@ export class CodexEngine implements ChatDriver {
       let terminal = false;
       try {
         for await (const cev of handle.events) {
+          if (run.child !== handle) break;
           for (const ev of toUiEventsFromCodex(cev)) {
-            if (ev.kind === "result" || ev.kind === "error") terminal = true;
-            this.emit(run, ev);
+            if (this.emit(run, ev) && (ev.kind === "result" || ev.kind === "error")) {
+              terminal = true;
+            }
           }
         }
       } catch (err) {
-        this.emit(run, {
-          kind: "error",
-          message: err instanceof Error ? err.message : String(err),
-        });
-        terminal = true;
+        if (run.child === handle) {
+          this.emit(run, {
+            kind: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+          terminal = true;
+        }
       } finally {
         // process exited without a turn.completed/turn.failed → synthesize one so
-        // the UI's 生成中… state always tears down.
-        if (!terminal) this.emit(run, { kind: "result", ok: false, text: "codex exited" });
-        run.turnActive = false;
-        run.child = null;
+        // the UI's 生成中… state always tears down. When we stopped specifically
+        // for request_user_input, the question card is the terminal visible state.
+        if (
+          run.child === handle &&
+          !terminal &&
+          !run.stoppingForInput &&
+          !run.awaitingInputToolUseId &&
+          !run.queuedAnswer
+        )
+          this.emit(run, { kind: "result", ok: false, text: "codex exited" });
+        if (run.child === handle) {
+          run.turnActive = false;
+          run.turnStartedAt = 0;
+          run.child = null;
+          run.stoppingForInput = false;
+        }
+        if (run.queuedAnswer) {
+          const queued = run.queuedAnswer;
+          run.queuedAnswer = null;
+          this.runTurn(run, queued.text);
+        }
         // a brand-new session that never emitted thread.started: surface the failure
         if (!run.sessionId && run.fail) run.fail(new Error("codex produced no session"));
       }
     })();
   }
 
-  private emit(run: CodexRun, ev: UiEvent): void {
+  private finishTurn(run: CodexRun): void {
+    if (!run.turnActive) return;
+    run.turnActive = false;
+    run.turnStartedAt = 0;
+    const sid = run.sessionId;
+    if (sid) for (const cb of this.turnEndListeners) cb(sid);
+  }
+
+  private emit(run: CodexRun, ev: UiEvent): boolean {
+    if (run.awaitingInputToolUseId) {
+      if (
+        ev.kind === "assistant_text" ||
+        ev.kind === "result" ||
+        ev.kind === "error" ||
+        (ev.kind === "tool_result" && ev.id === run.awaitingInputToolUseId)
+      ) {
+        return false;
+      }
+    }
+
+    // A stopped Codex exec can still flush buffered JSONL while the process is
+    // winding down. Once Attend has ended the turn locally, ignore those late
+    // chunks so they cannot revive the UI or collide with the next user turn.
+    if (!run.turnActive && isTurnEvent(ev)) return false;
+
     run.events.push(ev);
     if (run.events.length > MAX_BUFFER) run.events.shift();
     if (ev.kind === "session" && ev.sessionId) {
@@ -243,10 +337,20 @@ export class CodexEngine implements ChatDriver {
       this.index(ev.sessionId, run);
       run.settle?.(ev.sessionId);
     }
-    if (ev.kind === "result" || ev.kind === "error") {
-      const sid = run.sessionId;
-      if (sid) for (const cb of this.turnEndListeners) cb(sid);
+    if (ev.kind === "result" || ev.kind === "error") this.finishTurn(run);
+    if (ev.kind === "tool_use" && isCodexInputTool(ev.name, ev.input)) {
+      run.awaitingInputToolUseId = ev.id;
+      run.turnActive = false;
+      run.turnStartedAt = 0;
+      run.stoppingForInput = true;
+      try {
+        run.child?.kill();
+      } catch {
+        // If kill fails, keep the question visible; the eventual process result is
+        // suppressed while awaitingInputToolUseId is set.
+      }
     }
     run.emitter.emit("event", ev);
+    return true;
   }
 }

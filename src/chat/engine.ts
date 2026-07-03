@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   type Options,
   type PermissionMode,
@@ -21,6 +24,8 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   private items: SDKUserMessage[] = [];
   private waiters: Array<(r: IteratorResult<SDKUserMessage>) => void> = [];
   private closed = false;
+  private tempDir: string | null = null;
+  private fileCount = 0;
 
   private push(msg: SDKUserMessage): void {
     const w = this.waiters.shift();
@@ -28,7 +33,7 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
     else this.items.push(msg);
   }
 
-  private attachmentBlock(att: ChatAttachment): ContentBlockParam {
+  private attachmentBlock(att: Exclude<ChatAttachment, { kind: "file" }>): ContentBlockParam {
     if (att.kind === "image") {
       return {
         type: "image",
@@ -49,11 +54,46 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
     };
   }
 
+  private sanitizeAttachmentName(name: string): string {
+    const base = path.basename(name).trim();
+    return base.replace(/[^A-Za-z0-9._-]+/g, "-") || "attachment";
+  }
+
+  private appendFileAttachment(
+    text: string,
+    att: Extract<ChatAttachment, { kind: "file" }>,
+  ): string {
+    if (!this.tempDir) {
+      this.tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-claude-"));
+    }
+    this.fileCount++;
+    const file = path.join(
+      this.tempDir,
+      `${String(this.fileCount).padStart(2, "0")}-${this.sanitizeAttachmentName(att.name)}`,
+    );
+    fs.writeFileSync(file, Buffer.from(att.data, "base64"));
+    const block = [
+      `[Attached file: ${att.name}]`,
+      `MIME type: ${att.mediaType}`,
+      `Local path: ${file}`,
+      "Read this file from the local path when you need its contents.",
+    ].join("\n");
+    return text ? `${text}\n\n${block}` : block;
+  }
+
   pushTurn(turn: UserTurn): void {
-    const text = turn.text ?? "";
-    const attachments = turn.attachments ?? [];
+    let text = turn.text ?? "";
+    const originalAttachments = turn.attachments ?? [];
+    const attachments: Array<Exclude<ChatAttachment, { kind: "file" }>> = [];
+    for (const att of originalAttachments) {
+      if (att.kind !== "file") {
+        attachments.push(att);
+        continue;
+      }
+      text = this.appendFileAttachment(text, att);
+    }
     const textBlock: TextBlockParam | null = text ? { type: "text", text } : null;
-    const content: MessageParam["content"] = attachments.length
+    const content: MessageParam["content"] = originalAttachments.length
       ? [...(textBlock ? [textBlock] : []), ...attachments.map((att) => this.attachmentBlock(att))]
       : text;
     this.push({
@@ -77,8 +117,15 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 
   close(): void {
     this.closed = true;
+    this.cleanup();
     const w = this.waiters.shift();
     if (w) w({ value: undefined as unknown as SDKUserMessage, done: true });
+  }
+
+  cleanup(): void {
+    if (!this.tempDir) return;
+    fs.rmSync(this.tempDir, { recursive: true, force: true });
+    this.tempDir = null;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
@@ -112,6 +159,16 @@ export interface LiveRun {
    *  stream once it exists; null if the underlying query offers no interrupt
    *  (e.g. the test fake), so callers must null-check. */
   interrupt: (() => Promise<void>) | null;
+  /** An AskUserQuestion tool is displayed in the browser and must block visible
+   *  continuation until /chat/answer supplies the user's tool_result. */
+  awaitingQuestionToolUseId: string | null;
+  /** Watchdog timer for a silent turn. The SDK is trusted to end every turn with
+   *  a `result` (or to close the stream), but a dropped API socket / orphaned CLI
+   *  subprocess can leave the stream open and silent forever — the full answer
+   *  arrived, but the closing frame never did. Then `turnActive` never clears and
+   *  the console shows "Generating…" indefinitely. This fires after a long silence
+   *  to finish the turn locally so every client recovers. Reset on each event. */
+  stallTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export type { StartOpts } from "./driver.js";
@@ -121,8 +178,29 @@ export type QueryFn = typeof query;
 
 const MAX_BUFFER = 2000;
 
+/**
+ * A turn is considered stalled (not merely slow) after this much *silence* — no
+ * SDK event of any kind. Chosen well above any realistic think/tool gap in an
+ * interactive chat (extended thinking streams text; a tool_use emits an event
+ * the instant it starts, resetting the clock), yet far below the multi-hour
+ * hangs a dropped stream produces. The watchdog resets on every event, so a
+ * genuinely working turn — even one running a long, output-silent tool — is
+ * never cut. Set to 0 to disable (used by callers that manage their own timeout).
+ */
+const STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
 function shouldReplayBufferedEvents(run: LiveRun): boolean {
-  return run.turnActive;
+  return run.turnActive || !!run.awaitingQuestionToolUseId;
+}
+
+function isTurnEvent(ev: UiEvent): boolean {
+  return (
+    ev.kind === "assistant_text" ||
+    ev.kind === "tool_use" ||
+    ev.kind === "tool_result" ||
+    ev.kind === "result" ||
+    ev.kind === "error"
+  );
 }
 
 /**
@@ -139,7 +217,11 @@ export class ChatEngine implements ChatDriver {
   /** fired when a turn ends (result/error) — the daemon analyzer hooks this. */
   private turnEndListeners = new Set<(sessionId: string) => void>();
 
-  constructor(private readonly queryFn: QueryFn = query) {}
+  constructor(
+    private readonly queryFn: QueryFn = query,
+    /** Silence before a turn is treated as stalled and finished locally. */
+    private readonly stallTimeoutMs: number = STALL_TIMEOUT_MS,
+  ) {}
 
   /** Notify on each turn completion (used to trigger per-session daemon analysis). */
   onTurnEnd(cb: (sessionId: string) => void): () => void {
@@ -189,6 +271,14 @@ export class ChatEngine implements ChatDriver {
    * reports it (from the init message). For resume, the id is known up front.
    */
   start(opts: StartOpts): Promise<string> {
+    if (opts.resume && !opts.forkSession) {
+      const prev = this.runs.get(opts.resume);
+      if (prev && !prev.turnActive && !prev.done) {
+        prev.done = true;
+        prev.input.close();
+        prev.emitter.emit("done");
+      }
+    }
     const hasFirstTurn = opts.firstText !== undefined || !!opts.firstAttachments?.length;
     const run: LiveRun = {
       sessionId: opts.resume && !opts.forkSession ? opts.resume : null,
@@ -201,9 +291,14 @@ export class ChatEngine implements ChatDriver {
       turnActive: hasFirstTurn,
       turnStartedAt: hasFirstTurn ? Date.now() : 0,
       interrupt: null,
+      awaitingQuestionToolUseId: null,
+      stallTimer: null,
     };
     // index immediately under resume id so /chat/send can find it before init
     if (run.sessionId) this.index(run.sessionId, run);
+    // Arm the watchdog if this run opens with a turn in flight (a stall could
+    // strike before the very first event ever arrives).
+    this.scheduleStall(run);
 
     // Default to full CLI-parity execution: the console is a local, single-user
     // surface and the user wants the same power as running `claude` directly.
@@ -229,22 +324,12 @@ export class ChatEngine implements ChatDriver {
       };
 
       const emit = (ev: UiEvent) => {
-        run.events.push(ev);
-        if (run.events.length > MAX_BUFFER) run.events.shift();
-        if (ev.kind === "result" || ev.kind === "error") {
-          run.turnActive = false;
-          const sid = run.sessionId;
-          if (sid) for (const cb of this.turnEndListeners) cb(sid);
-        }
-        if (ev.kind === "tool_use" && ev.name === "AskUserQuestion") {
-          run.turnActive = false;
-        }
+        if (!this.emit(run, ev)) return;
         if (ev.kind === "session" && ev.sessionId) {
           run.sessionId = ev.sessionId;
           this.index(ev.sessionId, run);
           settle(ev.sessionId);
         }
-        run.emitter.emit("event", ev);
       };
 
       (async () => {
@@ -268,8 +353,10 @@ export class ChatEngine implements ChatDriver {
           emit({ kind: "error", message: err instanceof Error ? err.message : String(err) });
           if (!resolved) reject(err instanceof Error ? err : new Error(String(err)));
         } finally {
+          run.input.cleanup();
           run.done = true;
           run.turnActive = false;
+          this.scheduleStall(run); // stream closed → cancel any pending watchdog
           run.emitter.emit("done");
           // a resume with a known id resolves even if no init arrived
           if (run.sessionId) settle(run.sessionId);
@@ -282,36 +369,108 @@ export class ChatEngine implements ChatDriver {
   send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runs.get(sessionId);
     if (!run || run.done) return false;
+    run.events = [];
     run.turnActive = true;
     run.turnStartedAt = Date.now();
     run.input.pushTurn(turn);
+    this.scheduleStall(run);
     return true;
   }
 
   answer(sessionId: string, answer: ToolAnswer): boolean {
     const run = this.runs.get(sessionId);
     if (!run || run.done) return false;
+    run.awaitingQuestionToolUseId = null;
+    run.events = [];
     run.turnActive = true;
     run.turnStartedAt = Date.now();
     run.input.pushToolResult(answer.toolUseId, answer.text, answer.toolUseResult);
+    this.scheduleStall(run);
     return true;
   }
 
   /**
-   * Interrupt the in-flight turn for a live run (the Stop button). Returns false
-   * if the session isn't live or its query offers no interrupt. The SDK stops
-   * and emits a result message, which clears turnActive via the normal event
-   * path — so the UI's 生成中… state tears down the same way a finished turn does.
+   * Interrupt the in-flight turn for a live run (the Stop button). The SDK
+   * interrupt is best-effort: it may throw, hang, or skip a terminal event, so
+   * Attend ends the turn locally immediately and ignores late chunks afterward.
    */
   async interrupt(sessionId: string): Promise<boolean> {
     const run = this.runs.get(sessionId);
-    if (!run || run.done || !run.interrupt) return false;
-    try {
-      await run.interrupt();
-      return true;
-    } catch {
-      return false;
+    if (!run || run.done || !run.turnActive) return false;
+    if (run.interrupt) void run.interrupt().catch(() => {});
+    this.emit(run, { kind: "result", ok: false, text: "interrupted" });
+    return true;
+  }
+
+  private finishTurn(run: LiveRun): void {
+    if (!run.turnActive) return;
+    run.turnActive = false;
+    run.turnStartedAt = 0;
+    const sid = run.sessionId;
+    if (sid) for (const cb of this.turnEndListeners) cb(sid);
+  }
+
+  private emit(run: LiveRun, ev: UiEvent): boolean {
+    if (run.awaitingQuestionToolUseId) {
+      if (ev.kind === "tool_result" && ev.id === run.awaitingQuestionToolUseId) {
+        if (ev.isError) return false;
+        run.awaitingQuestionToolUseId = null;
+      } else if (ev.kind === "assistant_text" || ev.kind === "result") {
+        return false;
+      }
     }
+
+    // After Stop, the SDK may still deliver stale chunks/result for the previous
+    // turn. Drop those while idle so the UI does not re-enter Generating or
+    // advance queued drafts from a duplicate terminal event.
+    if (!run.turnActive && isTurnEvent(ev)) return false;
+
+    run.events.push(ev);
+    if (run.events.length > MAX_BUFFER) run.events.shift();
+    if (ev.kind === "result" || ev.kind === "error") this.finishTurn(run);
+    if (ev.kind === "tool_use" && ev.name === "AskUserQuestion") {
+      run.turnActive = false;
+      run.turnStartedAt = 0;
+      run.awaitingQuestionToolUseId = ev.id;
+    }
+    // Reset the watchdog on activity (reschedules while turnActive; the state
+    // above may have ended the turn, in which case this cancels the timer).
+    this.scheduleStall(run);
+    run.emitter.emit("event", ev);
+    return true;
+  }
+
+  /**
+   * (Re)arm the stall watchdog: clear any pending timer, then schedule a fresh
+   * one only while a turn is actually in flight. Every kept event calls this, so
+   * a streaming turn keeps pushing the deadline out; a silent one eventually
+   * trips onStall(). A no-op (just clears) once the turn ends or when disabled.
+   */
+  private scheduleStall(run: LiveRun): void {
+    if (run.stallTimer) {
+      clearTimeout(run.stallTimer);
+      run.stallTimer = null;
+    }
+    if (run.done || !run.turnActive || this.stallTimeoutMs <= 0) return;
+    const timer = setTimeout(() => this.onStall(run), this.stallTimeoutMs);
+    // Don't let the watchdog alone keep the process alive.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    run.stallTimer = timer;
+  }
+
+  /**
+   * The turn produced no events for `stallTimeoutMs` — the SDK stream is orphaned
+   * (dropped socket / hung subprocess) and will never deliver its terminal
+   * `result`. Finish the turn locally (mirrors interrupt: emit one terminal
+   * event, ignore any late real result via the idle guard in emit()) so
+   * `turnActive` clears and every client stops showing "Generating…", then
+   * best-effort tear down the dead query so we don't leak the subprocess.
+   */
+  private onStall(run: LiveRun): void {
+    run.stallTimer = null;
+    if (run.done || !run.turnActive) return;
+    this.emit(run, { kind: "result", ok: false, text: "stalled" });
+    if (run.interrupt) void run.interrupt().catch(() => {});
   }
 
   /**

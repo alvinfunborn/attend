@@ -78,10 +78,26 @@ function appendTextAttachment(prompt: string, name: string, text: string): strin
   return prompt ? `${prompt}\n\n${block}` : block;
 }
 
+function appendFileAttachment(
+  prompt: string,
+  name: string,
+  mediaType: string,
+  filePath: string,
+): string {
+  const block = [
+    `[Attached file: ${name}]`,
+    `MIME type: ${mediaType}`,
+    `Local path: ${filePath}`,
+    "Read this file from the local path when you need its contents.",
+  ].join("\n");
+  return prompt ? `${prompt}\n\n${block}` : block;
+}
+
 export function prepareCodexExecInput(req: CodexExecRequest): PreparedCodexExecInput {
   let prompt = req.prompt;
   const imagePaths: string[] = [];
   let tempDir: string | null = null;
+  let fileCount = 0;
   const cleanup = () => {
     if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   };
@@ -98,9 +114,19 @@ export function prepareCodexExecInput(req: CodexExecRequest): PreparedCodexExecI
     if (!tempDir) {
       tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-"));
     }
+    fileCount++;
+    if (attachment.kind === "file") {
+      const file = path.join(
+        tempDir,
+        `${String(fileCount).padStart(2, "0")}-${sanitizeAttachmentName(attachment.name)}`,
+      );
+      fs.writeFileSync(file, Buffer.from(attachment.data, "base64"));
+      prompt = appendFileAttachment(prompt, attachment.name, attachment.mediaType, file);
+      continue;
+    }
     const file = path.join(
       tempDir,
-      `${String(imagePaths.length + 1).padStart(2, "0")}-${sanitizeAttachmentName(attachment.name)}${imageExt(attachment.mediaType)}`,
+      `${String(fileCount).padStart(2, "0")}-${sanitizeAttachmentName(attachment.name)}${imageExt(attachment.mediaType)}`,
     );
     fs.writeFileSync(file, Buffer.from(attachment.data, "base64"));
     imagePaths.push(file);
@@ -117,7 +143,7 @@ export function prepareCodexExecInput(req: CodexExecRequest): PreparedCodexExecI
 export function buildArgs(req: CodexExecRequest & { imagePaths?: string[] }): string[] {
   const schema = req.outputSchemaFile ? ["--output-schema", req.outputSchemaFile] : [];
   const config = configArgs(req);
-  const images = req.imagePaths?.length ? ["--image", req.imagePaths.join(",")] : [];
+  const images = (req.imagePaths ?? []).flatMap((image) => ["--image", image]);
   if (req.resume) {
     const sandbox = req.sandbox ? ["-c", `sandbox_mode="${req.sandbox}"`] : [];
     return [
@@ -130,6 +156,7 @@ export function buildArgs(req: CodexExecRequest & { imagePaths?: string[] }): st
       ...sandbox,
       ...images,
       ...schema,
+      "--",
       req.prompt,
     ];
   }
@@ -144,6 +171,7 @@ export function buildArgs(req: CodexExecRequest & { imagePaths?: string[] }): st
     ...sandbox,
     ...images,
     ...schema,
+    "--",
     req.prompt,
   ];
 }
@@ -156,13 +184,33 @@ function spawnCodexExec(bin: string, req: CodexExecRequest): CodexExecHandle {
     const child = spawn(
       bin,
       buildArgs({ ...req, prompt: prepared.prompt, imagePaths: prepared.imagePaths }),
-      { cwd: req.cwd, stdio: ["ignore", "pipe", "ignore"] },
+      { cwd: req.cwd, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" },
     );
-    return { events: readEvents(child, prepared.cleanup), kill: () => child.kill("SIGTERM") };
+    return { events: readEvents(child, prepared.cleanup), kill: () => killCodexExec(child) };
   } catch (err) {
     prepared.cleanup();
     throw err;
   }
+}
+
+function killCodexExec(child: ChildProcess): void {
+  const signal = (sig: NodeJS.Signals) => {
+    if (process.platform !== "win32" && child.pid) process.kill(-child.pid, sig);
+    else child.kill(sig);
+  };
+  try {
+    signal("SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      signal("SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }, 1500).unref();
 }
 
 /**
@@ -212,10 +260,14 @@ function forkRollout(sessionsDir: string, parentId: string): string | null {
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
-      const o = JSON.parse(line) as { type?: string; payload?: { id?: string } };
+      const o = JSON.parse(line) as {
+        type?: string;
+        payload?: { id?: string; session_id?: string };
+      };
       // rewrite the session id so the copy is an independent thread
       if (o.type === "session_meta" && o.payload && typeof o.payload === "object") {
         o.payload.id = newId;
+        o.payload.session_id = newId;
       }
       out.push(JSON.stringify(o));
     } catch {
@@ -232,22 +284,40 @@ function forkRollout(sessionsDir: string, parentId: string): string | null {
   return newId;
 }
 
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+}
+
 /** Stream stdout as parsed JSONL events; ends when the process exits (or is killed). */
 async function* readEvents(child: ChildProcess, cleanup: () => void): AsyncIterable<CodexEvent> {
+  const exit = waitForExit(child);
+  const stderr: string[] = [];
+  child.stderr?.setEncoding("utf-8");
+  child.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
   try {
-    if (!child.stdout) return;
-    const rl = readline.createInterface({
-      input: child.stdout,
-      crlfDelay: Number.POSITIVE_INFINITY,
-    });
-    for await (const line of rl) {
-      const t = line.trim();
-      if (!t) continue;
-      try {
-        yield JSON.parse(t) as CodexEvent;
-      } catch {
-        // tolerate a non-JSON banner line; skip it
+    if (child.stdout) {
+      const rl = readline.createInterface({
+        input: child.stdout,
+        crlfDelay: Number.POSITIVE_INFINITY,
+      });
+      for await (const line of rl) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          yield JSON.parse(t) as CodexEvent;
+        } catch {
+          // tolerate a non-JSON banner line; skip it
+        }
       }
+    }
+    const { code, signal } = await exit;
+    if (signal === null && code !== null && code !== 0) {
+      const message = stderr.join("").trim() || `codex exited with code ${code}`;
+      yield { type: "error", error: message };
     }
   } finally {
     cleanup();

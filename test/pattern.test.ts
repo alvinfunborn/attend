@@ -50,13 +50,13 @@ describe("classifyPattern", () => {
     );
   });
 
-  it("stalled: zero actions, cold for >=7 days", () => {
-    expect(classifyPattern(tel({ prompts: 2, actions: 0, lastTouchAgeDays: 9 }))).toBe("stalled");
+  it("cold zero-action sessions are not surfaced as a pattern", () => {
+    expect(classifyPattern(tel({ prompts: 2, actions: 0, lastTouchAgeDays: 9 }))).toBe("unknown");
   });
 
-  it("healthy: actions, deep dwell, touched recently", () => {
+  it("healthy-looking work is left unbadged", () => {
     expect(classifyPattern(tel({ actions: 3, avgSessionMin: 25, lastTouchAgeDays: 1 }))).toBe(
-      "healthy",
+      "unknown",
     );
   });
 

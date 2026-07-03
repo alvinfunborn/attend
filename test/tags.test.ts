@@ -17,6 +17,20 @@ describe("TagStore", () => {
     expect(reloaded.tagsFor("s1")).toEqual(["work", "urgent"]);
   });
 
+  it("merges tag assignments across stable aliases", () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+
+    const store = new TagStore(file);
+    store.setSessionTags("session-id", ["work"]);
+    store.setSessionTags("brief:claude:/tmp/project:Fix login", ["urgent", "work"]);
+
+    expect(store.tagsFor(["session-id", "brief:claude:/tmp/project:Fix login"])).toEqual([
+      "work",
+      "urgent",
+    ]);
+  });
+
   it("deletes a global tag and removes it from every session", () => {
     const uniq = Math.random().toString(36).slice(2);
     const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);

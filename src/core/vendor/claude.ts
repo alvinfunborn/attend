@@ -13,6 +13,10 @@ function parseTs(value: unknown): number | null {
   return Number.isNaN(t) ? null : t;
 }
 
+function isActivityEntry(obj: JsonlEntry): boolean {
+  return obj.type === "user" || obj.type === "assistant";
+}
+
 interface JsonlEntry {
   cwd?: string;
   timestamp?: string;
@@ -103,7 +107,7 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     }
     if (session.cwd === null && obj.cwd) session.cwd = obj.cwd;
     if (session.sessionId === null && obj.sessionId) session.sessionId = obj.sessionId;
-    const ts = parseTs(obj.timestamp);
+    const ts = isActivityEntry(obj) ? parseTs(obj.timestamp) : null;
     if (ts !== null) {
       if (session.firstTs === null) session.firstTs = ts;
       session.lastTs = ts;

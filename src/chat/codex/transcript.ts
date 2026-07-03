@@ -13,7 +13,9 @@ import type { ToolCall, TranscriptMsg } from "../transcript.js";
  *   - function_call         {name,arguments,call_id}
  *   - function_call_output  {call_id,output}
  * Synthetic user turns (environment/permission context, all `<…>`-wrapped) and
- * developer/reasoning items are dropped, mirroring the Claude reader.
+ * developer/reasoning items are dropped, mirroring the Claude reader. Codex
+ * compaction entries are model-context snapshots, not display transcripts; they
+ * are only used as a fallback if no real response items were present.
  */
 interface ContentBlock {
   type?: string;
@@ -47,6 +49,17 @@ function textOf(content: unknown, kind: string): string {
   return "";
 }
 
+function visibleUserText(content: unknown): string {
+  const raw = textOf(content, "input_text").trim();
+  const text = raw
+    .replace(/<image\b[^>]*>/g, "")
+    .replace(/<\/image>/g, "")
+    .trim();
+  // skip synthetic <environment_context>/<permissions…> turns, but keep real
+  // prompts that were preceded by Codex's serialized image tags.
+  return text && !text.startsWith("<") ? text : "";
+}
+
 function parseToolInput(input: unknown): unknown {
   if (typeof input !== "string") return input;
   try {
@@ -58,9 +71,8 @@ function parseToolInput(input: unknown): unknown {
 
 function applyItem(p: Payload, msgs: TranscriptMsg[], toolById: Map<string, ToolCall>): void {
   if (p.type === "message" && p.role === "user") {
-    const text = textOf(p.content, "input_text").trim();
-    // skip the synthetic <environment_context>/<permissions…> turns
-    if (text && !text.startsWith("<")) msgs.push({ role: "user", text, tools: [] });
+    const text = visibleUserText(p.content);
+    if (text) msgs.push({ role: "user", text, tools: [] });
   } else if (p.type === "message" && p.role === "assistant") {
     const text = textOf(p.content, "output_text").trim();
     if (text) msgs.push({ role: "assistant", text, tools: [] });
@@ -109,9 +121,11 @@ export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] 
     if (!p) continue;
     if (o.type === "response_item") {
       applyItem(p, msgs, toolById);
-    } else if (o.type === "compacted" && Array.isArray(p.replacement_history)) {
-      msgs.length = 0;
-      toolById.clear();
+    } else if (
+      o.type === "compacted" &&
+      msgs.length === 0 &&
+      Array.isArray(p.replacement_history)
+    ) {
       for (const item of p.replacement_history) {
         if (!item || typeof item !== "object") continue;
         applyItem(item as Payload, msgs, toolById);

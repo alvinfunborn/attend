@@ -1,4 +1,4 @@
-import type { Analysis } from "./cache.js";
+import type { Analysis, AnalysisState } from "./cache.js";
 
 /**
  * Extract the daemon's structured verdict from its free-text reply. The daemon is
@@ -21,10 +21,27 @@ export function parseAnalysis(text: string): Analysis | null {
   if (!brief) return null;
   return {
     brief: shorten(brief, 80),
+    state: parseState(obj.state),
     priority: clampNum(obj.priority, 0, 10),
     etaMin: Math.max(1, Math.round(clampNum(obj.etaMin, 0, 600))),
     reason: typeof obj.reason === "string" ? shorten(obj.reason.trim(), 200) : "",
   };
+}
+
+const ANALYSIS_STATES = new Set<AnalysisState>([
+  "continue_ready",
+  "needs_decision",
+  "needs_input",
+  "blocked",
+  "needs_review",
+  "followup_suggested",
+  "done",
+]);
+
+function parseState(v: unknown): AnalysisState | null {
+  if (typeof v !== "string") return null;
+  const state = v.trim() as AnalysisState;
+  return ANALYSIS_STATES.has(state) ? state : null;
 }
 
 function clampNum(v: unknown, lo: number, hi: number): number {

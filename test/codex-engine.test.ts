@@ -74,6 +74,96 @@ describe("CodexEngine", () => {
     expect(calls[1]).toMatchObject({ resume: "cx-1", prompt: "second" });
   });
 
+  it("replays only the current turn buffer to subscribers during a follow-up turn", async () => {
+    let releaseSecond!: () => void;
+    const secondCanFinish = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let turnIndex = 0;
+    const fn: CodexExecFn = () => {
+      turnIndex += 1;
+      if (turnIndex === 1) {
+        return {
+          events: (async function* () {
+            yield { type: "thread.started", thread_id: "cx-replay" } as CodexEvent;
+            yield { type: "item.completed", item: { type: "agent_message", text: "old reply" } };
+            yield { type: "turn.completed" } as CodexEvent;
+          })(),
+          kill: () => {},
+        };
+      }
+      return {
+        events: (async function* () {
+          yield { type: "turn.started" } as CodexEvent;
+          yield { type: "item.completed", item: { type: "agent_message", text: "new reply" } };
+          await secondCanFinish;
+          yield { type: "turn.completed" } as CodexEvent;
+        })(),
+        kill: () => {},
+      };
+    };
+    const engine = new CodexEngine(fn);
+    const id = await engine.start({ cwd: ".", firstText: "first" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(engine.send(id, { text: "second" })).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    const got: UiEvent[] = [];
+    const unsub = engine.subscribe(id, (ev) => got.push(ev));
+    releaseSecond();
+    await new Promise((r) => setTimeout(r, 20));
+    unsub();
+
+    expect(got).toContainEqual({ kind: "assistant_text", text: "new reply" });
+    expect(got).not.toContainEqual({ kind: "assistant_text", text: "old reply" });
+  });
+
+  it("accepts a queued follow-up sent immediately from a result subscriber", async () => {
+    let releaseFirst!: () => void;
+    const firstCanFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const calls: CodexExecRequest[] = [];
+    let turnIndex = 0;
+    const fn: CodexExecFn = (req) => {
+      calls.push(req);
+      turnIndex += 1;
+      if (turnIndex === 1) {
+        return {
+          events: (async function* () {
+            yield { type: "thread.started", thread_id: "cx-queue" } as CodexEvent;
+            yield { type: "turn.started" } as CodexEvent;
+            await firstCanFinish;
+            yield { type: "item.completed", item: { type: "agent_message", text: "one" } };
+            yield { type: "turn.completed" } as CodexEvent;
+          })(),
+          kill: () => {},
+        };
+      }
+      return {
+        events: (async function* () {
+          yield { type: "turn.started" } as CodexEvent;
+          yield { type: "item.completed", item: { type: "agent_message", text: "two" } };
+          yield { type: "turn.completed" } as CodexEvent;
+        })(),
+        kill: () => {},
+      };
+    };
+    const engine = new CodexEngine(fn);
+    const id = await engine.start({ cwd: ".", firstText: "first" });
+    let sentFromResult: boolean | null = null;
+    engine.subscribe(id, (ev) => {
+      if (ev.kind === "result" && sentFromResult === null)
+        sentFromResult = engine.send(id, { text: "queued" });
+    });
+
+    releaseFirst();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(sentFromResult).toBe(true);
+    expect(calls[1]).toMatchObject({ resume: "cx-queue", prompt: "queued" });
+  });
+
   it("preserves model and effort across the first turn and follow-up turns", async () => {
     const { fn, calls } = fakeExec([turn("cx-1", "one"), turn("cx-1", "two")]);
     const engine = new CodexEngine(fn);
@@ -157,9 +247,135 @@ describe("CodexEngine", () => {
     });
     const engine = new CodexEngine(fn);
     const id = await engine.start({ cwd: ".", firstText: "go" });
+    const got: UiEvent[] = [];
+    engine.subscribe(id, (ev) => got.push(ev));
     expect(await engine.interrupt(id)).toBe(true);
     expect(killed).toBe(true);
+    expect(engine.activeSessions()).toHaveLength(0);
+    expect(got).toContainEqual({ kind: "result", ok: false, text: "interrupted" });
     expect(await engine.interrupt("nope")).toBe(false);
+  });
+
+  it("interrupt clears active state even if killing the Codex process throws", async () => {
+    const fn: CodexExecFn = () => ({
+      events: (async function* () {
+        yield { type: "thread.started", thread_id: "cx-kill-throws" } as CodexEvent;
+        await new Promise(() => {});
+      })(),
+      kill: () => {
+        throw new Error("kill failed");
+      },
+    });
+    const engine = new CodexEngine(fn);
+    const id = await engine.start({ cwd: ".", firstText: "go" });
+    const got: UiEvent[] = [];
+    engine.subscribe(id, (ev) => got.push(ev));
+
+    expect(await engine.interrupt(id)).toBe(true);
+
+    expect(engine.activeSessions()).toHaveLength(0);
+    expect(got).toContainEqual({ kind: "result", ok: false, text: "interrupted" });
+  });
+
+  it("drops late events from a Codex process after interrupt", async () => {
+    let release!: () => void;
+    const canContinue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fn: CodexExecFn = () => ({
+      events: (async function* () {
+        yield { type: "thread.started", thread_id: "cx-late" } as CodexEvent;
+        yield { type: "turn.started" } as CodexEvent;
+        await canContinue;
+        yield { type: "item.completed", item: { type: "agent_message", text: "too late" } };
+        yield { type: "turn.completed" } as CodexEvent;
+      })(),
+      kill: () => {},
+    });
+    const engine = new CodexEngine(fn);
+    const id = await engine.start({ cwd: ".", firstText: "go" });
+    const got: UiEvent[] = [];
+    engine.subscribe(id, (ev) => got.push(ev));
+
+    expect(await engine.interrupt(id)).toBe(true);
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(got).toContainEqual({ kind: "result", ok: false, text: "interrupted" });
+    expect(got).not.toContainEqual({ kind: "assistant_text", text: "too late" });
+    expect(got.filter((ev) => ev.kind === "result")).toHaveLength(1);
+  });
+
+  it("stops a request_user_input turn and resumes with the submitted answer", async () => {
+    let releaseKilled!: () => void;
+    const killed = new Promise<void>((resolve) => {
+      releaseKilled = resolve;
+    });
+    let killCount = 0;
+    const calls: CodexExecRequest[] = [];
+    let turnIndex = 0;
+    const fn: CodexExecFn = (req) => {
+      calls.push(req);
+      turnIndex += 1;
+      if (turnIndex === 1) {
+        return {
+          events: (async function* () {
+            yield { type: "thread.started", thread_id: "cx-question" } as CodexEvent;
+            yield { type: "turn.started" } as CodexEvent;
+            yield {
+              type: "response_item",
+              payload: {
+                type: "function_call",
+                call_id: "call-question",
+                name: "request_user_input",
+                arguments: JSON.stringify({
+                  questions: [
+                    {
+                      question: "Pick one?",
+                      options: [{ label: "A", description: "first" }],
+                    },
+                  ],
+                }),
+              },
+            } as CodexEvent;
+            await killed;
+          })(),
+          kill: () => {
+            killCount += 1;
+            releaseKilled();
+          },
+        };
+      }
+      return {
+        events: (async function* () {
+          yield { type: "turn.started" } as CodexEvent;
+          yield { type: "item.completed", item: { type: "agent_message", text: "continued" } };
+          yield { type: "turn.completed" } as CodexEvent;
+        })(),
+        kill: () => {},
+      };
+    };
+
+    const engine = new CodexEngine(fn);
+    const id = await engine.start({ cwd: ".", firstText: "go" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(id).toBe("cx-question");
+    expect(killCount).toBe(1);
+    expect(engine.activeSessions()).toHaveLength(0);
+    expect(
+      engine.answer(id, {
+        toolUseId: "call-question",
+        text: 'Your questions have been answered: "Pick one?"="A".',
+      }),
+    ).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({
+      resume: "cx-question",
+      prompt: 'Your questions have been answered: "Pick one?"="A".',
+    });
   });
 
   it("activeSessions lists a session mid-turn and drops it once the turn ends", async () => {

@@ -1,6 +1,6 @@
 /** Shared domain types. session = cache, brief = state. */
 
-export type Pattern = "avoidance" | "stalled" | "healthy" | "unknown";
+export type Pattern = "avoidance" | "unknown";
 
 export interface BriefFrontMatter {
   status?: string;
@@ -47,6 +47,11 @@ export interface RawSession {
   /** distinct engagement bursts — activity separated by a long idle gap counts as
    *  a fresh "visit" (you left and came back). Drives the avoidance pattern. */
   visits: number;
+  /** true when the vendor transcript says the latest turn has started but has
+   *  not emitted a terminal event. This covers externally-running sessions that
+   *  Attend did not launch and therefore cannot track in its live engine. */
+  active?: boolean;
+  activeStartedAt?: number | null;
 }
 
 export interface Telemetry {

@@ -88,11 +88,50 @@ describe("readCodexTranscript", () => {
     });
   });
 
+  it("keeps user text from image turns serialized with leading image tags", () => {
+    file = path.join(os.tmpdir(), `attend-rollout-${Math.random().toString(36).slice(2)}.jsonl`);
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: '<image name=[Image #1] path="/tmp/ui.png">' },
+              { type: "input_image", image_url: "data:image/png;base64,abcd", detail: "high" },
+              { type: "input_text", text: "</image>" },
+              {
+                type: "input_text",
+                text: "why is this reversed?\n\nAttachments:\n- image: ui.png",
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Because the prompt was hidden." }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const msgs = readCodexTranscript(file);
+    expect(msgs).toMatchObject([
+      { role: "user", text: "why is this reversed?\n\nAttachments:\n- image: ui.png" },
+      { role: "assistant", text: "Because the prompt was hidden." },
+    ]);
+  });
+
   it("returns [] for a missing file", () => {
     expect(readCodexTranscript("/no/such/file.jsonl")).toEqual([]);
   });
 
-  it("rebuilds history from compacted replacement_history", () => {
+  it("does not replace real history with compacted replacement_history", () => {
     file = path.join(os.tmpdir(), `attend-rollout-${Math.random().toString(36).slice(2)}.jsonl`);
     fs.writeFileSync(
       file,
@@ -113,6 +152,48 @@ describe("readCodexTranscript", () => {
             content: [{ type: "output_text", text: "first answer" }],
           },
         }),
+        JSON.stringify({
+          type: "compacted",
+          payload: {
+            message: "",
+            replacement_history: [
+              {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: "summary user" }],
+              },
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "summary answer" }],
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "latest follow-up" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const msgs = readCodexTranscript(file);
+    expect(msgs).toMatchObject([
+      { role: "user", text: "first question" },
+      { role: "assistant", text: "first answer" },
+      { role: "user", text: "latest follow-up" },
+    ]);
+  });
+
+  it("uses compacted replacement_history as a fallback when no real history exists", () => {
+    file = path.join(os.tmpdir(), `attend-rollout-${Math.random().toString(36).slice(2)}.jsonl`);
+    fs.writeFileSync(
+      file,
+      [
         JSON.stringify({
           type: "compacted",
           payload: {
