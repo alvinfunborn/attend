@@ -142,7 +142,7 @@ const STYLE = `
     --status-unread: #059669; --status-unread-soft: rgba(16,185,129,0.24);
     --status-seen: #0284c7; --status-seen-soft: rgba(14,165,233,0.18);
     --status-read: #cbd5e1;
-    --user-title: #6d28d9; --latest-label: #4f46e5;
+    --latest-label: #4f46e5;
     --radius: 8px; --radius-sm: 6px; --radius-pill: 999px;
     --shadow-sm: 0 1px 2px rgba(15,23,42,0.06);
     --shadow-md: 0 6px 18px rgba(15,23,42,0.10), 0 2px 6px rgba(15,23,42,0.06);
@@ -177,7 +177,7 @@ const STYLE = `
     --status-unread: #34d399; --status-unread-soft: rgba(52,211,153,0.24);
     --status-seen: #38bdf8; --status-seen-soft: rgba(56,189,248,0.2);
     --status-read: #475569;
-    --user-title: #c084fc; --latest-label: #a5b4fc;
+    --latest-label: #a5b4fc;
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.28);
     --shadow-md: 0 8px 22px rgba(0,0,0,0.34), 0 2px 8px rgba(0,0,0,0.28);
     --shadow-pop: 0 18px 40px rgba(0,0,0,0.48), 0 6px 16px rgba(0,0,0,0.34);
@@ -374,7 +374,6 @@ const STYLE = `
   .session-title-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-title:not(.has-aux) .session-title-main { flex: 1 1 auto; }
   .session-title.has-aux .session-title-main { flex: 0 1 auto; max-width: 68%; }
-  .session-title.manual .session-title-main { color: var(--user-title); }
   .session-title-aux { flex: 1 1 auto; min-width: 2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.78em; font-weight: 600; color: var(--ink-4); letter-spacing: 0; }
   .it-title.session-title.has-aux .session-title-main { max-width: 62%; }
   .it-age { flex-shrink: 0; font-size: 0.66rem; color: #9ca3af; font-family: ui-monospace, monospace; white-space: nowrap; }
@@ -514,7 +513,7 @@ const STYLE = `
   .headbtn:disabled { color: var(--ink-4); background: transparent; }
   .headbtn svg { width: 1.08rem; height: 1.08rem; stroke: currentColor; stroke-width: 1.45; fill: none; stroke-linecap: round; stroke-linejoin: round; }
   .title-edit-btn { width: 1.3rem; height: 1.3rem; }
-  .title-edit-btn svg { width: 0.78rem; height: 0.78rem; stroke-width: 1.55; }
+  .title-edit-btn svg { width: 0.68rem; height: 0.68rem; stroke-width: 1.55; }
   .headbtn.forktree-trigger { color: var(--ink-4); }
   .headbtn.forktree-trigger:hover { color: var(--accent); background: var(--accent-soft); }
   .headbtn .forktree-mini { width: 1.5rem; height: 1rem; stroke: none; }
@@ -522,7 +521,7 @@ const STYLE = `
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @keyframes statusSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .title-editing { overflow: visible; }
-  .title-edit-input { width: 100%; box-sizing: border-box; font: inherit; font-size: 0.84rem; font-weight: 600; color: var(--user-title); padding: 0.18rem 0.4rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--input-bg); box-shadow: 0 0 0 3px var(--accent-ring); }
+  .title-edit-input { width: 100%; box-sizing: border-box; font: inherit; font-size: 0.84rem; font-weight: 600; color: var(--ink); padding: 0.18rem 0.4rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--input-bg); box-shadow: 0 0 0 3px var(--accent-ring); }
   .head .s { font-size: 0.72rem; color: #6b7280; }
   .head .s .sub-line { margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .head .s .sub-line + .sub-line { margin-top: 0.1rem; }

@@ -330,18 +330,16 @@ describe("renderConsole", () => {
     const html = renderConsole(view);
     expect(html).toContain('id="titleEditBtn"');
     expect(html).toContain('class="headbtn title-edit-btn" id="titleEditBtn"');
-    expect(html).toContain(".title-edit-btn svg { width: 0.78rem; height: 0.78rem;");
+    expect(html).toContain(".title-edit-btn svg { width: 0.68rem; height: 0.68rem;");
     expect(html).toContain("function startTitleEdit()");
     expect(html).toContain("function saveSessionCustomTitle(s, value)");
     expect(html).toContain("saveVaultUiState({sessionTitles:titles});");
     expect(html).toContain("function renderSessionTitle(node, s, baseClass)");
+    expect(html).not.toContain(".session-title.manual .session-title-main");
+    expect(html).not.toContain("--user-title:");
     expect(html).toContain(
-      ".session-title.manual .session-title-main { color: var(--user-title); }",
+      ".title-edit-input { width: 100%; box-sizing: border-box; font: inherit; font-size: 0.84rem; font-weight: 600; color: var(--ink);",
     );
-    expect(html).toContain("--user-title: #6d28d9;");
-    expect(html).toContain("--user-title: #c084fc;");
-    expect(html).not.toContain("--user-title: #0f766e;");
-    expect(html).not.toContain("--user-title: #5eead4;");
     expect(html).toContain("node.setAttribute('data-hover-tip',tip);");
     expect(html).toContain("title.removeAttribute('data-hover-tip');");
     expect(html).toContain("ht.removeAttribute('data-hover-tip');");
