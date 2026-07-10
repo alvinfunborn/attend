@@ -19,13 +19,31 @@ export function parseAnalysis(text: string): Analysis | null {
   }
   const brief = typeof obj.brief === "string" ? obj.brief.trim() : "";
   if (!brief) return null;
-  return {
+  const out: Analysis = {
     brief: shorten(brief, 80),
     state: parseState(obj.state),
     priority: clampNum(obj.priority, 0, 10),
     etaMin: Math.max(1, Math.round(clampNum(obj.etaMin, 0, 600))),
     reason: typeof obj.reason === "string" ? shorten(obj.reason.trim(), 200) : "",
   };
+  if ("avoidancePrompt" in obj)
+    out.avoidancePrompt = parseAvoidancePromptValue(obj.avoidancePrompt);
+  return out;
+}
+
+export function parseAvoidancePrompt(text: string): string | null {
+  const json = lastJsonObject(text);
+  if (!json) return null;
+  try {
+    const obj = JSON.parse(json) as Record<string, unknown>;
+    return parseAvoidancePromptValue(obj.avoidancePrompt);
+  } catch {
+    return null;
+  }
+}
+
+function parseAvoidancePromptValue(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? shorten(v.trim(), 500) : null;
 }
 
 const ANALYSIS_STATES = new Set<AnalysisState>([

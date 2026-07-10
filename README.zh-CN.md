@@ -148,8 +148,18 @@ CLI args > env > config file > platform defaults
 - `ATTEND_PORT`
 - `ATTEND_HOST`
 - `ATTEND_CLAUDE_PROJECTS`
+- `ATTEND_CLAUDE_MODELS`（手动逗号分隔 override）
+- `ATTEND_CLAUDE_MODELS_CACHE`
 - `ATTEND_CODEX_SESSIONS`
+- `ATTEND_CODEX_MODELS_CACHE`
 - `ATTEND_TAGS`
+
+当 Attend 用单个 vault root 启动时，用户数据写入 `<vault>/.attend/`：tag、
+session 状态、手动 override、engagement，以及与浏览器无关的 UI 状态（主题、
+focus 定义、model/effort 历史和消息 pin）。只有 daemon 映射和 analysis cache
+保留在全局 `~/.attend/`。浏览器只保留设备交互偏好：tag filter 模式、priority
+filter、当前 focus、sidebar 宽度和折叠的 turn。没有 scoped vault 时仍保留旧的
+全局回退；`ATTEND_TAGS` 可以覆盖默认 tag 路径。
 
 示例 `attend.config.json`：
 
@@ -157,7 +167,9 @@ CLI args > env > config file > platform defaults
 {
   "vaultRoots": ["D:\\workspace\\projects", "C:\\Users\\you\\notes"],
   "claudeProjects": "C:\\Users\\you\\.claude\\projects",
+  "claudeModelsCache": "C:\\Users\\you\\.claude\\cache\\gateway-models.json",
   "codexSessions": "C:\\Users\\you\\.codex\\sessions",
+  "codexModelsCache": "C:\\Users\\you\\.codex\\models_cache.json",
   "memorySources": [],
   "port": 5050
 }

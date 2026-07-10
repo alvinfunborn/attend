@@ -63,13 +63,114 @@ function appWithSpy(config = resolveConfig({ positionals: [] })) {
 
 const tmp = encodeURIComponent(os.tmpdir());
 
+describe("GET /", () => {
+  it("shows the scoped vault name while e2ee is locked", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const vaultRoot = path.join(os.tmpdir(), `attend-test-vault-${uniq}`);
+    const config = {
+      ...resolveConfig({ positionals: [vaultRoot], e2eePassphrase: "secret" }),
+      daemonRegistry: path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`),
+      analysisCache: path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`),
+      overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+      tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+      engagement: path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`),
+      sessionStatus: path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`),
+    };
+    const { app } = appWithSpy(config);
+
+    const res = await app.request("/");
+    const html = await res.text();
+    const vaultName = path.basename(vaultRoot);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(html).toContain(
+      `<span class="brand-scope" title="Attend — ${vaultName}">${vaultName}</span>`,
+    );
+    expect(html).not.toContain(">locked</span>");
+  });
+});
+
+describe("GET /models/codex", () => {
+  it("reads the latest Codex model cache on every request", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-model-route-"));
+    const cache = path.join(root, "models_cache.json");
+    const config = { ...resolveConfig({ positionals: [] }), codexModelsCache: cache };
+    const { app } = appWithSpy(config);
+    fs.writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-5.5", visibility: "list" }] }));
+
+    const firstResponse = await app.request("/models/codex");
+    const first = (await firstResponse.json()) as {
+      models: Array<{ value: string }>;
+    };
+    fs.writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-5.6", visibility: "list" }] }));
+    const second = (await (await app.request("/models/codex")).json()) as {
+      models: Array<{ value: string }>;
+    };
+
+    expect(first.models.map((model) => model.value)).toEqual(["gpt-5.5"]);
+    expect(second.models.map((model) => model.value)).toEqual(["gpt-5.6"]);
+    expect(firstResponse.headers.get("cache-control")).toBe("no-store");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("GET /models/claude", () => {
+  it("reads the latest Claude model cache on every request", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-claude-model-route-"));
+    const cache = path.join(root, "gateway-models.json");
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      claudeModels: [],
+      claudeModelsCache: cache,
+    };
+    const { app } = appWithSpy(config);
+    fs.writeFileSync(cache, JSON.stringify({ models: [{ id: "claude-sonnet-5" }] }));
+
+    const firstResponse = await app.request("/models/claude");
+    const first = (await firstResponse.json()) as {
+      models: Array<{ value: string }>;
+    };
+    fs.writeFileSync(cache, JSON.stringify({ models: [{ id: "claude-fable-5" }] }));
+    const second = (await (await app.request("/models/claude")).json()) as {
+      models: Array<{ value: string }>;
+    };
+
+    expect(first.models.map((model) => model.value)).toEqual(["claude-sonnet-5"]);
+    expect(second.models.map((model) => model.value)).toEqual(["claude-fable-5"]);
+    expect(firstResponse.headers.get("cache-control")).toBe("no-store");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("vault UI state", () => {
+  it("persists browser-independent preferences in the scoped vault", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-vault-ui-"));
+    const config = resolveConfig({ positionals: [root] });
+    const { app } = appWithSpy(config);
+    const res = await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "dark", modelPrefs: { codex: { effort: "medium" } } }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(config.uiState, "utf-8"))).toMatchObject({
+      theme: "dark",
+      modelPrefs: { codex: { effort: "medium" } },
+    });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
 class FakeCodexDriver implements ChatDriver {
   readonly vendor = "codex";
   readonly starts: StartOpts[] = [];
   readonly sends: Array<{ sessionId: string; turn: UserTurn }> = [];
   readonly interrupts: string[] = [];
   interruptResult = false;
-  active: Array<{ sessionId: string; startedAt: number }> = [];
+  active: Array<{ sessionId: string; startedAt: number; clientSessionId?: string }> = [];
+  readonly turnEndListeners = new Set<(sessionId: string) => void>();
 
   get(_sessionId: string): { cwd: string } | undefined {
     return { cwd: os.tmpdir() };
@@ -102,12 +203,22 @@ class FakeCodexDriver implements ChatDriver {
     return this.active.map((s) => s.sessionId);
   }
 
-  activeSessionStates(): Array<{ sessionId: string; startedAt: number }> {
+  activeSessionStates(): Array<{
+    sessionId: string;
+    startedAt: number;
+    clientSessionId?: string;
+  }> {
     return this.active;
   }
 
-  onTurnEnd(_cb: (sessionId: string) => void): () => void {
-    return () => {};
+  onTurnEnd(cb: (sessionId: string) => void): () => void {
+    this.turnEndListeners.add(cb);
+    return () => this.turnEndListeners.delete(cb);
+  }
+
+  finishTurn(sessionId: string): void {
+    this.active = this.active.filter((state) => state.sessionId !== sessionId);
+    for (const cb of this.turnEndListeners) cb(sessionId);
   }
 }
 
@@ -240,6 +351,41 @@ describe("POST /open", () => {
   });
 });
 
+describe("GET /dirs/suggest", () => {
+  it("lists local child directories for an absolute directory input", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-"));
+    const child = path.join(root, "magicline");
+    const file = path.join(root, "notes.txt");
+    fs.mkdirSync(child);
+    fs.writeFileSync(file, "x");
+    try {
+      const { app } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const res = await app.request(`/dirs/suggest?q=${encodeURIComponent(root + path.sep)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { dirs: Array<{ path: string; source: string }> };
+      expect(body.dirs).toContainEqual({ path: child, source: "folder" });
+      expect(body.dirs.map((d) => d.path)).not.toContain(file);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists scoped child directories for a relative prefix", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-"));
+    const child = path.join(root, "ai_call");
+    fs.mkdirSync(child);
+    try {
+      const { app } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const res = await app.request(`/dirs/suggest?q=${encodeURIComponent("ai_")}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { dirs: Array<{ path: string; source: string }> };
+      expect(body.dirs).toContainEqual({ path: child, source: "folder" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("POST /session/override", () => {
   // Build an app whose override store points at a throwaway temp file (never the
   // real ~/.attend/overrides.json).
@@ -247,6 +393,8 @@ describe("POST /session/override", () => {
     const uniq = Math.random().toString(36).slice(2);
     const config = {
       ...resolveConfig({ positionals: [] }),
+      claudeProjects: path.join(os.tmpdir(), `attend-test-claude-${uniq}`),
+      codexSessions: path.join(os.tmpdir(), `attend-test-codex-${uniq}`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
     };
     const orchestrator = new DaemonOrchestrator(
@@ -290,6 +438,12 @@ describe("POST /session/override", () => {
     expect(await res.json()).toMatchObject({
       ok: true,
       override: { state: "blocked", pattern: "avoidance" },
+    });
+    const clear = await post(app, "?session=s1", { pattern: "unknown" });
+    expect(clear.status).toBe(200);
+    expect(await clear.json()).toMatchObject({
+      ok: true,
+      override: { state: "blocked", pattern: "unknown" },
     });
   });
 
@@ -393,6 +547,16 @@ describe("tag routes", () => {
     };
     expect(persisted.sessions.s1).toEqual(["work"]);
     expect(persisted.sessions[`brief:claude:${cwd}:Shared task`]).toEqual(["work"]);
+    expect(
+      Object.entries(persisted.sessions).some(
+        ([key, value]) => key.startsWith(`title:claude:${cwd}:`) && value[0] === "work",
+      ),
+    ).toBe(true);
+    expect(
+      Object.entries(persisted.sessions).some(
+        ([key, value]) => key.startsWith("path:claude:") && value[0] === "work",
+      ),
+    ).toBe(true);
     fs.rmSync(claudeProjects, { recursive: true, force: true });
     fs.rmSync(cwd, { recursive: true, force: true });
   });
@@ -403,6 +567,107 @@ describe("tag routes", () => {
     const res = await app.request("/tags?name=urgent", { method: "DELETE" });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, tags: ["work"] });
+  });
+
+  it("reorders global tags", async () => {
+    const app = appWithTags();
+    await post(app, "/session/tags?session=s1", { tags: ["work", "urgent", "later"] });
+
+    const res = await post(app, "/tags/order", { tags: ["later", "work", "urgent"] });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, tags: ["later", "work", "urgent"] });
+  });
+
+  it("keeps tag write responses scoped to the current vault", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-claude-${uniq}-`));
+    const currentRoot = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-vault-a-${uniq}-`));
+    const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-vault-b-${uniq}-`));
+    const projectDir = path.join(claudeProjects, "project");
+    const tagFile = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+    fs.mkdirSync(projectDir);
+    fs.writeFileSync(
+      path.join(projectDir, "s1.jsonl"),
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-06-01T00:00:00.000Z",
+        cwd: path.join(currentRoot, "app"),
+        sessionId: "s1",
+        message: { content: "current vault" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDir, "s2.jsonl"),
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-06-01T00:01:00.000Z",
+        cwd: path.join(otherRoot, "app"),
+        sessionId: "s2",
+        message: { content: "other vault" },
+      }),
+    );
+    fs.writeFileSync(
+      tagFile,
+      JSON.stringify({
+        tags: ["local", "foreign"],
+        sessions: { s1: ["local"], s2: ["foreign"] },
+      }),
+    );
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      scopeRoots: [currentRoot],
+      claudeProjects,
+      codexSessions: path.join(os.tmpdir(), `attend-test-codex-${uniq}`),
+      tags: tagFile,
+      overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+    };
+    const orchestrator = new DaemonOrchestrator(
+      new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
+      new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)),
+      [new ClaudeAnalyzer(claudeProjects, fakeQuery)],
+    );
+    const app = createApp(config, {
+      launcher: () => "noop",
+      engine: new ChatEngine(fakeQuery),
+      orchestrator,
+    });
+
+    try {
+      expect(await (await post(app, "/tags", { name: "new local" })).json()).toMatchObject({
+        ok: true,
+        tags: ["local", "new local"],
+      });
+      const persistedAfterCreate = JSON.parse(fs.readFileSync(tagFile, "utf-8")) as {
+        sessions: Record<string, string[]>;
+      };
+      expect(persistedAfterCreate.sessions[`scope:${currentRoot}`]).toEqual(["new local"]);
+
+      expect(
+        await (
+          await post(app, "/session/tags?session=s1", { tags: ["local", "tab local"] })
+        ).json(),
+      ).toMatchObject({
+        ok: true,
+        sessionTags: ["local", "tab local"],
+        tags: ["local", "new local", "tab local"],
+      });
+
+      const restarted = createApp(config, {
+        launcher: () => "noop",
+        engine: new ChatEngine(fakeQuery),
+        orchestrator,
+      });
+      const html = await (await restarted.request("/")).text();
+      expect(html).toContain('"local"');
+      expect(html).toContain('"new local"');
+      expect(html).not.toContain('"foreign"');
+    } finally {
+      fs.rmSync(claudeProjects, { recursive: true, force: true });
+      fs.rmSync(currentRoot, { recursive: true, force: true });
+      fs.rmSync(otherRoot, { recursive: true, force: true });
+      fs.rmSync(tagFile, { force: true });
+    }
   });
 
   it("rejects missing tag names and missing session ids", async () => {
@@ -434,7 +699,7 @@ describe("engagement routes", () => {
     return createApp(config, deps);
   }
 
-  async function appWithTrackedSession(endedAt = 1234) {
+  async function appWithTrackedSession(endedAt = Date.now(), activityAt = Date.now() - 60_000) {
     const uniq = Math.random().toString(36).slice(2);
     const claudeProjects = path.join(os.tmpdir(), `attend-test-projects-${uniq}`);
     const root = path.join(os.tmpdir(), `attend-test-root-${uniq}`);
@@ -450,14 +715,14 @@ describe("engagement routes", () => {
           type: "user",
           sessionId: "s1",
           cwd,
-          timestamp: "2026-06-03T03:06:02.640Z",
+          timestamp: new Date(activityAt - 10_000).toISOString(),
           message: { content: "first prompt" },
         }),
         JSON.stringify({
           type: "assistant",
           sessionId: "s1",
           cwd,
-          timestamp: "2026-06-03T03:06:12.429Z",
+          timestamp: new Date(activityAt).toISOString(),
           message: { content: [{ type: "text", text: "reply" }] },
         }),
       ].join("\n"),
@@ -516,9 +781,73 @@ describe("engagement routes", () => {
     });
   });
 
+  it("clears avoidance telemetry when a new user message is sent", async () => {
+    const endedAt = Date.now();
+    const { app, cwd } = await appWithTrackedSession(endedAt);
+    const secondReview = await app.request("/session/engagement?session=s1", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        viewedMs: 20 * 60_000,
+        hadMeaningfulScroll: true,
+        hadSend: false,
+        endedAt: endedAt + 1_000,
+      }),
+    });
+    expect(secondReview.status).toBe(200);
+
+    const before = await app.request("/");
+    const beforeHtml = await before.text();
+    const beforeMatch = /window\.__SESSIONS__ = (\[[\s\S]*?\]);/.exec(beforeHtml);
+    const beforeSessions = JSON.parse(beforeMatch?.[1] ?? "[]") as Array<Record<string, unknown>>;
+    expect(beforeSessions.find((s) => s.sessionId === "s1")).toMatchObject({
+      pattern: "avoidance",
+    });
+
+    const sent = await app.request(`/chat/send?session=s1&cwd=${encodeURIComponent(cwd)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "here is the decision" }),
+    });
+
+    expect(sent.status).toBe(200);
+    expect(await sent.json()).toMatchObject({
+      ok: true,
+      session: "s1",
+      view: {
+        sessionId: "s1",
+        pattern: "unknown",
+        patternReason: null,
+        patternData: null,
+        avoidancePrompt: null,
+      },
+    });
+  });
+
+  it("does not count generating progress visits as review engagement", async () => {
+    const app = appWithEngagement();
+    const res = await app.request("/session/engagement?session=s1", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        viewedMs: 25_000,
+        hadMeaningfulScroll: true,
+        hadSend: false,
+        wasGenerating: true,
+        endedAt: 1234,
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      record: { opens: 1, reviewVisits: 0, reviewMs: 0 },
+    });
+  });
+
   it("keeps opening a session from changing the recent sort timestamp", async () => {
-    const endedAt = Date.parse("2026-06-04T06:00:00.000Z");
-    const { app } = await appWithTrackedSession(endedAt);
+    const activityAt = Date.now() - 60_000;
+    const endedAt = activityAt + 30_000;
+    const { app } = await appWithTrackedSession(endedAt, activityAt);
     const res = await app.request("/");
     expect(res.status).toBe(200);
     const html = await res.text();
@@ -526,10 +855,18 @@ describe("engagement routes", () => {
     expect(match?.[1]).toBeTruthy();
     const sessions = JSON.parse(match?.[1] ?? "[]") as Array<Record<string, unknown>>;
     const s1 = sessions.find((s) => s.sessionId === "s1");
-    const activityAt = Date.parse("2026-06-03T03:06:12.429Z");
     expect(s1).toMatchObject({
       lastTs: activityAt,
       sortTs: activityAt,
+    });
+  });
+
+  it("includes current throughput stats in live snapshots", async () => {
+    const { app } = await appWithTrackedSession();
+    const res = await app.request("/chat/live");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      stats: { sessionsPerHour: 1 / 24 },
     });
   });
 
@@ -864,6 +1201,7 @@ describe("GET /session/source", () => {
       codexSessions: path.join(os.tmpdir(), `attend-test-codex-${uniq}`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+      chatQueue: path.join(os.tmpdir(), `attend-test-queue-${uniq}.json`),
     };
     const orchestrator = new DaemonOrchestrator(
       new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
@@ -1026,8 +1364,11 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     const uniq = Math.random().toString(36).slice(2);
     const config = {
       ...resolveConfig({ positionals: [] }),
+      claudeProjects: path.join(os.tmpdir(), `attend-test-claude-${uniq}`),
+      codexSessions: path.join(os.tmpdir(), `attend-test-codex-${uniq}`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+      chatQueue: path.join(os.tmpdir(), `attend-test-queue-${uniq}.json`),
     };
     const orchestrator = new DaemonOrchestrator(
       new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
@@ -1073,15 +1414,56 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "try another approach", model: "sonnet", effort: "xhigh" }),
+      body: JSON.stringify({
+        text: "try another approach",
+        model: "sonnet",
+        effort: "xhigh",
+        clientSessionId: "branch-ui-claude",
+      }),
     });
     expect(res.status).toBe(200);
+    expect(await res.clone().json()).toMatchObject({ clientSessionId: "branch-ui-claude" });
     expect(queryCalls[0]?.options).toMatchObject({
       resume: "abc",
       forkSession: true,
       model: "sonnet",
       effort: "xhigh",
     });
+  });
+
+  it("starts context-prefix forks without resuming the parent session", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const res = await app.request(`/chat/fork?session=parent-1&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "edited opener",
+        clientSessionId: "branch-ui-codex",
+        contextMessages: [
+          { role: "user", text: "original prompt" },
+          { role: "assistant", text: "original answer", tools: [{ name: "Bash" }] },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      cwd: os.tmpdir(),
+      project: path.basename(os.tmpdir()),
+      forkMode: "context-prefix",
+    });
+    expect(codex.starts[0]).toMatchObject({
+      cwd: os.tmpdir(),
+      clientSessionId: "branch-ui-codex",
+    });
+    expect(codex.starts[0]?.resume).toBeUndefined();
+    expect(codex.starts[0]?.forkSession).toBeUndefined();
+    expect(codex.starts[0]?.firstText).toMatch(/^edited opener\n/);
+    expect(codex.starts[0]?.firstText).toContain("Transcript:");
+    expect(codex.starts[0]?.firstText).toContain("User: original prompt");
+    expect(codex.starts[0]?.firstText).toContain("Assistant: original answer");
+    expect(codex.starts[0]?.firstText).toContain("[tools: Bash]");
+    expect(codex.starts[0]?.firstText).toContain("Attend fork context:");
   });
 
   it("passes model and effort through same-session configured sends", async () => {
@@ -1103,6 +1485,74 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       model: "opus",
       effort: "high",
     });
+  });
+
+  it("includes stable client identities in the global live snapshot", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [
+      {
+        sessionId: "cx-provider-1",
+        clientSessionId: "branch-ui-1",
+        startedAt: Date.now(),
+      },
+    ];
+    expect(await (await app.request("/chat/live")).json()).toMatchObject({
+      active: ["cx-provider-1"],
+      clientSessionIds: { "cx-provider-1": "branch-ui-1" },
+    });
+  });
+
+  it("advances a persisted queue on turn-end while no browser session is selected", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
+    const queued = await app.request(
+      `/chat/queue?session=cx-1&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "run after the current turn" }),
+      },
+    );
+    expect(await queued.json()).toMatchObject({
+      ok: true,
+      items: [{ text: "run after the current turn" }],
+    });
+    expect(codex.sends).toHaveLength(0);
+
+    codex.finishTurn("cx-1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(codex.sends).toEqual([
+      { sessionId: "cx-1", turn: expect.objectContaining({ text: "run after the current turn" }) },
+    ]);
+    const remaining = await app.request("/chat/queue?session=cx-1");
+    expect(await remaining.json()).toMatchObject({ ok: true, items: [], parked: false });
+  });
+
+  it("parks the server queue on Stop until a queued item is explicitly sent", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
+    codex.interruptResult = true;
+    const queued = await app.request(
+      `/chat/queue?session=cx-1&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "keep parked" }),
+      },
+    );
+    const queuedBody = (await queued.json()) as { item: { id: string } };
+    await app.request("/chat/abort?session=cx-1&vendor=codex", { method: "POST" });
+    codex.finishTurn("cx-1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(codex.sends).toHaveLength(0);
+
+    const sent = await app.request(
+      `/chat/queue/send?session=cx-1&item=${encodeURIComponent(queuedBody.item.id)}`,
+      { method: "POST" },
+    );
+    expect(await sent.json()).toMatchObject({ ok: true, items: [] });
+    expect(codex.sends[0]).toMatchObject({ sessionId: "cx-1", turn: { text: "keep parked" } });
   });
 
   it("persists inherited tags when forking a session", async () => {

@@ -42,6 +42,8 @@ export interface RawSession {
   /** epoch ms, or null when no timestamps were found */
   firstTs: number | null;
   lastTs: number | null;
+  /** epoch ms timestamps for real user-authored prompts, newest not guaranteed. */
+  userPromptTs?: number[];
   prompts: number;
   actions: number;
   /** distinct engagement bursts — activity separated by a long idle gap counts as

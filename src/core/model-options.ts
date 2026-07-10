@@ -1,6 +1,10 @@
 export interface ModelOption {
   value: string;
   label: string;
+  /** per-model reasoning levels, when the vendor advertises them (Codex models cache) */
+  efforts?: string[];
+  /** the model's own default reasoning level, when known */
+  defaultEffort?: string;
 }
 
 export function modelOptionsFromStrings(models: string[]): ModelOption[] {

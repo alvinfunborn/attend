@@ -2,7 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildArgs, makeCodexFork, prepareCodexExecInput } from "../src/chat/codex/exec.js";
+import type { CodexEvent } from "../src/chat/codex/events.js";
+import {
+  buildArgs,
+  makeCodexExec,
+  makeCodexFork,
+  prepareCodexExecInput,
+} from "../src/chat/codex/exec.js";
+import { readCodexTranscript } from "../src/chat/codex/transcript.js";
 
 const cleanup: Array<() => void> = [];
 
@@ -112,6 +119,18 @@ describe("buildArgs", () => {
   });
 });
 
+describe("makeCodexExec", () => {
+  it("surfaces a missing codex binary as an error event instead of crashing the process", async () => {
+    const exec = makeCodexExec("attend-nonexistent-codex-binary-xyz");
+    const handle = exec({ cwd: process.cwd(), prompt: "hello", resume: "cx-1" });
+    const events: CodexEvent[] = [];
+    for await (const event of handle.events) events.push(event);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("error");
+    expect((events[0] as { error: string }).error).toMatch(/not found/i);
+  });
+});
+
 describe("makeCodexFork", () => {
   it("rewrites every session id field in the copied rollout metadata", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-fork-"));
@@ -130,5 +149,62 @@ describe("makeCodexFork", () => {
     expect(forkFile).toBeTruthy();
     const meta = JSON.parse(fs.readFileSync(path.join(dir, forkFile ?? ""), "utf-8"));
     expect(meta.payload).toMatchObject({ id: child, session_id: child });
+  });
+
+  it("forks before the parent's latest user turn when it is reused as the branch opener", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-fork-"));
+    cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    fs.writeFileSync(
+      path.join(dir, "rollout-2026-06-01T00-00-00-parent-1.jsonl"),
+      [
+        {
+          type: "session_meta",
+          payload: { id: "parent-1", session_id: "parent-1", cwd: dir },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "setup context" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "context reply" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "branch here" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "old answer" }],
+          },
+        },
+      ]
+        .map((line) => JSON.stringify(line))
+        .join("\n"),
+    );
+
+    const child = makeCodexFork(dir)("parent-1", "branch here");
+    expect(child).toBeTruthy();
+    const forkFile = fs.readdirSync(dir).find((name) => child && name.endsWith(`${child}.jsonl`));
+    expect(forkFile).toBeTruthy();
+    expect(readCodexTranscript(path.join(dir, forkFile ?? ""))).toMatchObject([
+      { role: "user", text: "setup context" },
+      { role: "assistant", text: "context reply" },
+    ]);
   });
 });

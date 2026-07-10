@@ -90,11 +90,41 @@ describe("toUiEventsFromCodex", () => {
     expect(ev).toEqual([{ kind: "tool_result", id: "x", text: "boom", isError: true }]);
   });
 
-  it("turns turn.completed into an ok result and turn.failed into a not-ok one", () => {
+  it("surfaces turn.completed as an ok result and turn.failed as a visible error", () => {
     expect(toUiEventsFromCodex({ type: "turn.completed" })).toEqual([{ kind: "result", ok: true }]);
+    // A failed turn must render (banner), not be swallowed like a `result`.
     expect(toUiEventsFromCodex({ type: "turn.failed", error: "nope" })).toEqual([
-      { kind: "result", ok: false, text: "nope" },
+      { kind: "error", message: "nope" },
     ]);
+    // No message anywhere → still terminal, with a generic fallback.
+    expect(toUiEventsFromCodex({ type: "turn.failed" })).toEqual([
+      { kind: "error", message: "codex turn failed" },
+    ]);
+  });
+
+  it("surfaces a codex usage-limit failure as an error banner (parity with Claude)", () => {
+    // The real shape: a bare `error` event immediately followed by an informative
+    // `turn.failed`. The empty one must emit nothing so it can't preempt (and thus
+    // suppress, in the engine) the message-carrying terminal.
+    expect(toUiEventsFromCodex({ type: "error", error: "" })).toEqual([]);
+    expect(toUiEventsFromCodex({ type: "error" })).toEqual([]);
+    expect(
+      toUiEventsFromCodex({
+        type: "turn.failed",
+        error: { message: "You've hit your usage limit. Try again at Jul 7th, 2026 9:45 AM." },
+      }),
+    ).toEqual([
+      {
+        kind: "error",
+        message: "You've hit your usage limit. Try again at Jul 7th, 2026 9:45 AM.",
+      },
+    ]);
+  });
+
+  it("emits a visible error when codex reports one via an `error` event", () => {
+    expect(
+      toUiEventsFromCodex({ type: "error", error: { message: "stream disconnected" } }),
+    ).toEqual([{ kind: "error", message: "stream disconnected" }]);
   });
 
   it("ignores item types it can't render (e.g. reasoning)", () => {

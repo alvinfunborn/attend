@@ -21,4 +21,10 @@ export interface SessionAnalyzer {
    * own contract + parsing; it never fabricates (null over fake data).
    */
   analyze(daemonId: string, cwd: string, taskId: string): Promise<Analysis | null>;
+  /**
+   * Optional one-shot prompt generation for sessions already flagged as avoidance
+   * by local telemetry. This is intentionally separate from regular analysis so
+   * token cost is paid only when the UI can actually use the draft.
+   */
+  avoidancePrompt?(daemonId: string, cwd: string, taskId: string): Promise<string | null>;
 }

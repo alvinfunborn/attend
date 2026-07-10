@@ -44,9 +44,18 @@ export interface CodexEvent {
   error?: { message?: string } | string;
 }
 
-function errMessage(error: CodexEvent["error"]): string {
-  if (!error) return "codex turn failed";
-  return typeof error === "string" ? error : (error.message ?? "codex turn failed");
+/**
+ * A concrete, human-facing error message, or null when the event carries none.
+ * Codex often emits a bare `{"type":"error"}` (empty) immediately before the
+ * informative `{"type":"turn.failed","error":{"message":"…"}}` (e.g. a usage
+ * limit). Returning null for the empty one lets the informative event provide
+ * the terminal instead of the empty one preempting — and thereby suppressing —
+ * it in the engine.
+ */
+function errText(error: CodexEvent["error"]): string | null {
+  if (!error) return null;
+  const msg = typeof error === "string" ? error : (error.message ?? "");
+  return msg.trim() || null;
 }
 
 function textOf(content: unknown, kind: string): string {
@@ -75,8 +84,10 @@ function parseToolInput(input: unknown): unknown {
 /**
  * Normalize one Codex exec event into zero or more `UiEvent`s — the same protocol
  * the Claude engine emits, so the console renders both vendors identically. A
- * terminal event (`turn.completed` → result ok; `turn.failed`/`error` → result
- * not-ok) is what the engine keys turn-end on, so we emit exactly one per turn.
+ * terminal event (`turn.completed` → ok result; `turn.failed`/`error` → a visible
+ * `error`, mirroring a thrown Claude failure so the UI shows the message instead
+ * of ending the turn silently) is what the engine keys turn-end on, so we emit
+ * exactly one per turn.
  */
 export function toUiEventsFromCodex(ev: CodexEvent): UiEvent[] {
   const out: UiEvent[] = [];
@@ -174,9 +185,21 @@ export function toUiEventsFromCodex(ev: CodexEvent): UiEvent[] {
       out.push({ kind: "result", ok: true });
       break;
 
+    // A failed turn is surfaced as a visible `error`, NOT a not-ok `result`: the
+    // console renders `error` (a banner) but silently swallows every `result`, so
+    // mapping to `result` would end the turn with no feedback — exactly why a
+    // Codex usage-limit looked like the session "froze". This mirrors the path a
+    // thrown Claude rate-limit takes (engine → `kind:"error"`), giving parity. The
+    // empty leading `error` event emits nothing so the informative `turn.failed`
+    // (which carries the real message) wins the single terminal slot.
+    case "error": {
+      const message = errText(ev.error);
+      if (message) out.push({ kind: "error", message });
+      break;
+    }
+
     case "turn.failed":
-    case "error":
-      out.push({ kind: "result", ok: false, text: errMessage(ev.error) });
+      out.push({ kind: "error", message: errText(ev.error) ?? "codex turn failed" });
       break;
   }
   return out;

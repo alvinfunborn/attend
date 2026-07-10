@@ -13,6 +13,7 @@ export class DaemonOrchestrator {
   private readonly analyzers = new Map<string, SessionAnalyzer>();
   private readonly spawning = new Map<string, Promise<string | null>>();
   private readonly analyzing = new Set<string>();
+  private readonly prompting = new Set<string>();
 
   constructor(
     private readonly registry: DaemonRegistry,
@@ -78,10 +79,36 @@ export class DaemonOrchestrator {
     this.analyzing.add(taskId);
     try {
       const parsed = await analyzer.analyze(entry.daemonId, entry.cwd || cwd, taskId);
-      if (parsed) this.cache.set(taskId, parsed);
+      if (parsed) {
+        const prev = this.cache.get(taskId);
+        const next =
+          parsed.avoidancePrompt === undefined && prev?.avoidancePrompt !== undefined
+            ? { ...parsed, avoidancePrompt: prev.avoidancePrompt }
+            : parsed;
+        this.cache.set(taskId, next);
+        return next;
+      }
       return parsed;
     } finally {
       this.analyzing.delete(taskId);
+    }
+  }
+
+  async ensureAvoidancePrompt(taskId: string, cwd: string): Promise<string | null> {
+    const cached = this.cache.get(taskId);
+    if (cached?.avoidancePrompt !== undefined) return cached.avoidancePrompt ?? null;
+    const entry = this.registry.get(taskId);
+    if (!entry || this.prompting.has(taskId)) return null;
+    const analyzer = this.analyzers.get(entry.vendor);
+    if (!analyzer?.avoidancePrompt) return null;
+    this.prompting.add(taskId);
+    try {
+      const prompt = await analyzer.avoidancePrompt(entry.daemonId, entry.cwd || cwd, taskId);
+      const current = this.cache.get(taskId);
+      if (current) this.cache.set(taskId, { ...current, avoidancePrompt: prompt });
+      return prompt;
+    } finally {
+      this.prompting.delete(taskId);
     }
   }
 }

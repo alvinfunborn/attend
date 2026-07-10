@@ -18,6 +18,29 @@ const fakeQuery = ((_args: unknown) => {
 }) as unknown as QueryFn;
 
 describe("ChatEngine", () => {
+  it("publishes normalized events to the global session event bus", async () => {
+    const engine = new ChatEngine(fakeQuery);
+    const received: Array<{ sessionId: string; event: UiEvent; clientSessionId?: string }> = [];
+    engine.onEvent((sessionId, event, clientSessionId) =>
+      received.push({ sessionId, event, clientSessionId }),
+    );
+
+    await engine.start({ cwd: ".", firstText: "hello", clientSessionId: "branch-ui-1" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(received).toContainEqual({
+      sessionId: "sess-9",
+      event: { kind: "assistant_text", text: "hi" },
+      clientSessionId: "branch-ui-1",
+    });
+    expect(received).toContainEqual({
+      sessionId: "sess-9",
+      event: { kind: "session", sessionId: "sess-9" },
+      clientSessionId: "branch-ui-1",
+    });
+    expect(received.some(({ event }) => event.kind === "result")).toBe(true);
+  });
+
   it("starts a run, resolves the session id, and does not replay finished-turn buffer to late subscribers", async () => {
     const engine = new ChatEngine(fakeQuery);
     const id = await engine.start({ cwd: ".", firstText: "hello" });
@@ -148,8 +171,8 @@ describe("ChatEngine", () => {
         for await (const msg of args.prompt) {
           seen.push(msg);
           const text = String(
-            ((msg as { message?: { content?: Array<{ text?: string }> } }).message?.content?.[0]
-              ?.text ?? ""),
+            (msg as { message?: { content?: Array<{ text?: string }> } }).message?.content?.[0]
+              ?.text ?? "",
           );
           const filePath = text.match(/Local path: (.+)/)?.[1]?.trim() ?? "";
           fileChecks.push(!!filePath && fs.existsSync(filePath));
@@ -583,6 +606,58 @@ describe("ChatEngine", () => {
     await done.start({ cwd: ".", firstText: "hello" });
     await new Promise((r) => setTimeout(r, 50));
     expect(done.activeSessions()).toHaveLength(0);
+  });
+
+  it("shutdown closes idle Claude input so the SDK stream can exit", async () => {
+    let closed = false;
+    const query = ((args: { prompt: AsyncIterable<unknown> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-idle-drain" };
+        try {
+          for await (const _msg of args.prompt) {
+            // keep consuming until shutdown closes the prompt iterator
+          }
+        } finally {
+          closed = true;
+        }
+      }
+      return gen();
+    }) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const id = await engine.start({ cwd: "." });
+
+    engine.shutdown();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(closed).toBe(true);
+    expect(engine.send(id, { text: "after close" })).toBe(false);
+  });
+
+  it("shutdown does not interrupt an active Claude turn", async () => {
+    let release!: () => void;
+    const canFinish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const query = ((_args: unknown) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-drain" };
+        await canFinish;
+        yield { type: "result", subtype: "success", result: "ok", session_id: "sess-drain" };
+      }
+      return gen();
+    }) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const id = await engine.start({ cwd: ".", firstText: "go" });
+    expect(engine.activeSessions()).toContain(id);
+
+    engine.shutdown();
+    expect(engine.activeSessions()).toContain(id);
+
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(engine.activeSessions()).toHaveLength(0);
   });
 
   it("finishes a turn whose SDK stream streams the answer then hangs silently (stall watchdog)", async () => {

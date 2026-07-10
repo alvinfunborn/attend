@@ -16,6 +16,7 @@ const MAX_BUFFER = 2000;
  */
 interface CodexRun {
   sessionId: string | null;
+  clientSessionId?: string;
   cwd: string;
   model?: string;
   effort?: StartOpts["effort"];
@@ -68,6 +69,9 @@ export class CodexEngine implements ChatDriver {
   private runs = new Map<string, CodexRun>();
   private pending = new Map<string, Set<(ev: UiEvent) => void>>();
   private turnEndListeners = new Set<(sessionId: string) => void>();
+  private eventListeners = new Set<
+    (sessionId: string, event: UiEvent, clientSessionId?: string) => void
+  >();
 
   constructor(
     private readonly execFn: CodexExecFn,
@@ -78,6 +82,11 @@ export class CodexEngine implements ChatDriver {
   onTurnEnd(cb: (sessionId: string) => void): () => void {
     this.turnEndListeners.add(cb);
     return () => this.turnEndListeners.delete(cb);
+  }
+
+  onEvent(cb: (sessionId: string, event: UiEvent, clientSessionId?: string) => void): () => void {
+    this.eventListeners.add(cb);
+    return () => this.eventListeners.delete(cb);
   }
 
   get(sessionId: string): { cwd: string } | undefined {
@@ -93,9 +102,20 @@ export class CodexEngine implements ChatDriver {
   activeSessionStates(): ActiveSessionState[] {
     const states: ActiveSessionState[] = [];
     for (const [id, run] of this.runs) {
-      if (run.turnActive) states.push({ sessionId: id, startedAt: run.turnStartedAt });
+      if (run.turnActive)
+        states.push({
+          sessionId: id,
+          startedAt: run.turnStartedAt,
+          clientSessionId: run.clientSessionId,
+        });
     }
     return states;
+  }
+
+  /** The running Codex child process is intentionally left alone. With the HTTP
+   * service closed there are no new sends, and the current turn can finish. */
+  shutdown(): void {
+    this.pending.clear();
   }
 
   private index(id: string, run: CodexRun): void {
@@ -124,12 +144,13 @@ export class CodexEngine implements ChatDriver {
     let resumeId = opts.resume;
     let forkFailed = false;
     if (opts.forkSession && opts.resume) {
-      const forked = this.forkFn(opts.resume);
+      const forked = this.forkFn(opts.resume, opts.firstText);
       if (forked) resumeId = forked;
       else forkFailed = true;
     }
     const run: CodexRun = {
       sessionId: forkFailed ? null : (resumeId ?? null),
+      clientSessionId: opts.clientSessionId,
       cwd: opts.cwd,
       model: opts.model,
       effort: opts.effort,
@@ -252,7 +273,7 @@ export class CodexEngine implements ChatDriver {
       attachments,
       resume: run.sessionId ?? undefined,
       model: run.model,
-      effort: run.effort === "max" ? "xhigh" : run.effort,
+      effort: run.effort,
       sandbox: this.sandbox,
     });
     run.child = handle;
@@ -351,6 +372,8 @@ export class CodexEngine implements ChatDriver {
       }
     }
     run.emitter.emit("event", ev);
+    if (run.sessionId)
+      for (const cb of this.eventListeners) cb(run.sessionId, ev, run.clientSessionId);
     return true;
   }
 }

@@ -12,6 +12,8 @@ export interface TranscriptMsg {
   role: "user" | "assistant";
   text: string;
   tools: ToolCall[];
+  /** epoch ms parsed from the transcript row, when the vendor records one */
+  ts?: number;
 }
 
 interface Block {
@@ -30,7 +32,18 @@ interface Line {
   /** Claude marks injected context (slash-command expansions, system notes) as
    *  meta — it's not part of the visible conversation, so we skip it. */
   isMeta?: boolean;
+  timestamp?: string;
   message?: { content?: unknown };
+}
+
+function parseTs(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const n = Date.parse(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function withTs<T extends TranscriptMsg>(msg: T, ts: number | undefined): T {
+  return ts === undefined ? msg : ({ ...msg, ts } as T);
 }
 
 /**
@@ -59,6 +72,28 @@ function textOf(content: unknown): string {
       .join("");
   }
   return "";
+}
+
+export function visiblePromptText(raw: string): string {
+  const text = raw.trim();
+  const marker = "Attend fork context:";
+  const markerAtStart = text.startsWith(marker);
+  const markerAfterLineBreak = text.indexOf(`\n${marker}`);
+  const idx = markerAtStart ? 0 : markerAfterLineBreak;
+  if (idx < 0) return text;
+
+  const tail = text.slice(markerAtStart ? idx : idx + 1);
+  if (
+    !tail.includes("\nUse the transcript below as prior context") ||
+    !tail.includes("\nTranscript:")
+  ) {
+    return text;
+  }
+
+  const opening = text.slice(0, idx).trim();
+  const attachmentNote = "\nThe user's opening turn includes ";
+  const noteIdx = opening.indexOf(attachmentNote);
+  return (noteIdx >= 0 ? opening.slice(0, noteIdx) : opening).trim();
 }
 
 function resultText(content: unknown): string {
@@ -100,6 +135,7 @@ export function readClaudeTranscript(file: string, limit = 200): TranscriptMsg[]
     // render as a user message.
     if (o.isMeta) continue;
     const content = o.message?.content;
+    const ts = parseTs(o.timestamp);
 
     if (o.type === "user") {
       // a user turn is either a typed prompt or synthetic tool_result blocks
@@ -118,11 +154,11 @@ export function readClaudeTranscript(file: string, limit = 200): TranscriptMsg[]
       const cmd = commandText(raw);
       if (cmd) {
         // a typed slash command → show "/cmd args", not the dropped tag soup
-        msgs.push({ role: "user", text: cmd, tools: [] });
+        msgs.push(withTs({ role: "user", text: cmd, tools: [] }, ts));
       } else {
-        const text = raw.trim();
+        const text = visiblePromptText(raw);
         // other "<…>" synthetic content (ide_opened_file, system reminders) stays hidden
-        if (text && !text.startsWith("<")) msgs.push({ role: "user", text, tools: [] });
+        if (text && !text.startsWith("<")) msgs.push(withTs({ role: "user", text, tools: [] }, ts));
       }
     } else if (o.type === "assistant") {
       const blocks: Block[] = Array.isArray(content) ? (content as Block[]) : [];
@@ -136,7 +172,7 @@ export function readClaudeTranscript(file: string, limit = 200): TranscriptMsg[]
           if (b.id) toolById.set(b.id, tc);
         }
       }
-      if (text || tools.length) msgs.push({ role: "assistant", text, tools });
+      if (text || tools.length) msgs.push(withTs({ role: "assistant", text, tools }, ts));
     }
   }
   return msgs.slice(-limit);

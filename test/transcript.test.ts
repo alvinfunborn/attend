@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readClaudeTranscript } from "../src/chat/transcript.js";
+import { readClaudeTranscript, visiblePromptText } from "../src/chat/transcript.js";
 
 // A Claude JSONL slice reproducing a typed slash command: the human turn is stored
 // as <command-name>/<command-args>, immediately followed by an `isMeta` message
@@ -29,6 +29,7 @@ const LINES = [
   },
   {
     type: "assistant",
+    timestamp: "2026-06-01T12:01:00.000Z",
     message: {
       content: [
         { type: "text", text: "On it." },
@@ -41,7 +42,11 @@ const LINES = [
     message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "out" }] },
   },
   { type: "assistant", message: { content: [{ type: "text", text: "Done." }] } },
-  { type: "user", message: { content: "a normal follow-up" } },
+  {
+    type: "user",
+    timestamp: "2026-06-01T12:02:00.000Z",
+    message: { content: "a normal follow-up" },
+  },
 ];
 
 let file: string;
@@ -65,5 +70,57 @@ describe("readClaudeTranscript", () => {
     ]);
     // the tool result is correlated back onto its tool_use
     expect(msgs[1]?.tools).toMatchObject([{ name: "Bash", result: "out" }]);
+    expect(msgs[1]?.ts).toBe(Date.parse("2026-06-01T12:01:00.000Z"));
+    expect(msgs[3]?.ts).toBe(Date.parse("2026-06-01T12:02:00.000Z"));
+  });
+
+  it("hides provider-fork context from the visible opening turn", () => {
+    file = path.join(os.tmpdir(), `attend-claude-${Math.random().toString(36).slice(2)}.jsonl`);
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "text",
+                text: [
+                  "visible opener",
+                  "Attend fork context: this branch originally ran in codex.",
+                  "Use the transcript below as prior context, but treat this as a new independent branch in the current workspace.",
+                  "Transcript:",
+                  "User: parent prompt",
+                  "Assistant: parent answer",
+                ].join("\n"),
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "fresh branch answer" }] },
+        }),
+      ].join("\n"),
+    );
+
+    const msgs = readClaudeTranscript(file);
+    expect(msgs).toMatchObject([
+      { role: "user", text: "visible opener" },
+      { role: "assistant", text: "fresh branch answer" },
+    ]);
+  });
+
+  it("hides provider-fork context even when it starts the prompt", () => {
+    expect(
+      visiblePromptText(
+        [
+          "Attend fork context: this branch originally ran in codex.",
+          "Use the transcript below as prior context, but treat this as a new independent branch in the current workspace.",
+          "Transcript:",
+          "User: parent prompt",
+        ].join("\n"),
+      ),
+    ).toBe("");
   });
 });

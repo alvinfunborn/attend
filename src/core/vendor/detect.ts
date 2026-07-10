@@ -3,8 +3,15 @@ import fs from "node:fs";
 
 export type VendorId = "claude" | "codex";
 
-/** macOS desktop app bundles the `codex` CLI but doesn't symlink it onto PATH. */
-const CODEX_APP_BIN = "/Applications/Codex.app/Contents/Resources/codex";
+/**
+ * macOS desktop apps bundle the `codex` CLI but don't symlink it onto PATH.
+ * The binary ships inside ChatGPT.app (current) and shipped inside Codex.app
+ * (older builds); probe both, newest layout first.
+ */
+const CODEX_APP_BINS = [
+  "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "/Applications/Codex.app/Contents/Resources/codex",
+];
 
 export interface VendorAvailability {
   vendor: VendorId;
@@ -37,12 +44,17 @@ export function resolveCodexBin(
   exists: (p: string) => boolean = fs.existsSync,
 ): string | null {
   if (probe("codex")) return "codex";
-  if (exists(CODEX_APP_BIN)) return CODEX_APP_BIN;
-  return null;
+  return CODEX_APP_BINS.find((bin) => exists(bin)) ?? null;
 }
 
 type ExistsFn = (p: string) => boolean;
-const VENDORS: {
+/**
+ * Registry of vendor integrations implemented by Attend. The UI never keeps a
+ * separate vendor list: it receives the locally-detected entries from here.
+ * Adding another CLI integration means registering its probe/capabilities here
+ * alongside its source/driver/launcher implementation.
+ */
+const VENDORS: readonly {
   vendor: VendorId;
   chat: boolean;
   resolve: (p: CliProbe, e: ExistsFn) => boolean;
@@ -52,6 +64,10 @@ const VENDORS: {
   // from PATH or the desktop-app bundle.
   { vendor: "codex", chat: true, resolve: (p, e) => resolveCodexBin(p, e) !== null },
 ];
+
+export function isVendorId(value: unknown): value is VendorId {
+  return typeof value === "string" && VENDORS.some(({ vendor }) => vendor === value);
+}
 
 /**
  * Detect which vendor CLIs are installed locally, so the "+ new" picker only

@@ -12,6 +12,13 @@ export interface PriorityResult {
   pattern: Pattern;
 }
 
+export interface AvoidanceEvidence {
+  kind: "review" | "revisit";
+  visits: number;
+  minutes: number;
+  prompts: number | null;
+}
+
 export function patternScoreNudge(pattern: Pattern): number {
   if (pattern === "avoidance") return 1;
   return 0;
@@ -28,6 +35,38 @@ function hasBlocker(next: string): boolean {
 
 function fmtDwell(minutes: number): string {
   return minutes >= 60 ? `${(minutes / 60).toFixed(1)}h` : `${Math.round(minutes)}m`;
+}
+
+export function avoidanceEvidenceData(tel: Telemetry): AvoidanceEvidence | null {
+  if (
+    tel.reviewVisits >= AVOIDANCE_REVIEW_MIN_VISITS &&
+    tel.reviewMinutes >= AVOIDANCE_REVIEW_MIN_MINUTES
+  ) {
+    return {
+      kind: "review",
+      visits: tel.reviewVisits,
+      minutes: tel.reviewMinutes,
+      prompts: null,
+    };
+  }
+  if (classifyPattern(tel) === "avoidance") {
+    return {
+      kind: "revisit",
+      visits: tel.visits,
+      minutes: tel.totalMinutes,
+      prompts: tel.prompts,
+    };
+  }
+  return null;
+}
+
+export function avoidanceEvidence(tel: Telemetry): string | null {
+  const data = avoidanceEvidenceData(tel);
+  if (!data) return null;
+  if (data.kind === "review") {
+    return `avoidance signal (${data.visits} review visits over ${fmtDwell(data.minutes)})`;
+  }
+  return `avoidance signal (${data.visits} visits over ${fmtDwell(data.minutes)}, ${data.prompts} prompts)`;
 }
 
 /** Cosine→score scale for memory alignment. Memory now *leads* the rank (user
@@ -68,18 +107,7 @@ export function evaluatePriority(
   const pattern = classifyPattern(tel);
   score += patternScoreNudge(pattern);
   if (pattern === "avoidance") {
-    if (
-      tel.reviewVisits >= AVOIDANCE_REVIEW_MIN_VISITS &&
-      tel.reviewMinutes >= AVOIDANCE_REVIEW_MIN_MINUTES
-    ) {
-      reasons.push(
-        `avoidance signal (${tel.reviewVisits} review visits over ${fmtDwell(tel.reviewMinutes)}) — repeatedly re-read with meaningful scroll and no send, a decision point not more work`,
-      );
-    } else {
-      reasons.push(
-        `avoidance signal (${tel.visits} visits over ${fmtDwell(tel.totalMinutes)}, ${tel.prompts} prompts) — returned to repeatedly without advancing, a decision point not more work`,
-      );
-    }
+    reasons.push(avoidanceEvidence(tel) ?? "avoidance signal");
   }
 
   if (brief.status === "deferred") {

@@ -14,7 +14,7 @@ export interface Override {
   /** pinned daemon handoff state, wins over daemon until cleared */
   state?: AnalysisState;
   /** pinned behavioral pattern, wins over telemetry heuristic until cleared */
-  pattern?: Exclude<Pattern, "unknown">;
+  pattern?: Pattern;
 }
 
 const PRIORITY_MIN = 0;
@@ -64,7 +64,7 @@ export class OverrideStore {
       priority?: number | null;
       etaMin?: number | null;
       state?: AnalysisState | null;
-      pattern?: Exclude<Pattern, "unknown"> | null;
+      pattern?: Pattern | null;
     },
   ): Override | null {
     this.load();
@@ -121,6 +121,6 @@ function isAnalysisState(v: unknown): v is AnalysisState {
   return typeof v === "string" && ANALYSIS_STATES.has(v as AnalysisState);
 }
 
-function isPattern(v: unknown): v is Exclude<Pattern, "unknown"> {
-  return v === "avoidance";
+function isPattern(v: unknown): v is Pattern {
+  return v === "avoidance" || v === "unknown";
 }

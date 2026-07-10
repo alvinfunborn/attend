@@ -48,6 +48,47 @@ describe("EngagementStore", () => {
     expect(b.lastViewedAt).toBe(2000);
   });
 
+  it("does not count progress watching during generation as a review", () => {
+    const s = store();
+    const a = s.recordVisit("sess-1", {
+      viewedMs: REVIEW_MIN_DWELL_MS + 5_000,
+      hadMeaningfulScroll: true,
+      hadSend: false,
+      wasGenerating: true,
+      endedAt: 1000,
+    });
+    expect(a.opens).toBe(1);
+    expect(a.reviewVisits).toBe(0);
+    expect(a.reviewMs).toBe(0);
+  });
+
+  it("resets avoidance evidence when the user sends a new message", () => {
+    const s = store();
+    s.recordVisit("sess-1", {
+      viewedMs: 12 * 60_000,
+      hadMeaningfulScroll: true,
+      hadSend: false,
+      endedAt: 1000,
+    });
+    s.recordVisit("sess-1", {
+      viewedMs: 12 * 60_000,
+      hadMeaningfulScroll: true,
+      hadSend: false,
+      endedAt: 2000,
+    });
+
+    const reset = s.recordUserMessage("sess-1", 3000);
+
+    expect(reset).toMatchObject({
+      opens: 0,
+      viewMs: 0,
+      reviewVisits: 0,
+      reviewMs: 0,
+      lastViewedAt: null,
+      lastUserMessageAt: 3000,
+    });
+  });
+
   it("reloads persisted aggregates", () => {
     const s = store();
     s.recordVisit("sess-1", {

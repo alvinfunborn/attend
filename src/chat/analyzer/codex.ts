@@ -1,11 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Analysis } from "../../core/daemon/cache.js";
-import { parseAnalysis } from "../../core/daemon/parse.js";
+import { parseAnalysis, parseAvoidancePrompt } from "../../core/daemon/parse.js";
 import { toUiEventsFromCodex } from "../codex/events.js";
 import type { CodexExecFn } from "../codex/exec.js";
 import { readCodexTranscript } from "../codex/transcript.js";
-import { REQUEST_RULES, RESPONSE_SHAPE, condenseTranscript, requestPrompt } from "./contract.js";
+import {
+  REQUEST_RULES,
+  RESPONSE_SHAPE,
+  avoidancePromptRequest,
+  condenseTranscript,
+  requestPrompt,
+} from "./contract.js";
 import type { SessionAnalyzer } from "./index.js";
 
 /** The Codex daemon's standing contract — sent once at spawn, then it resumes.
@@ -70,6 +76,24 @@ export class CodexAnalyzer implements SessionAnalyzer {
       for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
     }
     return parseAnalysis(text);
+  }
+
+  async avoidancePrompt(daemonId: string, cwd: string, taskId: string): Promise<string | null> {
+    if (!this.execFn) return null;
+    const file = this.findRollout(this.codexSessions, taskId);
+    const transcript = file
+      ? condenseTranscript(readCodexTranscript(file, Number.POSITIVE_INFINITY))
+      : "";
+    const handle = this.execFn({
+      cwd,
+      prompt: avoidancePromptRequest(transcript),
+      resume: daemonId,
+    });
+    let text = "";
+    for await (const ev of handle.events) {
+      for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
+    }
+    return parseAvoidancePrompt(text);
   }
 
   /** Locate a session's rollout file (`rollout-*-<id>.jsonl`) under the sessions dir. */

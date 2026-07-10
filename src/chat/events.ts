@@ -1,8 +1,11 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { ChatAttachment } from "./driver.js";
 
 /** Normalized, transport-friendly events the browser console renders. */
 export type UiEvent =
   | { kind: "session"; sessionId: string }
+  | { kind: "user_turn_started"; text: string; attachments?: ChatAttachment[] }
+  | { kind: "queued_turn_started"; queueId: string; text: string; attachments?: ChatAttachment[] }
   | { kind: "assistant_text"; text: string }
   | { kind: "tool_use"; id: string | null; name: string; input: unknown }
   | { kind: "tool_result"; id: string | null; text: string; isError: boolean }

@@ -8,7 +8,7 @@ export interface LaunchOpts {
   sessionId?: string;
   prompt?: string;
   model?: string;
-  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  effort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 }
 
 function shellQuote(s: string): string {
@@ -42,7 +42,7 @@ export function buildCommand(
     return `claude${modelArg}${effortArg}${promptArg}`;
   }
   const modelArg = opts.model?.trim() ? ` -c ${shellQuote(`model="${opts.model.trim()}"`)}` : "";
-  const effort = opts.effort?.trim() === "max" ? "xhigh" : opts.effort?.trim();
+  const effort = opts.effort?.trim();
   const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
   const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
   return `codex${modelArg}${effortArg}${promptArg}`;

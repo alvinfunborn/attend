@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { ToolCall, TranscriptMsg } from "../transcript.js";
+import { type ToolCall, type TranscriptMsg, visiblePromptText } from "../transcript.js";
 
 /**
  * Read a Codex rollout transcript (`~/.codex/sessions/**​/rollout-*.jsonl`) into the
@@ -35,7 +35,18 @@ interface Payload {
 }
 interface Line {
   type?: string;
+  timestamp?: string;
   payload?: Payload;
+}
+
+function parseTs(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const n = Date.parse(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function withTs<T extends TranscriptMsg>(msg: T, ts: number | undefined): T {
+  return ts === undefined ? msg : ({ ...msg, ts } as T);
 }
 
 function textOf(content: unknown, kind: string): string {
@@ -57,7 +68,8 @@ function visibleUserText(content: unknown): string {
     .trim();
   // skip synthetic <environment_context>/<permissions…> turns, but keep real
   // prompts that were preceded by Codex's serialized image tags.
-  return text && !text.startsWith("<") ? text : "";
+  const visible = visiblePromptText(text);
+  return visible && !visible.startsWith("<") ? visible : "";
 }
 
 function parseToolInput(input: unknown): unknown {
@@ -69,13 +81,18 @@ function parseToolInput(input: unknown): unknown {
   }
 }
 
-function applyItem(p: Payload, msgs: TranscriptMsg[], toolById: Map<string, ToolCall>): void {
+function applyItem(
+  p: Payload,
+  msgs: TranscriptMsg[],
+  toolById: Map<string, ToolCall>,
+  ts?: number,
+): void {
   if (p.type === "message" && p.role === "user") {
     const text = visibleUserText(p.content);
-    if (text) msgs.push({ role: "user", text, tools: [] });
+    if (text) msgs.push(withTs({ role: "user", text, tools: [] }, ts));
   } else if (p.type === "message" && p.role === "assistant") {
     const text = textOf(p.content, "output_text").trim();
-    if (text) msgs.push({ role: "assistant", text, tools: [] });
+    if (text) msgs.push(withTs({ role: "assistant", text, tools: [] }, ts));
   } else if (
     p.type === "function_call" ||
     p.type === "custom_tool_call" ||
@@ -89,7 +106,7 @@ function applyItem(p: Payload, msgs: TranscriptMsg[], toolById: Map<string, Tool
     if (p.call_id) toolById.set(p.call_id, tc);
     const last = msgs[msgs.length - 1];
     if (last && last.role === "assistant") last.tools.push(tc);
-    else msgs.push({ role: "assistant", text: "", tools: [tc] });
+    else msgs.push(withTs({ role: "assistant", text: "", tools: [tc] }, ts));
   } else if (
     (p.type === "function_call_output" || p.type === "custom_tool_call_output") &&
     p.call_id
@@ -119,8 +136,9 @@ export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] 
     }
     const p = o.payload;
     if (!p) continue;
+    const ts = parseTs(o.timestamp);
     if (o.type === "response_item") {
-      applyItem(p, msgs, toolById);
+      applyItem(p, msgs, toolById, ts);
     } else if (
       o.type === "compacted" &&
       msgs.length === 0 &&

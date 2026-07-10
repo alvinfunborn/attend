@@ -17,6 +17,8 @@ export const REQUEST_RULES = `- "brief" is the best glance label for a crowded s
 - Prefer the most durable subject / decision / outcome over a bare activity word.
 - An activity can be the glance label when it is the clearest way to distinguish this thread right now; make it self-contained by including its object or purpose when the transcript provides one.
 - If the latest activity is only a routine step within a broader remembered subject, keep the broader subject in "brief" and put the step in "reason".
+- Do not let meta/debugging about the workflow become the brief when the underlying task is visible. Repo/path corrections, "where did you change it?", branch/commit/PR, test reruns, deployment checks, or verification status belong in "reason" unless locating the repo/path is the actual task.
+- For bugfix or investigation sessions, include the product/component and failure/fix target when present (for example: feature name, failing test, file/module, regression name). A vague phrase like "change location", "testing", "PR", or "fix issue" is not a useful brief.
 - Use the opening goal as historical context only. If later user turns introduce a different substantive task, update "brief" to that new memory anchor.
 - "state" explains why control is back with the human after the latest assistant turn:
   - "continue_ready": a planned chunk finished and the next step is obvious; the assistant is merely asking whether to continue.
@@ -40,6 +42,24 @@ ${transcript || "(no text yet)"}
 
 Reply with this JSON object only:
 ${RESPONSE_SHAPE}`;
+}
+
+export function avoidancePromptRequest(transcript: string): string {
+  return `This session has been flagged by local telemetry as repeatedly reopened without progress.
+Generate one editable USER message that lowers the friction to resume this exact session.
+
+Rules:
+- Output one JSON object only: {"avoidancePrompt":"<draft user message>"}
+- Use the session's dominant language.
+- Do not classify causes.
+- Do not repeat generic advice.
+- The message should ask the assistant to shrink manual steps, expose missing context, recommend a default decision with risks, reduce review burden, or name the smallest next action, depending on this transcript.
+- Keep it under 40 words.
+- Use an empty string only if no useful friction-lowering prompt can be inferred.
+
+Session context:
+
+${transcript || "(no text yet)"}`;
 }
 
 /** Last `n` chars of a string, marked with a leading ellipsis when truncated. */

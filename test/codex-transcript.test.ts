@@ -21,10 +21,12 @@ const ROLLOUT = [
   },
   {
     type: "response_item",
+    timestamp: "2026-06-01T13:01:00.000Z",
     payload: { type: "message", role: "user", content: [{ type: "input_text", text: "run pwd" }] },
   },
   {
     type: "response_item",
+    timestamp: "2026-06-01T13:02:00.000Z",
     payload: {
       type: "message",
       role: "assistant",
@@ -73,8 +75,10 @@ describe("readCodexTranscript", () => {
     // developer turn + the synthetic <environment_context> user turn are dropped
     expect(msgs.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(msgs[0]).toMatchObject({ role: "user", text: "run pwd" });
+    expect(msgs[0]?.ts).toBe(Date.parse("2026-06-01T13:01:00.000Z"));
     const asst = msgs[1];
     expect(asst?.text).toBe("Running pwd.");
+    expect(asst?.ts).toBe(Date.parse("2026-06-01T13:02:00.000Z"));
     expect(asst?.tools).toHaveLength(2);
     expect(asst?.tools[0]).toMatchObject({
       name: "exec_command",
@@ -124,6 +128,49 @@ describe("readCodexTranscript", () => {
     expect(msgs).toMatchObject([
       { role: "user", text: "why is this reversed?\n\nAttachments:\n- image: ui.png" },
       { role: "assistant", text: "Because the prompt was hidden." },
+    ]);
+  });
+
+  it("hides provider-fork context from the visible opening turn", () => {
+    file = path.join(os.tmpdir(), `attend-rollout-${Math.random().toString(36).slice(2)}.jsonl`);
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: [
+                  "visible opener",
+                  "Attend fork context: this branch originally ran in claude.",
+                  "Use the transcript below as prior context, but treat this as a new independent branch in the current workspace.",
+                  "Transcript:",
+                  "User: parent prompt",
+                  "Assistant: parent answer",
+                ].join("\n"),
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "fresh branch answer" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const msgs = readCodexTranscript(file);
+    expect(msgs).toMatchObject([
+      { role: "user", text: "visible opener" },
+      { role: "assistant", text: "fresh branch answer" },
     ]);
   });
 

@@ -143,6 +143,7 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 export interface LiveRun {
   /** known once the SDK emits its init message */
   sessionId: string | null;
+  clientSessionId?: string;
   cwd: string;
   vendor: "claude";
   input: InputQueue;
@@ -216,6 +217,9 @@ export class ChatEngine implements ChatDriver {
   private pending = new Map<string, Set<(ev: UiEvent) => void>>();
   /** fired when a turn ends (result/error) — the daemon analyzer hooks this. */
   private turnEndListeners = new Set<(sessionId: string) => void>();
+  private eventListeners = new Set<
+    (sessionId: string, event: UiEvent, clientSessionId?: string) => void
+  >();
 
   constructor(
     private readonly queryFn: QueryFn = query,
@@ -227,6 +231,11 @@ export class ChatEngine implements ChatDriver {
   onTurnEnd(cb: (sessionId: string) => void): () => void {
     this.turnEndListeners.add(cb);
     return () => this.turnEndListeners.delete(cb);
+  }
+
+  onEvent(cb: (sessionId: string, event: UiEvent, clientSessionId?: string) => void): () => void {
+    this.eventListeners.add(cb);
+    return () => this.eventListeners.delete(cb);
   }
 
   get(sessionId: string): LiveRun | undefined {
@@ -244,9 +253,21 @@ export class ChatEngine implements ChatDriver {
   activeSessionStates(): ActiveSessionState[] {
     const states: ActiveSessionState[] = [];
     for (const [id, run] of this.runs) {
-      if (run.turnActive && !run.done) states.push({ sessionId: id, startedAt: run.turnStartedAt });
+      if (run.turnActive && !run.done)
+        states.push({
+          sessionId: id,
+          startedAt: run.turnStartedAt,
+          clientSessionId: run.clientSessionId,
+        });
     }
     return states;
+  }
+
+  /** Close prompt input so the SDK stream can drain and exit. This does not
+   * interrupt an active turn; any in-flight answer is allowed to finish. */
+  shutdown(): void {
+    this.pending.clear();
+    for (const run of new Set(this.runs.values())) run.input.close();
   }
 
   /** Index a run under an id, flushing any subscribers parked on it (replay the
@@ -282,6 +303,7 @@ export class ChatEngine implements ChatDriver {
     const hasFirstTurn = opts.firstText !== undefined || !!opts.firstAttachments?.length;
     const run: LiveRun = {
       sessionId: opts.resume && !opts.forkSession ? opts.resume : null,
+      clientSessionId: opts.clientSessionId,
       cwd: opts.cwd,
       vendor: "claude",
       input: new InputQueue(),
@@ -309,7 +331,9 @@ export class ChatEngine implements ChatDriver {
       cwd: opts.cwd,
       permissionMode: mode,
       ...(opts.model ? { model: opts.model } : {}),
-      ...(opts.effort ? { effort: opts.effort } : {}),
+      // `ultra` is a Codex-only reasoning level; the Claude SDK's EffortLevel
+      // doesn't include it and the console never offers it for Claude models.
+      ...(opts.effort && opts.effort !== "ultra" ? { effort: opts.effort } : {}),
       ...(mode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.forkSession ? { forkSession: true } : {}),
@@ -326,8 +350,6 @@ export class ChatEngine implements ChatDriver {
       const emit = (ev: UiEvent) => {
         if (!this.emit(run, ev)) return;
         if (ev.kind === "session" && ev.sessionId) {
-          run.sessionId = ev.sessionId;
-          this.index(ev.sessionId, run);
           settle(ev.sessionId);
         }
       };
@@ -427,6 +449,10 @@ export class ChatEngine implements ChatDriver {
 
     run.events.push(ev);
     if (run.events.length > MAX_BUFFER) run.events.shift();
+    if (ev.kind === "session" && ev.sessionId) {
+      run.sessionId = ev.sessionId;
+      this.index(ev.sessionId, run);
+    }
     if (ev.kind === "result" || ev.kind === "error") this.finishTurn(run);
     if (ev.kind === "tool_use" && ev.name === "AskUserQuestion") {
       run.turnActive = false;
@@ -437,6 +463,8 @@ export class ChatEngine implements ChatDriver {
     // above may have ended the turn, in which case this cancels the timer).
     this.scheduleStall(run);
     run.emitter.emit("event", ev);
+    if (run.sessionId)
+      for (const cb of this.eventListeners) cb(run.sessionId, ev, run.clientSessionId);
     return true;
   }
 

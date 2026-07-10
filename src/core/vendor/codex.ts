@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { visiblePromptText } from "../../chat/transcript.js";
 import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
 import type { SessionSource } from "./index.js";
+import { ScanCache } from "./scan-cache.js";
 
 /**
  * Codex CLI rollout transcripts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl).
@@ -93,7 +95,7 @@ function userPromptText(item: ResponseItem): string | null {
   if (item.type !== "message" || item.role !== "user") return null;
   const c = item.content;
   const real = (t: string): string | null => {
-    const s = t.trim();
+    const s = visiblePromptText(t).trim();
     return s !== "" && !s.startsWith("<") ? s : null;
   };
   if (typeof c === "string") return real(c);
@@ -148,6 +150,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     cwd: null,
     firstTs: null,
     lastTs: null,
+    userPromptTs: [],
     prompts: 0,
     actions: 0,
     visits: 0,
@@ -208,6 +211,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     } else if (kind === "response_item" && item) {
       const text = userPromptText(item);
       if (text !== null) {
+        if (ts !== null) session.userPromptTs?.push(ts);
         session.prompts += 1;
         // Only user-prompt chars: Codex assistant output isn't reliably parsed,
         // and we never fabricate vendor data (DESIGN invariant 3).
@@ -253,37 +257,54 @@ function findJsonl(root: string): string[] {
   return out;
 }
 
+function emptyCodexSession(file: string): RawSession {
+  return {
+    path: file,
+    vendor: "codex",
+    sessionId: null,
+    title: null,
+    lastPrompt: null,
+    lastTurnChars: 0,
+    chars: 0,
+    cwd: null,
+    firstTs: null,
+    lastTs: null,
+    userPromptTs: [],
+    prompts: 0,
+    actions: 0,
+    visits: 0,
+  };
+}
+
+/** Read + parse one rollout file. Subagent transcripts are skipped (null); an
+ *  unreadable/unparsable file degrades to an empty session, never fabricated. */
+function readCodexSession(file: string): RawSession | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch {
+    return emptyCodexSession(file);
+  }
+  if (isCodexSubagentTranscript(raw)) return null;
+  try {
+    return parseCodexTranscript(file, raw);
+  } catch {
+    return emptyCodexSession(file);
+  }
+}
+
 export class CodexSource implements SessionSource {
   readonly vendor = "codex";
 
-  constructor(private readonly sessionsDir: string) {}
+  constructor(
+    private readonly sessionsDir: string,
+    private readonly cache = new ScanCache(),
+  ) {}
 
   scan(): RawSession[] {
     if (!fs.existsSync(this.sessionsDir)) return [];
-    const sessions: RawSession[] = [];
-    for (const f of findJsonl(this.sessionsDir)) {
-      try {
-        const raw = fs.readFileSync(f, "utf-8");
-        if (isCodexSubagentTranscript(raw)) continue;
-        sessions.push(parseCodexTranscript(f, raw));
-      } catch {
-        sessions.push({
-          path: f,
-          vendor: "codex" as const,
-          sessionId: null,
-          title: null,
-          lastPrompt: null,
-          lastTurnChars: 0,
-          chars: 0,
-          cwd: null,
-          firstTs: null,
-          lastTs: null,
-          prompts: 0,
-          actions: 0,
-          visits: 0,
-        });
-      }
-    }
-    return sessions;
+    // The recursive walk + stat is cheap; the cache re-reads/parses only rollout
+    // files whose mtime/size changed since the last scan (see ScanCache).
+    return this.cache.memoize(findJsonl(this.sessionsDir), readCodexSession);
   }
 }

@@ -42,6 +42,25 @@ const currentTurn = (id: string, text: string): CodexEvent[] => [
 ];
 
 describe("CodexEngine", () => {
+  it("publishes normalized events to the global session event bus", async () => {
+    const { fn } = fakeExec([turn("cx-1", "hello")]);
+    const engine = new CodexEngine(fn);
+    const received: Array<{ sessionId: string; event: UiEvent; clientSessionId?: string }> = [];
+    engine.onEvent((sessionId, event, clientSessionId) =>
+      received.push({ sessionId, event, clientSessionId }),
+    );
+
+    await engine.start({ cwd: ".", firstText: "go", clientSessionId: "branch-ui-2" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(received).toContainEqual({
+      sessionId: "cx-1",
+      event: { kind: "assistant_text", text: "hello" },
+      clientSessionId: "branch-ui-2",
+    });
+    expect(received.some(({ event }) => event.kind === "result")).toBe(true);
+  });
+
   it("starts a new session, resolves the thread id, and does not replay finished-turn buffer to late subscribers", async () => {
     const { fn, calls } = fakeExec([turn("cx-1", "hi")]);
     const engine = new CodexEngine(fn);
@@ -180,6 +199,19 @@ describe("CodexEngine", () => {
     expect(calls[1]).toMatchObject({ model: "gpt-5.2-codex", effort: "high" });
   });
 
+  it("passes high reasoning levels (max/ultra) straight through — no xhigh downgrade", async () => {
+    const { fn, calls } = fakeExec([turn("cx-1", "one")]);
+    const engine = new CodexEngine(fn);
+    await engine.start({
+      cwd: ".",
+      firstText: "first",
+      model: "gpt-5.6-sol",
+      effort: "ultra",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls[0]).toMatchObject({ model: "gpt-5.6-sol", effort: "ultra" });
+  });
+
   it("defaults chat turns to danger-full-access", async () => {
     const { fn, calls } = fakeExec([turn("cx-1", "hi")]);
     const engine = new CodexEngine(fn);
@@ -222,6 +254,27 @@ describe("CodexEngine", () => {
     expect(engine.send("nope", { text: "x" })).toBe(false);
     const id = await engine.start({ cwd: ".", firstText: "go" });
     expect(engine.send(id, { text: "again" })).toBe(false); // turn still active
+  });
+
+  it("shutdown leaves the in-flight Codex exec running", async () => {
+    let killed = false;
+    const fn: CodexExecFn = () => ({
+      events: (async function* () {
+        yield { type: "thread.started", thread_id: "cx-drain" } as CodexEvent;
+        await new Promise(() => {});
+      })(),
+      kill: () => {
+        killed = true;
+      },
+    });
+    const engine = new CodexEngine(fn);
+    const id = await engine.start({ cwd: ".", firstText: "go" });
+    expect(engine.activeSessions()).toContain(id);
+
+    engine.shutdown();
+
+    expect(killed).toBe(false);
+    expect(engine.activeSessions()).toContain(id);
   });
 
   it("fires onTurnEnd with the session id when a turn completes", async () => {
@@ -387,8 +440,13 @@ describe("CodexEngine", () => {
       kill: () => {},
     });
     const a = new CodexEngine(live);
-    const id = await a.start({ cwd: ".", firstText: "go" });
+    const id = await a.start({ cwd: ".", firstText: "go", clientSessionId: "branch-live" });
     expect(a.activeSessions()).toContain(id);
+    expect(a.activeSessionStates()).toContainEqual({
+      sessionId: id,
+      startedAt: expect.any(Number),
+      clientSessionId: "branch-live",
+    });
 
     const { fn } = fakeExec([turn("cx-1", "x")]);
     const b = new CodexEngine(fn);
@@ -404,6 +462,7 @@ describe("CodexEngine", () => {
     const id = await engine.start({
       resume: "cx-1",
       forkSession: true,
+      clientSessionId: "branch-fork-2",
       cwd: ".",
       firstText: "diverge here",
     });
@@ -411,6 +470,25 @@ describe("CodexEngine", () => {
     await new Promise((r) => setTimeout(r, 20));
     // the first turn resumes the forked copy, not the parent
     expect(calls[0]).toMatchObject({ resume: "cx-fork-2", prompt: "diverge here" });
+    expect(engine.activeSessionStates()).toEqual([]);
+  });
+
+  it("passes the opening text to the Codex rollout fork helper", async () => {
+    const { fn } = fakeExec([turn("cx-fork-2", "branched")]);
+    const forkCalls: Array<[string, string | undefined]> = [];
+    const engine = new CodexEngine(fn, "workspace-write", (parentId, branchText) => {
+      forkCalls.push([parentId, branchText]);
+      return "cx-fork-2";
+    });
+
+    await engine.start({
+      resume: "cx-1",
+      forkSession: true,
+      cwd: ".",
+      firstText: "diverge here",
+    });
+
+    expect(forkCalls).toEqual([["cx-1", "diverge here"]]);
   });
 
   it("rejects a fork when the parent session can't be found", async () => {

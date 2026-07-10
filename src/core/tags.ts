@@ -18,6 +18,7 @@ export class TagStore {
   private tags: string[] = [];
   private bySession = new Map<string, string[]>();
   private loaded = false;
+  private loadedFileSig: string | null = null;
 
   constructor(private readonly file: string) {}
 
@@ -34,9 +35,22 @@ export class TagStore {
     return out;
   }
 
-  private load(): void {
-    if (this.loaded) return;
+  private fileSig(): string | null {
+    try {
+      const st = fs.statSync(this.file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  }
+
+  private load(force = false): void {
+    const sig = this.fileSig();
+    if (!force && this.loaded && sig === this.loadedFileSig) return;
     this.loaded = true;
+    this.loadedFileSig = sig;
+    this.tags = [];
+    this.bySession.clear();
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, "utf-8")) as TagFile;
       const seen = new Set<string>();
@@ -81,7 +95,7 @@ export class TagStore {
   }
 
   create(name: string): string[] {
-    this.load();
+    this.load(true);
     const tag = normalizeTag(name);
     if (!tag) return this.list();
     if (!this.tags.includes(tag)) {
@@ -92,7 +106,7 @@ export class TagStore {
   }
 
   delete(name: string): string[] {
-    this.load();
+    this.load(true);
     const tag = normalizeTag(name);
     if (!tag) return this.list();
     const idx = this.tags.indexOf(tag);
@@ -107,8 +121,35 @@ export class TagStore {
     return this.list();
   }
 
+  reorder(tags: string[]): string[] {
+    this.load(true);
+    const requested: string[] = [];
+    const used = new Set<string>();
+    for (const raw of tags) {
+      const tag = normalizeTag(raw);
+      if (!tag || used.has(tag) || !this.tags.includes(tag)) continue;
+      used.add(tag);
+      requested.push(tag);
+    }
+    if (requested.length < 2) return this.list();
+    let i = 0;
+    const next: string[] = [];
+    for (const tag of this.tags) {
+      if (used.has(tag)) {
+        const replacement = requested[i++];
+        if (replacement) next.push(replacement);
+      } else {
+        next.push(tag);
+      }
+    }
+    if (next.every((tag, idx) => tag === this.tags[idx])) return this.list();
+    this.tags = next;
+    this.persist();
+    return this.list();
+  }
+
   setSessionTags(sessionId: string | string[], tags: string[]): string[] {
-    this.load();
+    this.load(true);
     const keys = this.keys(sessionId);
     if (!keys.length) return [];
     const next: string[] = [];
@@ -135,7 +176,13 @@ export class TagStore {
         tags: this.tags,
         sessions: Object.fromEntries(this.bySession),
       };
-      fs.writeFileSync(this.file, JSON.stringify(obj, null, 2));
+      const tmp = path.join(
+        path.dirname(this.file),
+        `.${path.basename(this.file)}.${process.pid}.${Date.now()}.tmp`,
+      );
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+      fs.renameSync(tmp, this.file);
+      this.loadedFileSig = this.fileSig();
     } catch {
       // best-effort persistence
     }

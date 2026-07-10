@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildAlignmentModel } from "../src/core/alignment.js";
-import { evaluatePriority } from "../src/core/priority.js";
+import { avoidanceEvidenceData, evaluatePriority } from "../src/core/priority.js";
 import type { Brief, Telemetry } from "../src/core/types.js";
 
 function brief(over: Partial<Brief>): Brief {
@@ -50,12 +50,11 @@ describe("evaluatePriority", () => {
     expect(r.reason).not.toContain("memory aligned");
   });
 
-  it("avoidance adds a small nudge and a decision-point reason with evidence", () => {
+  it("avoidance adds a small nudge and a compact evidence reason", () => {
     const r = evaluatePriority(brief({}), tel({ visits: 4, totalMinutes: 600, prompts: 3 }), null);
     expect(r.pattern).toBe("avoidance");
     // memory-led rank: pattern only nudges now (was 4 when pattern could dominate)
     expect(r.score).toBe(1);
-    expect(r.reason).toContain("decision point");
     expect(r.reason).toContain("4 visits");
   });
 
@@ -63,7 +62,12 @@ describe("evaluatePriority", () => {
     const r = evaluatePriority(brief({}), tel({ reviewVisits: 3, reviewMinutes: 42 }), null);
     expect(r.pattern).toBe("avoidance");
     expect(r.reason).toContain("3 review visits");
-    expect(r.reason).toContain("meaningful scroll");
+    expect(avoidanceEvidenceData(tel({ reviewVisits: 3, reviewMinutes: 42 }))).toEqual({
+      kind: "review",
+      visits: 3,
+      minutes: 42,
+      prompts: null,
+    });
   });
 
   it("done is pushed to the bottom", () => {

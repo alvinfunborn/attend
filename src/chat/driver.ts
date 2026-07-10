@@ -1,11 +1,13 @@
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import type { UiEvent } from "./events.js";
 
-export type SessionEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type SessionEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /** Inputs to (re)start a chat run. `permissionMode` is Claude-only; Codex ignores it. */
 export interface StartOpts {
   cwd: string;
+  /** Stable browser/UI identity while the provider session id is still unknown. */
+  clientSessionId?: string;
   resume?: string;
   forkSession?: boolean;
   firstText?: string;
@@ -67,6 +69,7 @@ export interface ToolAnswer {
 export interface ActiveSessionState {
   sessionId: string;
   startedAt: number;
+  clientSessionId?: string;
 }
 
 /**
@@ -96,4 +99,8 @@ export interface ChatDriver {
   activeSessionStates(): ActiveSessionState[];
   /** Notify on each turn completion (drives per-session daemon re-analysis). */
   onTurnEnd(cb: (sessionId: string) => void): () => void;
+  /** Observe every normalized event across all sessions (global browser event bus). */
+  onEvent?(cb: (sessionId: string, event: UiEvent, clientSessionId?: string) => void): () => void;
+  /** Stop accepting future in-process input without interrupting active turns. */
+  shutdown?(): void;
 }

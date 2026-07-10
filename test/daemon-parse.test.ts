@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAnalysis } from "../src/core/daemon/parse.js";
+import { parseAnalysis, parseAvoidancePrompt } from "../src/core/daemon/parse.js";
 
 describe("parseAnalysis", () => {
   it("extracts a fenced JSON verdict, ignoring surrounding prose", () => {
@@ -39,10 +39,18 @@ describe("parseAnalysis", () => {
   it("keeps old daemon output parseable without fabricating a state", () => {
     const r = parseAnalysis('{"brief":"x","priority":3,"etaMin":5,"reason":"old schema"}');
     expect(r?.state).toBeNull();
+    expect(r?.avoidancePrompt).toBeUndefined();
   });
 
   it("returns null when there is no JSON, or no brief (never fabricates)", () => {
     expect(parseAnalysis("no structure here")).toBeNull();
     expect(parseAnalysis('{"priority":5,"etaMin":2,"reason":"r"}')).toBeNull();
+  });
+
+  it("parses one-shot avoidance prompt output separately", () => {
+    expect(parseAvoidancePrompt('{"avoidancePrompt":"Ask for a 3-step checklist"}')).toBe(
+      "Ask for a 3-step checklist",
+    );
+    expect(parseAvoidancePrompt('{"avoidancePrompt":""}')).toBeNull();
   });
 });

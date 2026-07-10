@@ -19,8 +19,25 @@ const fakeQuery = ((args: {
 }) => {
   claudeCalls.push({ prompt: args.prompt, options: args.options });
   const resume = args.options?.resume;
+  const prompt = String(args.prompt ?? "");
   async function* gen() {
     if (resume) {
+      if (prompt.includes("flagged by local telemetry")) {
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "text",
+                text: '{"avoidancePrompt":"Ask for the smallest next step"}',
+              },
+            ],
+          },
+          session_id: resume,
+        };
+        yield { type: "result", subtype: "success", result: "" };
+        return;
+      }
       yield {
         type: "assistant",
         message: {
@@ -136,6 +153,22 @@ describe("DaemonOrchestrator", () => {
     expect(orch.analysis("task-1")?.brief).toBe("refactor parser");
   });
 
+  it("generates and caches an avoidance prompt only when requested", async () => {
+    const { orch, reg, cache } = make();
+    cleanup.push(reg, cache);
+    await orch.ensureDaemon("task-1", "claude", os.tmpdir());
+    await orch.analyzeTask("task-1", os.tmpdir());
+    const before = claudeCalls.length;
+    await expect(orch.ensureAvoidancePrompt("task-1", os.tmpdir())).resolves.toBe(
+      "Ask for the smallest next step",
+    );
+    await expect(orch.ensureAvoidancePrompt("task-1", os.tmpdir())).resolves.toBe(
+      "Ask for the smallest next step",
+    );
+    expect(claudeCalls.length).toBe(before + 1);
+    expect(orch.analysis("task-1")?.avoidancePrompt).toBe("Ask for the smallest next step");
+  });
+
   it("does not pin special Claude daemon options", async () => {
     const { orch, reg, cache } = make();
     cleanup.push(reg, cache);
@@ -230,6 +263,8 @@ describe("DaemonOrchestrator", () => {
     );
     expect(prompt).toContain('"priority" is workspace-level business importance');
     expect(prompt).toContain("An activity can be the glance label");
+    expect(prompt).toContain("Do not let meta/debugging about the workflow become the brief");
+    expect(prompt).toContain("A vague phrase like");
     expect(prompt).toContain(
       "Initial user goal (historical context only): 查看codebase的livekit接电话的实现情况",
     );

@@ -18,8 +18,8 @@ export interface CodexExecRequest {
   resume?: string;
   /** model override for this session/turn */
   model?: string;
-  /** reasoning effort override for this session/turn */
-  effort?: Exclude<SessionEffort, "max">;
+  /** reasoning effort override for this session/turn (per-model; newer models add max/ultra) */
+  effort?: SessionEffort;
   /** filesystem policy; chat defaults to danger-full-access, the daemon stays read-only */
   sandbox?: CodexSandbox;
   /** JSON Schema file forcing the final message's shape (the analyzer uses it) */
@@ -180,17 +180,27 @@ function spawnCodexExec(bin: string, req: CodexExecRequest): CodexExecHandle {
   const prepared = prepareCodexExecInput(req);
   // stdin ignored: with a piped-but-open stdin codex blocks "Reading additional
   // input from stdin…"; closing it lets the prompt arg stand alone.
+  let child: ChildProcess;
   try {
-    const child = spawn(
+    child = spawn(
       bin,
       buildArgs({ ...req, prompt: prepared.prompt, imagePaths: prepared.imagePaths }),
       { cwd: req.cwd, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" },
     );
-    return { events: readEvents(child, prepared.cleanup), kill: () => killCodexExec(child) };
   } catch (err) {
     prepared.cleanup();
     throw err;
   }
+  // A missing binary (ENOENT) or other launch failure is reported via an async
+  // 'error' event, NOT a throw — so the try/catch above can't see it. An unheard
+  // 'error' on a ChildProcess is a fatal uncaught exception that takes down the
+  // whole server, so attach the outcome listeners synchronously (before the event
+  // can fire) and let readEvents turn the failure into an error event instead.
+  const outcome = waitForOutcome(child);
+  return {
+    events: readEvents(child, prepared.cleanup, outcome, bin),
+    kill: () => killCodexExec(child),
+  };
 }
 
 function killCodexExec(child: ChildProcess): void {
@@ -217,13 +227,15 @@ function killCodexExec(child: ChildProcess): void {
  * Branch a Codex session into a new one: returns the new session id, or null if
  * the parent isn't found. `codex exec` has no native fork, but Codex resolves a
  * session purely from its rollout file (verified), so a fork is a faithful copy
- * of the parent's rollout under a fresh id — full history, parent untouched.
+ * of the parent's rollout under a fresh id — parent untouched. If the branch
+ * opener is the parent's latest user turn, copy only the history before that
+ * turn so the old answer does not render before the new opening message.
  * `codex exec resume <newId>` then diverges into the branch.
  */
-export type CodexForkFn = (parentId: string) => string | null;
+export type CodexForkFn = (parentId: string, branchText?: string) => string | null;
 
 export function makeCodexFork(sessionsDir: string): CodexForkFn {
-  return (parentId) => forkRollout(sessionsDir, parentId);
+  return (parentId, branchText) => forkRollout(sessionsDir, parentId, branchText);
 }
 
 /** Find a session's rollout file (`rollout-*-<id>.jsonl`) anywhere under `dir`. */
@@ -246,7 +258,46 @@ function findRollout(dir: string, sessionId: string): string | null {
   return null;
 }
 
-function forkRollout(sessionsDir: string, parentId: string): string | null {
+function visibleForkUserText(content: unknown): string {
+  const parts = Array.isArray(content)
+    ? (content as Array<{ type?: string; text?: string }>)
+        .filter((b) => b?.type === "input_text" && b.text)
+        .map((b) => b.text)
+        .join("")
+    : typeof content === "string"
+      ? content
+      : "";
+  const text = parts
+    .replace(/<image\b[^>]*>/g, "")
+    .replace(/<\/image>/g, "")
+    .trim();
+  return text && !text.startsWith("<") ? text : "";
+}
+
+function lastMatchingUserLine(lines: string[], branchText: string | undefined): number | null {
+  const needle = branchText?.trim();
+  if (!needle) return null;
+  let lastUser: { index: number; text: string } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const o = JSON.parse(lines[i] ?? "") as {
+        type?: string;
+        payload?: { type?: string; role?: string; content?: unknown };
+      };
+      const p = o.payload;
+      if (o.type !== "response_item" || p?.type !== "message" || p.role !== "user") continue;
+      const text = visibleForkUserText(p.content);
+      if (text) lastUser = { index: i, text };
+    } catch {}
+  }
+  return lastUser?.text === needle ? lastUser.index : null;
+}
+
+function forkRollout(
+  sessionsDir: string,
+  parentId: string,
+  branchText: string | undefined,
+): string | null {
   const src = findRollout(sessionsDir, parentId);
   if (!src) return null;
   let raw: string;
@@ -257,8 +308,10 @@ function forkRollout(sessionsDir: string, parentId: string): string | null {
   }
   const newId = randomUUID();
   const out: string[] = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim());
+  const forkFrom = lastMatchingUserLine(lines, branchText);
+  const sourceLines = forkFrom === null ? lines : lines.slice(0, forkFrom);
+  for (const line of sourceLines) {
     try {
       const o = JSON.parse(line) as {
         type?: string;
@@ -284,17 +337,46 @@ function forkRollout(sessionsDir: string, parentId: string): string | null {
   return newId;
 }
 
-function waitForExit(
-  child: ChildProcess,
-): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+interface CodexExecOutcome {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  /** set when the process failed to spawn (e.g. ENOENT) rather than exiting */
+  error: NodeJS.ErrnoException | null;
+}
+
+/**
+ * Resolve when the process exits OR fails to launch. Listening for 'error' here
+ * (synchronously, at spawn time) is what keeps a missing `codex` binary from
+ * crashing Node with an uncaught 'error' event.
+ */
+function waitForOutcome(child: ChildProcess): Promise<CodexExecOutcome> {
   return new Promise((resolve) => {
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    let settled = false;
+    const done = (outcome: CodexExecOutcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+    child.once("error", (error) => done({ code: null, signal: null, error }));
+    child.once("exit", (code, signal) => done({ code, signal, error: null }));
   });
 }
 
-/** Stream stdout as parsed JSONL events; ends when the process exits (or is killed). */
-async function* readEvents(child: ChildProcess, cleanup: () => void): AsyncIterable<CodexEvent> {
-  const exit = waitForExit(child);
+function describeSpawnError(bin: string, error: NodeJS.ErrnoException): string {
+  if (error.code === "ENOENT") {
+    return `Codex CLI not found (tried "${bin}"). Install the Codex CLI or set ATTEND_CODEX_BIN to its path.`;
+  }
+  return `Failed to launch Codex (${bin}): ${error.message}`;
+}
+
+/** Stream stdout as parsed JSONL events; ends when the process exits, fails to
+ *  spawn, or is killed. */
+async function* readEvents(
+  child: ChildProcess,
+  cleanup: () => void,
+  outcome: Promise<CodexExecOutcome>,
+  bin: string,
+): AsyncIterable<CodexEvent> {
   const stderr: string[] = [];
   child.stderr?.setEncoding("utf-8");
   child.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
@@ -304,18 +386,25 @@ async function* readEvents(child: ChildProcess, cleanup: () => void): AsyncItera
         input: child.stdout,
         crlfDelay: Number.POSITIVE_INFINITY,
       });
-      for await (const line of rl) {
-        const t = line.trim();
-        if (!t) continue;
-        try {
-          yield JSON.parse(t) as CodexEvent;
-        } catch {
-          // tolerate a non-JSON banner line; skip it
+      try {
+        for await (const line of rl) {
+          const t = line.trim();
+          if (!t) continue;
+          try {
+            yield JSON.parse(t) as CodexEvent;
+          } catch {
+            // tolerate a non-JSON banner line; skip it
+          }
         }
+      } catch {
+        // stdout torn down before the process settled (e.g. a failed spawn) —
+        // fall through and report the outcome below.
       }
     }
-    const { code, signal } = await exit;
-    if (signal === null && code !== null && code !== 0) {
+    const { code, signal, error } = await outcome;
+    if (error) {
+      yield { type: "error", error: describeSpawnError(bin, error) };
+    } else if (signal === null && code !== null && code !== 0) {
       const message = stderr.join("").trim() || `codex exited with code ${code}`;
       yield { type: "error", error: message };
     }

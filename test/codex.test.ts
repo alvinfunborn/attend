@@ -43,6 +43,7 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     expect(s.actions).toBe(2);
     expect(s.firstTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
     expect(s.lastTs).toBe(Date.parse("2026-05-01T10:03:00Z"));
+    expect(s.userPromptTs).toEqual([Date.parse("2026-05-01T10:01:00Z")]);
   });
 
   it("does not count assistant messages or non-action response items", () => {
@@ -109,6 +110,33 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     expect(s.prompts).toBe(2); // only the two real prompts
     expect(s.title).toBe("investigate this call"); // first REAL prompt, not the env block
     expect(s.lastPrompt).toBe("now add the transcript");
+  });
+
+  it("strips provider-fork context from title and latest prompt", () => {
+    const raw = jsonl({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: [
+              "push prod patch to main",
+              "Attend fork context: this branch originally ran in claude.",
+              "Use the transcript below as prior context, but treat this as a new independent branch in the current workspace.",
+              "Transcript:",
+              "User: old parent task",
+              "Assistant: old parent answer",
+            ].join("\n"),
+          },
+        ],
+      },
+    });
+    const s = parseCodexTranscript("r.jsonl", raw);
+    expect(s.prompts).toBe(1);
+    expect(s.title).toBe("push prod patch to main");
+    expect(s.lastPrompt).toBe("push prod patch to main");
   });
 
   it("keeps the full prompt (no 80-char truncation) so tooltips/header show it all", () => {

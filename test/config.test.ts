@@ -10,6 +10,7 @@ const ENV_KEYS = [
   "ATTEND_HOST",
   "ATTEND_CLAUDE_PROJECTS",
   "ATTEND_CLAUDE_MODELS",
+  "ATTEND_CLAUDE_MODELS_CACHE",
   "ATTEND_CODEX_SESSIONS",
   "ATTEND_CODEX_MODELS_CACHE",
   "ATTEND_TAGS",
@@ -26,6 +27,10 @@ describe("resolveConfig precedence", () => {
     expect(c.port).toBe(5050);
     expect(c.host).toBe("127.0.0.1");
     expect(c.scopeRoots).toEqual([]); // no dirs → list every session
+    expect(c.claudeModels).toEqual([]);
+    expect(c.claudeModelsCache).toBe(
+      path.join(os.homedir(), ".claude", "cache", "gateway-models.json"),
+    );
     expect(c.open).toBe(true);
   });
 
@@ -56,6 +61,7 @@ describe("resolveConfig precedence", () => {
         port: 8123,
         host: "0.0.0.0",
         claudeModels: ["opus", "claude-fable-5"],
+        claudeModelsCache: path.join(dir, "claude-models.json"),
       }),
       "utf-8",
     );
@@ -64,6 +70,7 @@ describe("resolveConfig precedence", () => {
       expect(c.port).toBe(8123);
       expect(c.host).toBe("0.0.0.0");
       expect(c.claudeModels).toEqual(["opus", "claude-fable-5"]);
+      expect(c.claudeModelsCache).toBe(path.join(dir, "claude-models.json"));
       expect(resolveConfig({ positionals: [], config: cfg, port: "9000" }).port).toBe(9000);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -72,11 +79,15 @@ describe("resolveConfig precedence", () => {
 
   it("lets env override Claude model options", () => {
     process.env.ATTEND_CLAUDE_MODELS = "fable, opus, claude-fable-5";
+    process.env.ATTEND_CLAUDE_MODELS_CACHE = "/tmp/attend-claude-models.json";
     expect(resolveConfig({ positionals: [] }).claudeModels).toEqual([
       "fable",
       "opus",
       "claude-fable-5",
     ]);
+    expect(resolveConfig({ positionals: [] }).claudeModelsCache).toBe(
+      path.resolve("/tmp/attend-claude-models.json"),
+    );
   });
 
   it("--no-open disables auto-open", () => {
@@ -86,6 +97,28 @@ describe("resolveConfig precedence", () => {
   it("resolves the tag store path from env", () => {
     process.env.ATTEND_TAGS = "/tmp/attend-tags.json";
     expect(resolveConfig({ positionals: [] }).tags).toBe(path.resolve("/tmp/attend-tags.json"));
+  });
+
+  it("defaults tags to the scoped vault when one vault root is set", () => {
+    const root = path.join(os.tmpdir(), "attend-vault-tags");
+    const c = resolveConfig({ positionals: [root] });
+    expect(c.tags).toBe(path.join(path.resolve(root), ".attend", "tags.json"));
+  });
+
+  it("defaults user-owned persistence to the scoped vault", () => {
+    const root = path.join(os.tmpdir(), "attend-vault-state");
+    const c = resolveConfig({ positionals: [root] });
+    expect(c.overrides).toBe(path.join(path.resolve(root), ".attend", "overrides.json"));
+    expect(c.engagement).toBe(path.join(path.resolve(root), ".attend", "engagement.json"));
+    expect(c.uiState).toBe(path.join(path.resolve(root), ".attend", "ui-state.json"));
+    expect(c.chatQueue).toBe(path.join(path.resolve(root), ".attend", "chat-queues.json"));
+    expect(c.daemonRegistry).toBe(path.join(os.homedir(), ".attend", "daemons.json"));
+    expect(c.analysisCache).toBe(path.join(os.homedir(), ".attend", "analysis.json"));
+  });
+
+  it("keeps the legacy global tag path when no vault root is set", () => {
+    const c = resolveConfig({ positionals: [] });
+    expect(c.tags).toBe(path.join(os.homedir(), ".attend", "tags.json"));
   });
 
   it("resolves the engagement store path from env", () => {

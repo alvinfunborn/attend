@@ -2,11 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Analysis } from "../../core/daemon/cache.js";
-import { parseAnalysis } from "../../core/daemon/parse.js";
+import { parseAnalysis, parseAvoidancePrompt } from "../../core/daemon/parse.js";
 import type { QueryFn } from "../engine.js";
 import { toUiEvents } from "../events.js";
 import { readClaudeTranscript } from "../transcript.js";
-import { REQUEST_RULES, RESPONSE_SHAPE, condenseTranscript, requestPrompt } from "./contract.js";
+import {
+  REQUEST_RULES,
+  RESPONSE_SHAPE,
+  avoidancePromptRequest,
+  condenseTranscript,
+  requestPrompt,
+} from "./contract.js";
 import type { SessionAnalyzer } from "./index.js";
 
 /** The Claude daemon's standing contract — sent once at spawn, then it resumes. */
@@ -63,6 +69,19 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
       for (const ev of toUiEvents(msg)) if (ev.kind === "assistant_text") text += ev.text;
     }
     return parseAnalysis(text);
+  }
+
+  async avoidancePrompt(daemonId: string, cwd: string, taskId: string): Promise<string | null> {
+    const file = this.findSessionFile(taskId);
+    const transcript = file
+      ? condenseTranscript(readClaudeTranscript(file, Number.POSITIVE_INFINITY))
+      : "";
+    let text = "";
+    const options = { ...this.options(cwd), resume: daemonId };
+    for await (const msg of this.queryFn({ prompt: avoidancePromptRequest(transcript), options })) {
+      for (const ev of toUiEvents(msg)) if (ev.kind === "assistant_text") text += ev.text;
+    }
+    return parseAvoidancePrompt(text);
   }
 
   private options(cwd: string): { cwd: string } {

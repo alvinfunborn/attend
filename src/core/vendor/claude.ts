@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { visiblePromptText } from "../../chat/transcript.js";
 import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
 import type { SessionSource } from "./index.js";
+import { ScanCache } from "./scan-cache.js";
 
 /** Tool uses that count as productive "actions". */
 const ACTION_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "Bash", "PowerShell"]);
@@ -22,21 +24,28 @@ interface JsonlEntry {
   timestamp?: string;
   type?: string;
   isSidechain?: boolean;
+  isMeta?: boolean;
   sessionId?: string;
   message?: { content?: unknown };
 }
 
 /** Return the user prompt text if this is a real typed prompt, else null. */
 function userPromptText(content: unknown): string | null {
+  const real = (text: string): string | null => {
+    const t = visiblePromptText(text).trim();
+    return t !== "" && !t.startsWith("<") ? t : null;
+  };
   if (typeof content === "string") {
-    const t = content.trim();
-    return t !== "" && !content.startsWith("<") ? t : null;
+    return real(content);
   }
   if (Array.isArray(content)) {
     for (const c of content) {
       if (c && typeof c === "object" && (c as { type?: string }).type === "text") {
         const t = (c as { text?: string }).text;
-        if (typeof t === "string" && t.trim() !== "") return t.trim();
+        if (typeof t === "string") {
+          const visible = real(t);
+          if (visible) return visible;
+        }
       }
     }
   }
@@ -91,6 +100,7 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     cwd: null,
     firstTs: null,
     lastTs: null,
+    userPromptTs: [],
     prompts: 0,
     actions: 0,
     visits: 0,
@@ -118,9 +128,11 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     // Skip subagent sidechain turns — they are not the user's direct prompts
     // and their tool uses shouldn't inflate the brief's action count.
     if (obj.isSidechain) continue;
+    if (obj.isMeta) continue;
     if (obj.type === "user") {
       const text = userPromptText(obj.message?.content);
       if (text !== null) {
+        if (ts !== null) session.userPromptTs?.push(ts);
         session.prompts += 1;
         session.chars += text.length;
         if (session.title === null) session.title = snippet(text);
@@ -151,6 +163,7 @@ function parseSessionFile(file: string): RawSession {
       cwd: null,
       firstTs: null,
       lastTs: null,
+      userPromptTs: [],
       prompts: 0,
       actions: 0,
       visits: 0,
@@ -162,29 +175,38 @@ function parseSessionFile(file: string): RawSession {
 export class ClaudeSource implements SessionSource {
   readonly vendor = "claude";
 
-  constructor(private readonly projectsDir: string) {}
+  constructor(
+    private readonly projectsDir: string,
+    private readonly cache = new ScanCache(),
+  ) {}
 
   scan(): RawSession[] {
-    const sessions: RawSession[] = [];
+    // Walk + stat is cheap; the cache re-parses only transcripts whose mtime/size
+    // changed since the last scan (see ScanCache).
+    return this.cache.memoize(this.listTranscripts(), parseSessionFile);
+  }
+
+  private listTranscripts(): string[] {
+    const files: string[] = [];
     let projects: fs.Dirent[];
     try {
       projects = fs.readdirSync(this.projectsDir, { withFileTypes: true });
     } catch {
-      return sessions;
+      return files;
     }
     for (const proj of projects) {
       if (!proj.isDirectory()) continue;
       const dir = path.join(this.projectsDir, proj.name);
-      let files: string[];
+      let names: string[];
       try {
-        files = fs.readdirSync(dir);
+        names = fs.readdirSync(dir);
       } catch {
         continue;
       }
-      for (const f of files) {
-        if (f.endsWith(".jsonl")) sessions.push(parseSessionFile(path.join(dir, f)));
+      for (const f of names) {
+        if (f.endsWith(".jsonl")) files.push(path.join(dir, f));
       }
     }
-    return sessions;
+    return files;
   }
 }

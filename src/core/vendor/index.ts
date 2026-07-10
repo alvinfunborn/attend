@@ -1,6 +1,14 @@
 import type { RawSession } from "../types.js";
 import { ClaudeSource } from "./claude.js";
 import { CodexSource } from "./codex.js";
+import type { ScanCache } from "./scan-cache.js";
+
+/** Persistent per-vendor parse caches, so rebuilding the sources each scan (to
+ *  keep config late-bound) doesn't throw away the mtime memoization. */
+export interface SourceCaches {
+  claude?: ScanCache;
+  codex?: ScanCache;
+}
 
 /**
  * A vendor transcript backend. New vendors = new implementation; everything
@@ -16,8 +24,14 @@ export interface SessionSourceConfig {
   codexSessions: string;
 }
 
-export function buildSources(config: SessionSourceConfig): SessionSource[] {
-  return [new ClaudeSource(config.claudeProjects), new CodexSource(config.codexSessions)];
+export function buildSources(
+  config: SessionSourceConfig,
+  caches: SourceCaches = {},
+): SessionSource[] {
+  return [
+    new ClaudeSource(config.claudeProjects, caches.claude),
+    new CodexSource(config.codexSessions, caches.codex),
+  ];
 }
 
 /** Collect sessions from every vendor source. */

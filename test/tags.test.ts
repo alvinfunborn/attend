@@ -31,6 +31,22 @@ describe("TagStore", () => {
     ]);
   });
 
+  it("reloads external changes before writing from another store instance", () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+
+    const firstVault = new TagStore(file);
+    const secondVault = new TagStore(file);
+
+    expect(secondVault.list()).toEqual([]);
+    firstVault.setSessionTags("s1", ["work"]);
+    secondVault.setSessionTags("s2", ["urgent"]);
+
+    const reloaded = new TagStore(file);
+    expect(reloaded.tagsFor("s1")).toEqual(["work"]);
+    expect(reloaded.tagsFor("s2")).toEqual(["urgent"]);
+  });
+
   it("deletes a global tag and removes it from every session", () => {
     const uniq = Math.random().toString(36).slice(2);
     const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
@@ -42,5 +58,16 @@ describe("TagStore", () => {
     expect(store.delete("urgent")).toEqual(["work"]);
     expect(store.tagsFor("s1")).toEqual(["work"]);
     expect(store.tagsFor("s2")).toEqual([]);
+  });
+
+  it("reorders global tags while preserving unmentioned tags in place", () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+
+    const store = new TagStore(file);
+    store.setSessionTags("s1", ["work", "urgent", "later"]);
+
+    expect(store.reorder(["later", "work"])).toEqual(["later", "urgent", "work"]);
+    expect(store.tagsFor("s1")).toEqual(["later", "urgent", "work"]);
   });
 });

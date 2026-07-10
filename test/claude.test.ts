@@ -32,16 +32,54 @@ describe("parseClaudeTranscript", () => {
     expect(s.actions).toBe(2);
     expect(s.firstTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
     expect(s.lastTs).toBe(Date.parse("2026-05-01T10:10:00Z"));
+    expect(s.userPromptTs).toEqual([
+      Date.parse("2026-05-01T10:00:00Z"),
+      Date.parse("2026-05-01T10:10:00Z"),
+    ]);
   });
 
   it("ignores command-like prompts (content starting with '<') and non-action tools", () => {
     const raw = jsonl(
       { type: "user", message: { content: "<command-name>clear</command-name>" } },
+      {
+        type: "user",
+        isMeta: true,
+        message: { content: [{ type: "text", text: "# expanded slash-command template" }] },
+      },
+      {
+        type: "user",
+        message: { content: [{ type: "text", text: "<ide_opened_file>noise</ide_opened_file>" }] },
+      },
       { type: "assistant", message: { content: [{ type: "tool_use", name: "Read" }] } },
     );
     const s = parseClaudeTranscript("s.jsonl", raw);
     expect(s.prompts).toBe(0);
     expect(s.actions).toBe(0);
+  });
+
+  it("strips provider-fork context from title and latest prompt", () => {
+    const raw = jsonl({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "text",
+            text: [
+              "push prod patch to main",
+              "Attend fork context: this branch originally ran in codex.",
+              "Use the transcript below as prior context, but treat this as a new independent branch in the current workspace.",
+              "Transcript:",
+              "User: old parent task",
+              "Assistant: old parent answer",
+            ].join("\n"),
+          },
+        ],
+      },
+    });
+    const s = parseClaudeTranscript("s.jsonl", raw);
+    expect(s.prompts).toBe(1);
+    expect(s.title).toBe("push prod patch to main");
+    expect(s.lastPrompt).toBe("push prod patch to main");
   });
 
   it("does not count subagent sidechain turns toward prompts/actions", () => {

@@ -22,6 +22,8 @@ export interface Analysis {
   etaMin: number;
   /** one short, descriptive observation (never judgmental) */
   reason: string;
+  /** editable user message that lowers the friction to resume an avoidance session */
+  avoidancePrompt?: string | null;
 }
 
 /**

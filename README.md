@@ -146,8 +146,20 @@ Common environment variables:
 - `ATTEND_PORT`
 - `ATTEND_HOST`
 - `ATTEND_CLAUDE_PROJECTS`
+- `ATTEND_CLAUDE_MODELS` (manual comma-separated override)
+- `ATTEND_CLAUDE_MODELS_CACHE`
 - `ATTEND_CODEX_SESSIONS`
+- `ATTEND_CODEX_MODELS_CACHE`
 - `ATTEND_TAGS`
+
+When Attend is launched with a single vault root, user-owned state lives under
+`<vault>/.attend/`: tags, session status, overrides, engagement telemetry, and
+browser-independent UI state (theme, focus definitions, model/effort history,
+and message pins). Only daemon mappings and analysis cache remain global under
+`~/.attend/`. Device-only controls stay in browser storage: tag-filter mode,
+priority filter, active focus, sidebar width, and folded turns. Without a scoped
+vault, the legacy global fallback remains available. `ATTEND_TAGS` overrides the
+default tag path.
 
 Example `attend.config.json`:
 
@@ -155,7 +167,9 @@ Example `attend.config.json`:
 {
   "vaultRoots": ["D:\\workspace\\projects", "C:\\Users\\you\\notes"],
   "claudeProjects": "C:\\Users\\you\\.claude\\projects",
+  "claudeModelsCache": "C:\\Users\\you\\.claude\\cache\\gateway-models.json",
   "codexSessions": "C:\\Users\\you\\.codex\\sessions",
+  "codexModelsCache": "C:\\Users\\you\\.codex\\models_cache.json",
   "memorySources": [],
   "port": 5050
 }

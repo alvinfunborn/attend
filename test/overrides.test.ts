@@ -43,6 +43,10 @@ describe("OverrideStore", () => {
       state: "needs_review",
       pattern: "avoidance",
     });
+    expect(store.set("s1", { pattern: "unknown" })).toEqual({
+      state: "needs_review",
+      pattern: "unknown",
+    });
   });
 
   it("null clears a single pin; clearing both removes the entry", () => {

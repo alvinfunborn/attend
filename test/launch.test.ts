@@ -27,6 +27,11 @@ describe("buildCommand", () => {
       'codex -c "model=\\"gpt-5.2-codex\\"" -c "model_reasoning_effort=\\"medium\\"" "fix it"',
     );
   });
+  it("passes newer codex reasoning levels (ultra) through unchanged", () => {
+    expect(buildCommand("new", "codex", { model: "gpt-5.6-sol", effort: "ultra" })).toBe(
+      'codex -c "model=\\"gpt-5.6-sol\\"" -c "model_reasoning_effort=\\"ultra\\""',
+    );
+  });
 });
 
 describe("buildTerminalInvocation", () => {

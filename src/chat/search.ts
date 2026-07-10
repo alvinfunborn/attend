@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { RawSession } from "../core/types.js";
 import { readCodexTranscript } from "./codex/transcript.js";
-import { type ToolCall, type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
+import { type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
 
 export interface SearchHit {
   role: "user" | "assistant" | "tool";
@@ -32,31 +32,11 @@ function compact(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function stringifyToolValue(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function toolText(tool: ToolCall): string {
-  return compact(
-    [tool.name, stringifyToolValue(tool.input), tool.result ?? ""].filter(Boolean).join(" "),
-  );
-}
-
 function chunksFromMessages(messages: TranscriptMsg[]): SearchHit[] {
   const chunks: SearchHit[] = [];
   for (const msg of messages) {
     const text = compact(msg.text);
     if (text) chunks.push({ role: msg.role, text });
-    for (const tool of msg.tools) {
-      const t = toolText(tool);
-      if (t) chunks.push({ role: "tool", text: t });
-    }
   }
   return chunks;
 }

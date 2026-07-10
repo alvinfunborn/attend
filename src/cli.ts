@@ -1,8 +1,9 @@
+import fs from "node:fs";
 import { parseArgs } from "node:util";
 import open from "open";
 import { scaffoldBrief } from "./commands/new.js";
 import { resolveConfig } from "./config.js";
-import { startServer } from "./server.js";
+import { type RunningServer, startServer } from "./server.js";
 
 const HELP = `attend — local web dashboard for brief-based AI session management
 
@@ -18,10 +19,27 @@ Options:
       --host <addr>    Host to bind (default: 127.0.0.1)
   -c, --config <path>  Path to attend.config.json
       --no-open        Do not open the browser on start
+      --e2ee-passphrase <text>
+                     Encrypt browser/server API payloads with this passphrase
   -h, --help           Show this help
 
 Config precedence: CLI args > env (ATTEND_VAULTS / ATTEND_PORT / ATTEND_CLAUDE_PROJECTS
-/ ATTEND_CODEX_SESSIONS / ATTEND_HOST) > attend.config.json > platform defaults.`;
+/ ATTEND_CODEX_SESSIONS / ATTEND_HOST / ATTEND_E2EE_PASSPHRASE) > attend.config.json > platform defaults.`;
+
+function installShutdownHandlers(server: RunningServer): void {
+  let closing = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (closing) return;
+    closing = true;
+    process.stderr.write(
+      `attend: received ${signal}; closing web service and leaving active sessions running.\n`,
+    );
+    server.close();
+    process.exitCode = 0;
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -31,6 +49,7 @@ async function main(): Promise<void> {
       host: { type: "string" },
       config: { type: "string", short: "c" },
       "no-open": { type: "boolean" },
+      "e2ee-passphrase": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -60,14 +79,28 @@ async function main(): Promise<void> {
     host: values.host,
     config: values.config,
     noOpen: values["no-open"],
+    e2eePassphrase: values["e2ee-passphrase"],
   });
 
   const server = await startServer(config);
+  installShutdownHandlers(server);
 
   process.stdout.write(`attend — running at ${server.url}\n`);
   if (config.scopeRoots.length > 0) {
     process.stdout.write("scoped to sessions under:\n");
-    for (const root of config.scopeRoots) process.stdout.write(`  ${root}\n`);
+    const missing: string[] = [];
+    for (const root of config.scopeRoots) {
+      const exists = fs.existsSync(root);
+      process.stdout.write(`  ${root}${exists ? "" : "  (does not exist)"}\n`);
+      if (!exists) missing.push(root);
+    }
+    if (missing.length > 0) {
+      const subject =
+        missing.length === 1 ? "this scope dir does not exist" : "these scope dirs do not exist";
+      process.stderr.write(
+        `attend: warning — ${subject}; no sessions will match it (check for typos, e.g. /User vs /Users).\n`,
+      );
+    }
   } else {
     process.stdout.write("scope: all sessions (pass a directory to limit)\n");
   }
