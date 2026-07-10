@@ -122,5 +122,6 @@ describe("parseClaudeTranscript", () => {
     const s = parseClaudeTranscript("s.jsonl", raw);
     expect(s.firstTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
     expect(s.lastTs).toBe(Date.parse("2026-05-01T10:05:00Z"));
+    expect(s.lastAssistantTs).toBe(Date.parse("2026-05-01T10:05:00Z"));
   });
 });

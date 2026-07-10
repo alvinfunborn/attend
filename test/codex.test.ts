@@ -49,6 +49,7 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
   it("does not count assistant messages or non-action response items", () => {
     const raw = jsonl(
       {
+        timestamp: "2026-05-01T10:00:00Z",
         type: "response_item",
         payload: {
           type: "message",
@@ -62,6 +63,7 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     const s = parseCodexTranscript("r.jsonl", raw);
     expect(s.prompts).toBe(0);
     expect(s.actions).toBe(0);
+    expect(s.lastAssistantTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
   });
 
   it("skips synthetic <…>-wrapped user turns so title/lastPrompt are the real prompts", () => {

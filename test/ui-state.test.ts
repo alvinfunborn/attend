@@ -13,6 +13,8 @@ describe("VaultUiStateStore", () => {
       focusViews: [{ id: "f1", name: "Work", tags: ["work"] }],
       modelPrefs: { codex: { model: "gpt-5.6-sol", effort: "medium" } },
       pins: { "attend.pins.v1:s1": [{ key: "m:1", text: "keep" }] },
+      sessionTitles: { s1: "Customer escalation" },
+      forkParents: { s2: "s1" },
     });
 
     expect(new VaultUiStateStore(file).get()).toMatchObject({
@@ -20,6 +22,8 @@ describe("VaultUiStateStore", () => {
       focusViews: [{ id: "f1", name: "Work", tags: ["work"] }],
       modelPrefs: { codex: { model: "gpt-5.6-sol", effort: "medium" } },
       pins: { "attend.pins.v1:s1": [{ key: "m:1", text: "keep" }] },
+      sessionTitles: { s1: "Customer escalation" },
+      forkParents: { s2: "s1" },
     });
     fs.rmSync(dir, { recursive: true, force: true });
   });

@@ -112,6 +112,7 @@ describe("resolveConfig precedence", () => {
     expect(c.engagement).toBe(path.join(path.resolve(root), ".attend", "engagement.json"));
     expect(c.uiState).toBe(path.join(path.resolve(root), ".attend", "ui-state.json"));
     expect(c.chatQueue).toBe(path.join(path.resolve(root), ".attend", "chat-queues.json"));
+    expect(c.workEvents).toBe(path.join(path.resolve(root), ".attend", "work-events.json"));
     expect(c.daemonRegistry).toBe(path.join(os.homedir(), ".attend", "daemons.json"));
     expect(c.analysisCache).toBe(path.join(os.homedir(), ".attend", "analysis.json"));
   });

@@ -51,6 +51,8 @@ import { readCodexModelOptions } from "./core/vendor/codex-models.js";
 import { detectVendors, isVendorId } from "./core/vendor/detect.js";
 import { buildSources } from "./core/vendor/index.js";
 import { ScanCache } from "./core/vendor/scan-cache.js";
+import { WorkEventStore } from "./core/work-events.js";
+import { buildWorkStats, trailingPromptActivity } from "./core/work-stats.js";
 import { type ConsoleView, type SessionView, renderConsole } from "./ui/console.js";
 
 const DAY_MS = 86_400_000;
@@ -743,6 +745,24 @@ function sessionTelemetry(s: RawSession, now: number, engagement: EngagementStor
   };
 }
 
+function customSessionTitle(
+  sessionId: string | null | undefined,
+  sessionTitles: Record<string, unknown> | undefined,
+): string {
+  if (!sessionId || !sessionTitles) return "";
+  const value = sessionTitles[sessionId];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function forkParentSessionId(
+  sessionId: string | null | undefined,
+  forkParents: Record<string, unknown> | undefined,
+): string | null {
+  if (!sessionId || !forkParents) return null;
+  const value = forkParents[sessionId];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 function toSessionViews(
   sessions: RawSession[],
   model: AlignmentModel | null,
@@ -753,6 +773,8 @@ function toSessionViews(
   engagement: EngagementStore,
   sessionStatus: SessionStatusAccess,
   stoppedExternalActiveAt: Map<string, number>,
+  sessionTitles?: Record<string, unknown>,
+  forkParents?: Record<string, unknown>,
 ): SessionView[] {
   return [...sessions]
     .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))
@@ -795,7 +817,9 @@ function toSessionViews(
       return {
         vendor: s.vendor,
         sessionId: s.sessionId,
+        forkParentId: forkParentSessionId(s.sessionId, forkParents),
         title: s.title ?? "",
+        customTitle: customSessionTitle(s.sessionId, sessionTitles),
         lastPrompt: s.lastPrompt ?? null,
         cwd: s.cwd,
         file: s.path,
@@ -823,6 +847,7 @@ function toSessionViews(
         seen: persistedStatus?.state === "seen",
         generating: externalGenerating,
         generatingStartedAt: externalGenerating ? (s.activeStartedAt ?? null) : null,
+        lastAssistantOutputAt: s.lastAssistantTs ?? null,
       };
     });
 }
@@ -866,25 +891,6 @@ function externalActiveStates(
       ? [{ sessionId: s.sessionId, startedAt: s.activeStartedAt ?? s.lastTs ?? now }]
       : [],
   );
-}
-
-/**
- * Throughput readout for the console header: real activity over the trailing 24h,
- * normalized to an hourly rate. Descriptive, not judgmental (DESIGN invariant 3) —
- * it reports what flowed through, it doesn't nag about a backlog.
- */
-const THROUGHPUT_WINDOW_HOURS = 24;
-export function hourlyThroughput(
-  sessions: RawSession[],
-  now: number,
-): { sessionsPerHour: number; charsPerHour: number } {
-  const since = now - THROUGHPUT_WINDOW_HOURS * 60 * 60 * 1000;
-  const recent = sessions.filter((s) => (s.lastTs ?? 0) >= since);
-  const chars = recent.reduce((n, s) => n + s.chars, 0);
-  return {
-    sessionsPerHour: recent.length / THROUGHPUT_WINDOW_HOURS,
-    charsPerHour: chars / THROUGHPUT_WINDOW_HOURS,
-  };
 }
 
 const ETA_BASE_MIN = 2;
@@ -945,15 +951,16 @@ export function createApp(
   const sessionStatus = createSessionStatusAccess(config.sessionStatus, config.scopeRoots);
   const uiState = new VaultUiStateStore(config.uiState);
   const chatQueue = new ChatQueueStore(config.chatQueue);
+  const workEvents = new WorkEventStore(config.workEvents);
   const stoppedExternalActiveAt = new Map<string, number>();
   // Sources are rebuilt each scan (so config paths stay late-bound) but share
-  // persistent mtime parse caches: the 30s TTL re-lists + stats (cheap) and only
+  // persistent mtime parse caches: the short TTL re-lists + stats (cheap) and only
   // re-parses transcripts whose mtime/size changed. This is what keeps the
   // periodic scan from re-parsing the whole ~GB of session JSONL every tick.
   const sourceCaches = { claude: new ScanCache(), codex: new ScanCache() };
   const scanSessions = (): RawSession[] =>
     buildSources(config, sourceCaches).flatMap((s) => s.scan());
-  const getSessions = ttlCache(30_000, scanSessions);
+  const getSessions = ttlCache(5_000, scanSessions);
   const getModel = ttlCache(60_000, (): AlignmentModel => {
     const sources = config.memorySources.length
       ? config.memorySources
@@ -983,11 +990,18 @@ export function createApp(
         withinScope(s.cwd, config.scopeRoots),
     );
   };
+  let workPromptSyncAt = 0;
+  const syncWorkPromptHistory = (sessions: RawSession[], now: number, force = false) => {
+    if (!force && now - workPromptSyncAt < 30_000) return;
+    workEvents.backfillPrompts(sessions);
+    workPromptSyncAt = now;
+  };
   let scopedPersistenceMigrationChecked = false;
 
   const buildConsoleView = (): ConsoleView => {
     const now = Date.now();
     const all = visibleSessions();
+    const vaultState = uiState.get();
     if (!scopedPersistenceMigrationChecked) {
       scopedPersistenceMigrationChecked = true;
       migrateScopedTagsFromLegacy(tags, config.tags, config.scopeRoots, all, orchestrator);
@@ -996,7 +1010,8 @@ export function createApp(
       migrateScopedSessionData(config.engagement, "engagement.json", ids, true);
     }
     const listed = limitSessions(all, now, config.recentDays, config.maxSessions);
-    const throughput = hourlyThroughput(all, now);
+    syncWorkPromptHistory(all, now);
+    const throughput = trailingPromptActivity(workEvents.list(), now, 24);
     return {
       sessions: toSessionViews(
         listed,
@@ -1008,17 +1023,19 @@ export function createApp(
         engagement,
         sessionStatus,
         stoppedExternalActiveAt,
+        vaultState.sessionTitles,
+        vaultState.forkParents,
       ),
       knownDirs: knownDirs(all),
       scopeRoots: config.scopeRoots,
       pageTitle: consolePageTitle(config.scopeRoots),
-      sessionsPerHour: throughput.sessionsPerHour,
-      charsPerHour: throughput.charsPerHour,
+      sessions24h: throughput.sessions,
+      prompts24h: throughput.prompts,
       vendors: getVendors(),
       claudeModels: claudeModelOptions(),
       codexModels: codexModelOptions(),
       tags: scopeTagList(all, tags, orchestrator, { scopeRoots: config.scopeRoots }),
-      vaultState: uiState.get(),
+      vaultState,
       e2ee: { enabled: e2ee.enabled },
     };
   };
@@ -1028,8 +1045,8 @@ export function createApp(
     knownDirs: [],
     scopeRoots: [],
     pageTitle: consolePageTitle(config.scopeRoots),
-    sessionsPerHour: 0,
-    charsPerHour: 0,
+    sessions24h: 0,
+    prompts24h: 0,
     vendors: [],
     claudeModels: [],
     codexModels: [],
@@ -1042,17 +1059,41 @@ export function createApp(
     const sessions = visibleSessions();
     return scopeTagList(sessions, tags, orchestrator, { ...opts, scopeRoots: config.scopeRoots });
   };
-  const throughputSnapshot = () => hourlyThroughput(visibleSessions(), Date.now());
+  const throughputSnapshot = () => {
+    const now = Date.now();
+    const sessions = visibleSessions();
+    syncWorkPromptHistory(sessions, now);
+    const activity = trailingPromptActivity(workEvents.list(), now, 24);
+    return { sessions24h: activity.sessions, prompts24h: activity.prompts };
+  };
+  const lastAssistantOutputAt = new Map<string, number>();
+  const clearTurnScopedOverrides = (sessionId: string): void => {
+    const current = overrides.get(sessionId);
+    if (current?.etaMin === undefined && current?.state === undefined) return;
+    overrides.set(sessionId, { etaMin: null, state: null });
+  };
   const liveSnapshot = () => {
     const now = Date.now();
+    const sessions = visibleSessions();
     const states = mergeActiveStates(
       engine.activeSessionStates(),
       codex.activeSessionStates(),
-      externalActiveStates(visibleSessions(), now, stoppedExternalActiveAt),
+      externalActiveStates(sessions, now, stoppedExternalActiveAt),
+    );
+    for (const state of states) clearTurnScopedOverrides(state.sessionId);
+    const rawById = new Map(
+      sessions.filter((s) => !!s.sessionId).map((s) => [s.sessionId as string, s]),
     );
     return {
       active: states.map((s) => s.sessionId),
       startedAt: Object.fromEntries(states.map((s) => [s.sessionId, s.startedAt])),
+      lastAssistantAt: Object.fromEntries(
+        states.flatMap((s) => {
+          const at =
+            lastAssistantOutputAt.get(s.sessionId) ?? rawById.get(s.sessionId)?.lastAssistantTs;
+          return at == null ? [] : [[s.sessionId, at]];
+        }),
+      ),
       clientSessionIds: Object.fromEntries(
         states
           .filter((s) => !!s.clientSessionId)
@@ -1069,6 +1110,7 @@ export function createApp(
         sessionId: string;
         clientSessionId?: string;
         vendor: string;
+        emittedAt: number;
         event: UiEvent;
       };
   const liveSubscribers = new Set<(message: LiveBusMessage, eventId?: number) => void>();
@@ -1091,11 +1133,57 @@ export function createApp(
     clientSessionId?: string,
   ): void => {
     if (orchestrator.isDaemon(sessionId)) return;
+    const emittedAt = Date.now();
+    if (event.kind === "user_turn_started" || event.kind === "queued_turn_started") {
+      clearTurnScopedOverrides(sessionId);
+    }
+    if (event.kind === "assistant_text" && event.text) {
+      lastAssistantOutputAt.set(sessionId, emittedAt);
+    }
+    const recordStartedTurn = (at: number, queueId?: string) => {
+      workEvents.record({
+        kind: "user_prompt",
+        at,
+        sessionId,
+        vendor,
+        source: "live",
+        ...(queueId ? { queueId } : {}),
+      });
+      workEvents.record({
+        kind: "turn_started",
+        at,
+        sessionId,
+        vendor,
+        source: "live",
+        ...(queueId ? { queueId } : {}),
+      });
+    };
+    if (event.kind === "user_turn_started" || event.kind === "queued_turn_started") {
+      recordStartedTurn(
+        event.startedAt ?? emittedAt,
+        event.kind === "queued_turn_started" ? event.queueId : undefined,
+      );
+    } else if (
+      event.kind === "result" ||
+      event.kind === "error" ||
+      (event.kind === "tool_use" &&
+        (event.name === "AskUserQuestion" || event.name === "request_user_input"))
+    ) {
+      workEvents.record({
+        kind: "turn_finished",
+        at: emittedAt,
+        sessionId,
+        vendor,
+        source: "live",
+        ok: event.kind === "result" ? event.ok : event.kind === "tool_use",
+      });
+    }
     const message: LiveBusMessage = {
       kind: "session_event",
       sessionId,
       ...(clientSessionId ? { clientSessionId } : {}),
       vendor,
+      emittedAt,
       event,
     };
     const id = ++liveEventId;
@@ -1113,12 +1201,27 @@ export function createApp(
   // When a task turn ends, re-run its daemon analysis (DESIGN v2.3 #3 — triggered
   // on completion, not polled). Daemon turns are ignored to avoid recursion.
   // Registered on both backends so Claude and Codex sessions analyze identically.
+  const analyzeAndRecordState = (sid: string, cwd: string, knownVendor?: string) =>
+    orchestrator.analyzeTask(sid, cwd).then((analysis) => {
+      if (!analysis) return analysis;
+      const vendor =
+        knownVendor ?? visibleSessions().find((session) => session.sessionId === sid)?.vendor;
+      workEvents.record({
+        kind: "daemon_state",
+        at: Date.now(),
+        sessionId: sid,
+        ...(vendor ? { vendor } : {}),
+        state: analysis.state,
+        source: "live",
+      });
+      return analysis;
+    });
   const onTurnEnd = (sid: string) => {
     const willAdvanceQueue = chatQueue.peek(sid) !== null && !chatQueue.parked(sid);
     setTimeout(() => void drainQueuedTurn(sid), 0);
     if (willAdvanceQueue) return;
     if (orchestrator.isDaemon(sid) || !orchestrator.hasDaemon(sid)) return;
-    orchestrator.analyzeTask(sid, cwdOf(sid)).catch(() => {});
+    analyzeAndRecordState(sid, cwdOf(sid)).catch(() => {});
   };
   engine.onTurnEnd(onTurnEnd);
   codex.onTurnEnd(onTurnEnd);
@@ -1219,6 +1322,8 @@ export function createApp(
         engagement,
         sessionStatus,
         stoppedExternalActiveAt,
+        uiState.get().sessionTitles,
+        uiState.get().forkParents,
       )[0] ?? null
     );
   };
@@ -1235,6 +1340,34 @@ export function createApp(
   app.get("/session/analysis", (c) => {
     const id = c.req.query("session");
     return c.json({ analysis: id ? orchestrator.analysis(id) : null });
+  });
+
+  app.get("/session/view", (c) => {
+    const id = c.req.query("session");
+    return c.json({ view: id ? sessionView(id) : null });
+  });
+
+  app.get("/stats/work", (c) => {
+    c.header("Cache-Control", "no-store");
+    const range = c.req.query("range") ?? "today";
+    const now = Date.now();
+    const sessions = visibleSessions();
+    syncWorkPromptHistory(sessions, now, true);
+    const active = mergeActiveStates(
+      engine.activeSessionStates(),
+      codex.activeSessionStates(),
+      externalActiveStates(sessions, now, stoppedExternalActiveAt),
+    );
+    const vaultState = uiState.get();
+    return c.json(
+      buildWorkStats(sessions, now, range, {
+        analysisFor: (sessionId) => orchestrator.analysis(sessionId),
+        customTitles: vaultState.sessionTitles,
+        activeSessionIds: active.map((state) => state.sessionId),
+        queues: chatQueue.summary(),
+        events: workEvents.list(),
+      }),
+    );
   });
 
   app.get("/dirs/suggest", (c) => {
@@ -1326,6 +1459,8 @@ export function createApp(
       focusViews?: unknown;
       modelPrefs?: unknown;
       pins?: unknown;
+      sessionTitles?: unknown;
+      forkParents?: unknown;
     };
     const patch: Parameters<VaultUiStateStore["patch"]>[0] = {};
     if (body.theme === "light" || body.theme === "dark") patch.theme = body.theme;
@@ -1334,6 +1469,10 @@ export function createApp(
       patch.modelPrefs = body.modelPrefs as Record<string, unknown>;
     if (body.pins && typeof body.pins === "object")
       patch.pins = body.pins as Record<string, unknown[]>;
+    if (body.sessionTitles && typeof body.sessionTitles === "object")
+      patch.sessionTitles = body.sessionTitles as Record<string, string>;
+    if (body.forkParents && typeof body.forkParents === "object")
+      patch.forkParents = body.forkParents as Record<string, string>;
     if (!Object.keys(patch).length) return c.json({ ok: false, error: "nothing to set" }, 400);
     return c.json({ ok: true, state: uiState.patch(patch) });
   });
@@ -1450,7 +1589,7 @@ export function createApp(
           for (const buffered of liveEventBuffer) send(buffered.message, buffered.id);
         }
         send(liveSnapshot());
-        const timer = setInterval(() => send(liveSnapshot()), 30_000);
+        const timer = setInterval(() => send(liveSnapshot()), 5_000);
         (timer as unknown as { unref?: () => void }).unref?.();
         stream.onAbort(() => {
           closed = true;
@@ -1535,6 +1674,7 @@ export function createApp(
     queueDraining.add(sessionId);
     try {
       let sent = false;
+      const startedAt = Date.now();
       if (driver.get(sessionId)) sent = driver.send(sessionId, item);
       else {
         await driver.start({
@@ -1550,12 +1690,14 @@ export function createApp(
       recordUserMessageSent(sessionId);
       emitQueueEvent(sessionId, {
         kind: "queued_turn_started",
+        startedAt,
         queueId: item.id,
         text: item.text,
         attachments: item.attachments,
       });
       broadcastSessionEvent(sessionId, item.vendor, {
         kind: "queued_turn_started",
+        startedAt,
         queueId: item.id,
         text: item.text,
         attachments: item.attachments,
@@ -1599,6 +1741,14 @@ export function createApp(
       if (err) return c.json({ ok: false, error: err }, 400);
     }
     const item = chatQueue.enqueue(id, { cwd, vendor, text, attachments });
+    workEvents.record({
+      kind: "queue_enqueued",
+      at: item.createdAt,
+      sessionId: id,
+      vendor,
+      queueId: item.id,
+      source: "live",
+    });
     broadcastLive();
     if (!driverFor(vendor).activeSessions().includes(id))
       setTimeout(() => void drainQueuedTurn(id), 0);
@@ -1664,6 +1814,7 @@ export function createApp(
       if (err) return c.json({ ok: false, error: err }, 400);
     }
     const drv = driverFor(vendor);
+    const startedAt = Date.now();
     if (hasRunConfig) {
       if (drv.activeSessions().includes(id)) return c.json({ ok: false, session: id });
       try {
@@ -1678,6 +1829,7 @@ export function createApp(
         const view = recordUserMessageSent(id);
         broadcastSessionEvent(id, drv.vendor, {
           kind: "user_turn_started",
+          startedAt,
           text,
           attachments,
         });
@@ -1692,6 +1844,7 @@ export function createApp(
     if (sent) {
       broadcastSessionEvent(id, drv.vendor, {
         kind: "user_turn_started",
+        startedAt,
         text,
         attachments,
       });
@@ -1719,6 +1872,15 @@ export function createApp(
     const drv = driverFor(c.req.query("vendor"));
     if (!drv.get(id)) drv.start({ resume: id, cwd }).catch(() => {});
     const sent = drv.answer(id, { toolUseId, text, toolUseResult: body.toolUseResult });
+    if (sent) {
+      workEvents.record({
+        kind: "turn_started",
+        at: Date.now(),
+        sessionId: id,
+        vendor: drv.vendor,
+        source: "live",
+      });
+    }
     const view = sent ? recordUserMessageSent(id) : null;
     return c.json({ ok: sent, session: id, toolUseId, view });
   });
@@ -1763,6 +1925,7 @@ export function createApp(
     // default to a greeting when none was typed.
     const first = text || (vendor === "codex" && !attachments.length ? "hello" : undefined);
     try {
+      const startedAt = Date.now();
       const session = await driverFor(vendor).start(
         first !== undefined || attachments.length
           ? {
@@ -1776,7 +1939,29 @@ export function createApp(
       );
       // Product-created session → give it an analyzer daemon (DESIGN v2.3 #5).
       // No-op for vendors without an analyzer (e.g. Codex without an install).
-      orchestrator.ensureDaemon(session, vendor, cwd).catch(() => {});
+      orchestrator
+        .ensureDaemon(session, vendor, cwd)
+        .then((daemonId) => {
+          if (!daemonId || driverFor(vendor).activeSessions().includes(session)) return;
+          return analyzeAndRecordState(session, cwd, vendor);
+        })
+        .catch(() => {});
+      if (first !== undefined || attachments.length) {
+        workEvents.record({
+          kind: "user_prompt",
+          at: startedAt,
+          sessionId: session,
+          vendor,
+          source: "live",
+        });
+        workEvents.record({
+          kind: "turn_started",
+          at: startedAt,
+          sessionId: session,
+          vendor,
+          source: "live",
+        });
+      }
       broadcastLive();
       return c.json({ ok: true, session, vendor, cwd });
     } catch (err) {
@@ -1820,6 +2005,7 @@ export function createApp(
       if (err) return c.json({ ok: false, error: err }, 400);
     }
     try {
+      const startedAt = Date.now();
       const parent = visibleSessions().find((s) => s.sessionId === id) ?? null;
       const parentAnalysis = parent?.sessionId ? orchestrator.analysis(parent.sessionId) : null;
       const inheritedTags = parent
@@ -1851,8 +2037,30 @@ export function createApp(
             },
       );
       if (inheritedTags.length) tags.setSessionTags(session, inheritedTags);
+      const forkParents = uiState.get().forkParents ?? {};
+      uiState.patch({ forkParents: { ...forkParents, [session]: id } });
       // A fork is also a product-created session → its own analyzer daemon.
-      orchestrator.ensureDaemon(session, vendor, cwd).catch(() => {});
+      orchestrator
+        .ensureDaemon(session, vendor, cwd)
+        .then((daemonId) => {
+          if (!daemonId || driverFor(vendor).activeSessions().includes(session)) return;
+          return analyzeAndRecordState(session, cwd, vendor);
+        })
+        .catch(() => {});
+      workEvents.record({
+        kind: "user_prompt",
+        at: startedAt,
+        sessionId: session,
+        vendor,
+        source: "live",
+      });
+      workEvents.record({
+        kind: "turn_started",
+        at: startedAt,
+        sessionId: session,
+        vendor,
+        source: "live",
+      });
       broadcastLive();
       return c.json({
         ok: true,
@@ -1861,6 +2069,7 @@ export function createApp(
         vendor,
         cwd,
         project: path.basename(cwd),
+        parentSessionId: id,
         forkMode: hasContextMessages
           ? "context-prefix"
           : sameVendor

@@ -84,6 +84,20 @@ function isFinalAnswer(item: Payload): boolean {
   return item.phase === "final_answer";
 }
 
+function hasAssistantOutputText(item: Payload): boolean {
+  if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content)) {
+    return false;
+  }
+  return item.content.some(
+    (part) =>
+      !!part &&
+      typeof part === "object" &&
+      (part as { type?: string }).type === "output_text" &&
+      typeof (part as { text?: unknown }).text === "string" &&
+      ((part as { text: string }).text?.length ?? 0) > 0,
+  );
+}
+
 /**
  * Return the *real* user prompt text for a typed user message, else null. Codex
  * injects synthetic user turns before each real one (`<environment_context>`,
@@ -221,6 +235,7 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       } else if (item.type && ACTION_ITEM_TYPES.has(item.type)) {
         session.actions += 1;
       }
+      if (ts !== null && hasAssistantOutputText(item)) session.lastAssistantTs = ts;
       if (isFinalAnswer(item)) activeTurn = null;
     }
   }

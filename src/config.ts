@@ -48,6 +48,8 @@ export interface AttendConfig {
   uiState: string;
   /** persistent server-owned queued chat turns. */
   chatQueue: string;
+  /** vault-scoped timestamped prompt/turn/queue/daemon event ledger. */
+  workEvents: string;
   /** only list sessions with activity within this many days (0 = no limit). */
   recentDays: number;
   /** cap the listed sessions to the N most-recent (0 = no limit). */
@@ -102,6 +104,7 @@ function platformDefaults(): AttendConfig {
     sessionStatus: path.join(attendHome, "session-status.json"),
     uiState: path.join(attendHome, "ui-state.json"),
     chatQueue: path.join(attendHome, "chat-queues.json"),
+    workEvents: path.join(attendHome, "work-events.json"),
     recentDays: 30,
     maxSessions: 200,
     e2eePassphrase: null,
@@ -205,6 +208,7 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     sessionStatus: path.resolve(env.ATTEND_SESSION_STATUS ?? defaults.sessionStatus),
     uiState: path.resolve(defaultVaultPath(scopeRoots, defaults.uiState)),
     chatQueue: path.resolve(defaultVaultPath(scopeRoots, defaults.chatQueue)),
+    workEvents: path.resolve(defaultVaultPath(scopeRoots, defaults.workEvents)),
     recentDays: intOr(env.ATTEND_RECENT_DAYS, defaults.recentDays),
     maxSessions: intOr(env.ATTEND_MAX_SESSIONS, defaults.maxSessions),
     e2eePassphrase: cli.e2eePassphrase ?? env.ATTEND_E2EE_PASSPHRASE ?? defaults.e2eePassphrase,

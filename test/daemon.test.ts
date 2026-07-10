@@ -264,6 +264,8 @@ describe("DaemonOrchestrator", () => {
     expect(prompt).toContain('"priority" is workspace-level business importance');
     expect(prompt).toContain("An activity can be the glance label");
     expect(prompt).toContain("Do not let meta/debugging about the workflow become the brief");
+    expect(prompt).toContain('"reason" is volatile current context, not a second title');
+    expect(prompt).toContain('without repeating "brief"');
     expect(prompt).toContain("A vague phrase like");
     expect(prompt).toContain(
       "Initial user goal (historical context only): 查看codebase的livekit接电话的实现情况",

@@ -42,6 +42,7 @@ function appWithSpy(config = resolveConfig({ positionals: [] })) {
   const calls: Call[] = [];
   const reveals: string[] = [];
   const uniq = Math.random().toString(36).slice(2);
+  const workEvents = path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`);
   const orchestrator = new DaemonOrchestrator(
     new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
     new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)),
@@ -58,7 +59,12 @@ function appWithSpy(config = resolveConfig({ positionals: [] })) {
     engine: new ChatEngine(fakeQuery),
     orchestrator,
   };
-  return { app: createApp(config, deps), calls, reveals };
+  return {
+    app: createApp({ ...config, workEvents }, deps),
+    calls,
+    reveals,
+    workEvents,
+  };
 }
 
 const tmp = encodeURIComponent(os.tmpdir());
@@ -72,6 +78,7 @@ describe("GET /", () => {
       daemonRegistry: path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`),
       analysisCache: path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+      workEvents: path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
       engagement: path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`),
       sessionStatus: path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`),
@@ -151,15 +158,68 @@ describe("vault UI state", () => {
     const res = await app.request("/vault/ui-state", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ theme: "dark", modelPrefs: { codex: { effort: "medium" } } }),
+      body: JSON.stringify({
+        theme: "dark",
+        modelPrefs: { codex: { effort: "medium" } },
+        sessionTitles: { s1: "Customer escalation" },
+        forkParents: { s2: "s1" },
+      }),
     });
 
     expect(res.status).toBe(200);
     expect(JSON.parse(fs.readFileSync(config.uiState, "utf-8"))).toMatchObject({
       theme: "dark",
       modelPrefs: { codex: { effort: "medium" } },
+      sessionTitles: { s1: "Customer escalation" },
+      forkParents: { s2: "s1" },
     });
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("hydrates custom session titles from the scoped vault into session views", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-vault-title-"));
+    const claudeProjects = path.join(os.tmpdir(), `attend-test-projects-${uniq}`);
+    const cwd = path.join(root, "repo");
+    const projectDir = path.join(claudeProjects, "repo");
+    await fs.promises.mkdir(cwd, { recursive: true });
+    await fs.promises.mkdir(projectDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(projectDir, "s1.jsonl"),
+      JSON.stringify({
+        type: "user",
+        sessionId: "s1",
+        cwd,
+        timestamp: new Date().toISOString(),
+        message: { content: "first prompt" },
+      }),
+    );
+    const config = {
+      ...resolveConfig({ positionals: [root] }),
+      claudeProjects,
+      codexSessions: path.join(os.tmpdir(), `attend-test-codex-${uniq}`),
+      overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+      workEvents: path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`),
+      tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+    };
+    fs.mkdirSync(path.dirname(config.uiState), { recursive: true });
+    fs.writeFileSync(
+      config.uiState,
+      JSON.stringify({ sessionTitles: { s1: "Customer escalation" }, forkParents: { s1: "root" } }),
+    );
+    const { app } = appWithSpy(config);
+
+    const res = await app.request("/");
+    const html = await res.text();
+    const match = /window\.__SESSIONS__ = (\[[\s\S]*?\]);/.exec(html);
+    const sessions = JSON.parse(match?.[1] ?? "[]") as Array<Record<string, unknown>>;
+
+    expect(sessions.find((s) => s.sessionId === "s1")).toMatchObject({
+      customTitle: "Customer escalation",
+      forkParentId: "root",
+    });
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(claudeProjects, { recursive: true, force: true });
   });
 });
 
@@ -171,6 +231,9 @@ class FakeCodexDriver implements ChatDriver {
   interruptResult = false;
   active: Array<{ sessionId: string; startedAt: number; clientSessionId?: string }> = [];
   readonly turnEndListeners = new Set<(sessionId: string) => void>();
+  readonly eventListeners = new Set<
+    (sessionId: string, event: UiEvent, clientSessionId?: string) => void
+  >();
 
   get(_sessionId: string): { cwd: string } | undefined {
     return { cwd: os.tmpdir() };
@@ -214,6 +277,15 @@ class FakeCodexDriver implements ChatDriver {
   onTurnEnd(cb: (sessionId: string) => void): () => void {
     this.turnEndListeners.add(cb);
     return () => this.turnEndListeners.delete(cb);
+  }
+
+  onEvent(cb: (sessionId: string, event: UiEvent, clientSessionId?: string) => void): () => void {
+    this.eventListeners.add(cb);
+    return () => this.eventListeners.delete(cb);
+  }
+
+  emitEvent(sessionId: string, event: UiEvent, clientSessionId?: string): void {
+    for (const cb of this.eventListeners) cb(sessionId, event, clientSessionId);
   }
 
   finishTurn(sessionId: string): void {
@@ -685,6 +757,7 @@ describe("engagement routes", () => {
       engagement: path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+      workEvents: path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`),
     };
     const orchestrator = new DaemonOrchestrator(
       new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
@@ -736,6 +809,7 @@ describe("engagement routes", () => {
       sessionStatus: path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
+      workEvents: path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`),
     };
     const orchestrator = new DaemonOrchestrator(
       new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
@@ -866,7 +940,20 @@ describe("engagement routes", () => {
     const res = await app.request("/chat/live");
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
-      stats: { sessionsPerHour: 1 / 24 },
+      stats: { sessions24h: 1, prompts24h: 1 },
+    });
+  });
+
+  it("serves work-pattern statistics from scoped session prompt history", async () => {
+    const { app } = await appWithTrackedSession();
+    const res = await app.request("/stats/work?range=7d");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      range: "7d",
+      timelineUnit: "day",
+      summary: { sessionsTouched: 1, prompts: 1, promptedHours: 1 },
+      modes: [{ mode: "focus" }, { mode: "balanced" }, { mode: "parallel" }],
+      live: { generating: 0, queuedTurns: 0, queuedSessions: 0 },
     });
   });
 
@@ -1487,6 +1574,27 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     });
   });
 
+  it("persists the first in-browser turn lifecycle with its true start time", async () => {
+    const { app, workEvents } = appWithSpy();
+    const res = await app.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "measure this turn" }),
+    });
+    expect(res.status).toBe(200);
+    const sessionId = ((await res.json()) as { session: string }).session;
+    const stored = JSON.parse(fs.readFileSync(workEvents, "utf-8")) as {
+      events: Array<{ kind: string; at: number; sessionId: string }>;
+    };
+    const sessionEvents = stored.events.filter((event) => event.sessionId === sessionId);
+    expect(sessionEvents.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(["user_prompt", "turn_started", "turn_finished"]),
+    );
+    const started = sessionEvents.find((event) => event.kind === "turn_started");
+    const finished = sessionEvents.find((event) => event.kind === "turn_finished");
+    expect(started?.at).toBeLessThanOrEqual(finished?.at ?? 0);
+  });
+
   it("includes stable client identities in the global live snapshot", async () => {
     const { app, codex } = appWithCodexSpy();
     codex.active = [
@@ -1499,6 +1607,35 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(await (await app.request("/chat/live")).json()).toMatchObject({
       active: ["cx-provider-1"],
       clientSessionIds: { "cx-provider-1": "branch-ui-1" },
+    });
+  });
+
+  it("keeps the latest assistant text timestamp in live snapshots", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const startedAt = Date.now() - 10_000;
+    codex.active = [{ sessionId: "cx-live-output", startedAt }];
+    const before = Date.now();
+    codex.emitEvent("cx-live-output", { kind: "assistant_text", text: "partial answer" });
+
+    const live = (await (await app.request("/chat/live")).json()) as {
+      lastAssistantAt: Record<string, number>;
+    };
+    expect(live.lastAssistantAt["cx-live-output"]).toBeGreaterThanOrEqual(before);
+    expect(live.lastAssistantAt["cx-live-output"]).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("clears ETA and state pins at the next turn start but keeps priority", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    await app.request("/session/override?session=cx-turn", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ priority: 8, etaMin: 25, state: "blocked" }),
+    });
+
+    codex.emitEvent("cx-turn", { kind: "user_turn_started", text: "continue" });
+
+    expect(JSON.parse(fs.readFileSync(config.overrides, "utf-8"))).toEqual({
+      "cx-turn": { priority: 8 },
     });
   });
 
@@ -1854,14 +1991,24 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
   });
 
   it("fork branches with a first message and returns the new session id", async () => {
-    const { app } = appWithSpy();
-    const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-fork-tree-"));
+    const config = resolveConfig({ positionals: [root] });
+    const { app } = appWithSpy(config);
+    const res = await app.request(`/chat/fork?session=abc&cwd=${encodeURIComponent(root)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "try another approach" }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, session: "fake-1" });
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      session: "fake-1",
+      parentSessionId: "abc",
+    });
+    expect(JSON.parse(fs.readFileSync(config.uiState, "utf-8"))).toMatchObject({
+      forkParents: { "fake-1": "abc" },
+    });
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("abort requires a session id", async () => {

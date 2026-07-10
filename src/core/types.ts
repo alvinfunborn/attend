@@ -35,13 +35,15 @@ export interface RawSession {
   /** char length of the last assistant turn. Was the ETA "how much to re-read"
    *  proxy; ETA is memory-derived since v2.2, so this is parsed but unused for now. */
   lastTurnChars: number;
-  /** cumulative characters processed in this session (user prompts + assistant
-   *  text). Drives the console's throughput readout (字/小时). */
+  /** cumulative characters parsed from this session; vendors expose different
+   *  assistant detail, so this is not used for cross-vendor throughput. */
   chars: number;
   cwd: string | null;
   /** epoch ms, or null when no timestamps were found */
   firstTs: number | null;
   lastTs: number | null;
+  /** epoch ms of the latest assistant text block, used for live output-silence timing. */
+  lastAssistantTs?: number | null;
   /** epoch ms timestamps for real user-authored prompts, newest not guaranteed. */
   userPromptTs?: number[];
   prompts: number;

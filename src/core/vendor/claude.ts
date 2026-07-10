@@ -142,7 +142,10 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
       session.actions += countActions(obj.message?.content);
       const txt = assistantText(obj.message?.content);
       session.chars += txt;
-      if (txt > 0) session.lastTurnChars = txt;
+      if (txt > 0) {
+        session.lastTurnChars = txt;
+        if (ts !== null) session.lastAssistantTs = ts;
+      }
     }
   }
   return session;

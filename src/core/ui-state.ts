@@ -6,6 +6,9 @@ export interface VaultUiState {
   focusViews?: unknown[];
   modelPrefs?: Record<string, unknown>;
   pins?: Record<string, unknown[]>;
+  sessionTitles?: Record<string, string>;
+  /** child provider session id -> parent provider session id */
+  forkParents?: Record<string, string>;
 }
 
 /** Vault-owned UI data that must survive browsers without leaking across vaults. */
@@ -27,6 +30,10 @@ export class VaultUiStateStore {
     if (next.modelPrefs && typeof next.modelPrefs === "object")
       this.state.modelPrefs = structuredClone(next.modelPrefs);
     if (next.pins && typeof next.pins === "object") this.state.pins = structuredClone(next.pins);
+    if (next.sessionTitles && typeof next.sessionTitles === "object")
+      this.state.sessionTitles = cleanStringRecord(next.sessionTitles);
+    if (next.forkParents && typeof next.forkParents === "object")
+      this.state.forkParents = cleanStringRecord(next.forkParents);
     this.persist();
     return this.get();
   }
@@ -52,4 +59,14 @@ export class VaultUiStateStore {
       // best-effort persistence
     }
   }
+}
+
+function cleanStringRecord(input: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    const key = rawKey.trim();
+    const value = typeof rawValue === "string" ? rawValue.trim() : "";
+    if (key && value) out[key] = value;
+  }
+  return out;
 }

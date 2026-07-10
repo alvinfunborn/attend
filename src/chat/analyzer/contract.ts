@@ -11,7 +11,7 @@ export const RESPONSE_SHAPE = `{"brief":"<≤8 word title of what this session i
  "state":"<continue_ready|needs_decision|needs_input|blocked|needs_review|followup_suggested|done>",
  "priority":<0-10 number, higher = more business-important in this workspace>,
  "etaMin":<estimated minutes to re-engage: re-read the last turn + reply>,
- "reason":"<one short observation>"}`;
+ "reason":"<one short current observation explaining the state, priority, or immediate step>"}`;
 
 export const REQUEST_RULES = `- "brief" is the best glance label for a crowded session list: short, specific, and enough to recognize which thread this is among many active sessions.
 - Prefer the most durable subject / decision / outcome over a bare activity word.
@@ -29,6 +29,7 @@ export const REQUEST_RULES = `- "brief" is the best glance label for a crowded s
   - "followup_suggested": the original task is complete, but the assistant found optional extra work or observations.
   - "done": the current task is complete and no human action is requested.
 - "priority" is workspace-level business importance, separate from "state": production/user-facing issues, deployment validation, data loss, broken builds, deadlines, or blocked collaborators should score higher; routine cleanup or optional follow-ups should score lower.
+- "reason" is volatile current context, not a second title: briefly explain the latest state/priority, evidence, or immediate routine step without repeating "brief".
 - "reason" must be a neutral observation, never second-person pressure or a verdict.`;
 
 /** The per-turn analyze prompt. Identical across vendors. */
