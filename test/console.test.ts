@@ -346,8 +346,9 @@ describe("renderConsole", () => {
     expect(html).toContain("function onBusSessionEvent(message)");
     expect(html).toContain("message.kind==='session_event'");
     expect(html).toContain("liveEventChain=liveEventChain.then(function()");
+    expect(html).toContain("onEvent(ev, String(s.sessionId||''), emittedAt);");
     expect(html).toContain(
-      "if(cur===s){ onEvent(ev, String(s.sessionId||''), emittedAt); return; }",
+      "if(ev.kind==='result'||ev.kind==='error') reconcileMissingTranscriptBaseline(s);",
     );
     expect(html).toContain("cacheTranscriptAssistantText(s, ev.text)");
     expect(html).toContain(
@@ -383,7 +384,7 @@ describe("renderConsole", () => {
   it("renders restored queued drafts after clearing stale selected-session turn state", () => {
     const html = renderConsole(view);
     const selectBody = html.slice(
-      html.indexOf("function select(s, opts){"),
+      html.indexOf("function select(s){"),
       html.indexOf("if(s.pendingFork){"),
     );
     expect(selectBody.indexOf("turnActive=false")).toBeGreaterThan(-1);
@@ -395,10 +396,36 @@ describe("renderConsole", () => {
   it("does not change recent ordering merely because a session was opened", () => {
     const html = renderConsole(view);
     expect(html).toContain("if(s && s.sortTs==null && s.lastTs!=null) s.sortTs=s.lastTs;");
-    expect(html).toContain("hydrateSessionSource(s, {force:isRefresh,preserveSort:!isRefresh})");
+    expect(html).toContain("loadTranscriptBaseline(s,{preserveSort:true})");
     expect(html).toContain(
       "if(!preserveSort){ syncActivitySortTs(s, found.lastTs); sortSessions(); }",
     );
+  });
+
+  it("uses persisted messages as a one-time baseline and SSE as navigation state", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var transcriptBaselines = {};");
+    expect(html).toContain("function hasTranscriptBaseline(s)");
+    expect(html).toContain("function loadTranscriptBaseline(s, opts)");
+    expect(html).toContain("if(!opts.force && hasTranscriptBaseline(s))");
+    expect(html).toContain("if(hasTranscriptBaseline(s)){");
+    expect(html).toContain("var selectionGeneration=++transcriptSelectionGeneration;");
+    expect(html).toContain(
+      "var selectionIsCurrent=function(){ return cur===s && selectionGeneration===transcriptSelectionGeneration; };",
+    );
+    expect(html).toContain("if(Number(s._busVersion||0)!==busVersion)");
+    const selectBody = html.slice(
+      html.indexOf("function select(s){"),
+      html.indexOf("function refreshCurrentChat(){"),
+    );
+    expect(selectBody).not.toContain("fetch('/chat/messages");
+    const refreshBody = html.slice(
+      html.indexOf("function refreshCurrentChat(){"),
+      html.indexOf("function liveStartedAt(", html.indexOf("function refreshCurrentChat(){")),
+    );
+    expect(refreshBody).toContain("loadTranscriptBaseline(s,{force:true,preserveSort:false})");
+    expect(refreshBody).toContain("if(!before || !sameTranscript(before,next))");
+    expect(refreshBody).not.toContain("select(cur");
   });
 
   it("projects composer drafts only after the composer loses focus", () => {
@@ -636,6 +663,12 @@ describe("renderConsole", () => {
     expect(html).toContain("finishHistoryLoad();");
     expect(html).not.toContain("var liveStarted=false;");
     expect(html).not.toContain("startLive();");
+  });
+
+  it("restores visible parent history for context-seeded forks", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var needsParent=!!(parent && (s.vendor==='cursor' || parent.vendor!==s.vendor));");
+    expect(html).toContain("cloneTranscriptMsgs(parentMsgs||[]).concat(cloneTranscriptMsgs(msgs))");
   });
 
   it("does not apply selected-stream replay dedupe to bus events", () => {

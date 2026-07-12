@@ -56,13 +56,20 @@ Requirements:
 Scan the current directory:
 
 ```bash
-npx attend
+npx @sinphife/attend
 ```
 
 Scan specific project roots or use another port:
 
 ```bash
-npx attend ~/projects ~/work --port 5050
+npx @sinphife/attend ~/projects ~/work --port 5050
+```
+
+Or install the `attend` command globally:
+
+```bash
+npm install --global @sinphife/attend
+attend
 ```
 
 Run directly from GitHub:

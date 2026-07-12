@@ -1826,6 +1826,12 @@ window.__CHANGELOG__ = ${changelogJson};
   var sessionQueueEditing = {};
   var queueParked = false;
   var transcriptCache = {};
+  // A cache entry created by SSE may contain only the live tail of a session.
+  // Track which entries have a persisted /chat/messages baseline so navigation
+  // can distinguish a complete transcript from a useful-but-partial live cache.
+  var transcriptBaselines = {};
+  var transcriptLoads = {};
+  var transcriptSelectionGeneration = 0;
   var draftAttachments = [];
   var newAttachments = [];
   var refreshBusy = false;
@@ -3327,6 +3333,19 @@ window.__CHANGELOG__ = ${changelogJson};
   function transcriptCacheKey(file, vendor){
     return file ? String(vendor||'claude')+'|'+String(file) : '';
   }
+  function transcriptStateKeys(s){
+    var keys=[];
+    if(s && s.sessionId) keys.push('sid:'+s.sessionId);
+    var fileKey=s&&transcriptCacheKey(s.file,s.vendor);
+    if(fileKey) keys.push(fileKey);
+    return keys;
+  }
+  function hasTranscriptBaseline(s){
+    return transcriptStateKeys(s).some(function(key){ return transcriptBaselines[key]===true; });
+  }
+  function markTranscriptBaseline(s){
+    transcriptStateKeys(s).forEach(function(key){ transcriptBaselines[key]=true; });
+  }
   function cloneTranscriptMsgs(msgs){
     return Array.isArray(msgs) ? msgs.map(function(m){
       var ts=transcriptTs(m);
@@ -3391,6 +3410,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var copy=cloneTranscriptMsgs(msgs);
     if(s && s.sessionId) transcriptCache['sid:'+s.sessionId]=copy;
     if(s && s.file) transcriptCache[transcriptCacheKey(s.file, s.vendor)] = copy;
+    markTranscriptBaseline(s);
     return copy;
   }
   function ensureTranscriptState(s){
@@ -4001,7 +4021,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var i=pins.findIndex(function(p){ return p.key===key; });
     if(i>=0) pins.splice(i,1);
     else {
-      var text=previewTextFromMsg(msgEl);
+    var text=previewTextFromMsg(msgEl);
       if(!text) return;
       pins.push({ key:key, role:chatBlockRole(msgEl), text:text.slice(0, 1200), pinnedAt:Date.now() });
     }
@@ -6959,15 +6979,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function warmTranscriptCache(s){
     if(!s || !s.sessionId || s.pendingFork || s._warmingTranscript) return Promise.resolve();
     s._warmingTranscript = true;
-    return hydrateSessionSource(s).then(function(found){
-      if(!found || !found.file) return;
-      return fetch('/chat/messages?file='+encodeURIComponent(found.file)+'&vendor='+encodeURIComponent(found.vendor||''))
-        .then(function(r){ return r.json(); })
-        .then(function(msgs){
-          if(Array.isArray(msgs)) cacheTranscript(found, msgs);
-        })
-        .catch(function(){});
-    }).catch(function(){})
+    return loadTranscriptBaseline(s,{force:true,preserveSort:true}).catch(function(){})
       .finally(function(){ s._warmingTranscript = false; });
   }
 
@@ -8281,10 +8293,72 @@ window.__CHANGELOG__ = ${changelogJson};
     return d;
   }
 
-  function select(s, opts){
-    opts = opts || {};
-    var isRefresh = !!opts.refresh;
-    if(!isRefresh && refreshBusy) setRefreshBusy(false);
+  function transcriptLoadKey(s){
+    if(!s) return '';
+    return s.sessionId ? ('sid:'+s.sessionId) : transcriptCacheKey(s.file,s.vendor);
+  }
+  function loadTranscriptBaseline(s, opts){
+    opts=opts||{};
+    if(!s) return Promise.resolve([]);
+    if(!opts.force && hasTranscriptBaseline(s)) return Promise.resolve(cachedTranscriptFor(s)||[]);
+    var key=transcriptLoadKey(s);
+    if(key && transcriptLoads[key]) return transcriptLoads[key];
+    var busVersion=Number(s._busVersion||0);
+    var load=hydrateSessionSource(s,{force:!!opts.force,preserveSort:opts.preserveSort!==false}).then(function(){
+      if(!s.file) return cachedTranscriptFor(s)||[];
+      return fetch('/chat/messages?file='+encodeURIComponent(s.file)+'&vendor='+encodeURIComponent(s.vendor||''))
+        .then(function(r){ return r.json(); })
+        .then(function(msgs){
+          msgs=Array.isArray(msgs)?msgs:[];
+          // Cursor has no headless native fork, and cross-provider forks cannot
+          // copy the provider's transcript. In both cases the backend seeds the
+          // new run with a hidden context prompt. That prompt gives the model the
+          // history, but transcript readers intentionally hide it from the chat.
+          // Re-project the parent's visible messages when rebuilding the branch
+          // from disk so refresh/navigation does not turn a fork into an
+          // apparently empty conversation. The child's first visible user row
+          // (the fork opener) remains in the child rows and follows the parent.
+          var parentId=String(s.forkParentId||'').trim();
+          var parent=parentId ? findSessionById(parentId) : null;
+          var needsParent=!!(parent && (s.vendor==='cursor' || parent.vendor!==s.vendor));
+          if(needsParent){
+            return loadTranscriptBaseline(parent,{preserveSort:true}).catch(function(){
+              return cachedTranscriptFor(parent)||[];
+            }).then(function(parentMsgs){
+              return cloneTranscriptMsgs(parentMsgs||[]).concat(cloneTranscriptMsgs(msgs));
+            });
+          }
+          return msgs;
+        })
+        .then(function(msgs){
+          // Do not let a snapshot taken during active SSE delivery overwrite
+          // newer deltas. The completed turn will reconcile once the stream is
+          // quiet; until then the live cache remains the authoritative view.
+          if(Number(s._busVersion||0)!==busVersion) return cachedTranscriptFor(s)||msgs;
+          return cacheTranscript(s,msgs);
+        });
+    }).finally(function(){ if(key && transcriptLoads[key]===load) delete transcriptLoads[key]; });
+    if(key) transcriptLoads[key]=load;
+    return load;
+  }
+  function reconcileMissingTranscriptBaseline(s){
+    if(!s || hasTranscriptBaseline(s)) return;
+    Promise.resolve().then(function(){
+      return loadTranscriptBaseline(s,{force:true,preserveSort:true});
+    }).then(function(){
+      // A load already in flight may have been rejected as stale by an SSE
+      // delta. Once the terminal event has landed, one quiet retry is enough.
+      if(!hasTranscriptBaseline(s)) return loadTranscriptBaseline(s,{force:true,preserveSort:true});
+    }).then(function(){
+      if(cur!==s || turnActive || !hasTranscriptBaseline(s)) return;
+      var next=cachedTranscriptFor(s)||[];
+      renderPersistedAndPending(next,s.sessionId);
+    }).catch(function(){});
+  }
+
+  function select(s){
+    var selectionGeneration=++transcriptSelectionGeneration;
+    if(refreshBusy) setRefreshBusy(false);
     flushVisit(false);
     stashComposerDraft(cur);
     stashAttachmentState(cur);
@@ -8316,6 +8390,7 @@ window.__CHANGELOG__ = ${changelogJson};
     else {
       var loading=el('div','placeholder','Loading…'); loading.id='ph'; replaceMessages(loading);
     }
+    var selectionIsCurrent=function(){ return cur===s && selectionGeneration===transcriptSelectionGeneration; };
     renderQueue();
     if(s.pendingFork){
       // A fork opened WITH an opening turn belongs to materializeFork(), which
@@ -8323,104 +8398,70 @@ window.__CHANGELOG__ = ${changelogJson};
       // turn. The empty-fork "type your next message" hint below is only for a
       // fork still awaiting its first message — starting it here would land
       // after materializeFork and erase the opener. Skip the async path outright.
-      if(s.pendingFork.opener){ if(isRefresh) setRefreshBusy(false); return; }
+      if(s.pendingFork.opener) return;
       var parent=findSessionById(s.pendingFork.parent) || {
         sessionId:s.pendingFork.parent,
         vendor:s.vendor||'claude',
         cwd:s.pendingFork.cwd||'',
         file:''
       };
-      hydrateSessionSource(parent).then(function(){
+      var finishEmptyFork=function(msgs){
+        if(!selectionIsCurrent() || !s.pendingFork || s.pendingFork.materializing) return;
+        renderPersistedAndPending(msgs||[], null);
+        addMsg('assistant','(forked with '+forkConfigLabel(s)+' — type your next message to continue this branch in a new direction)');
+        beginVisit(s);
+        syncOpenHeader();
+      };
+      loadTranscriptBaseline(parent,{preserveSort:true}).then(function(msgs){
         // Opener forks already returned above, so we're an empty fork here — but
         // the user may have typed + sent before this async resolved, in which
         // case send()→materializeFork() has taken over (setting materializing,
         // then clearing pendingFork once /chat/fork returns). Bail rather than
         // landing the placeholder on top of that opener.
-        if(!s.pendingFork || s.pendingFork.materializing){ if(isRefresh) setRefreshBusy(false); return; }
-        if(parent.file){
-          fetch('/chat/messages?file='+encodeURIComponent(parent.file)+'&vendor='+encodeURIComponent(parent.vendor||s.vendor||'')).then(function(r){return r.json();}).then(function(msgs){
-            cacheTranscript(parent, msgs);
-            renderPersistedAndPending(msgs, null);
-            addMsg('assistant','(forked with '+forkConfigLabel(s)+' — type your next message to continue this branch in a new direction)');
-            if(cur===s) beginVisit(s);
-            if(isRefresh) setRefreshBusy(false);
-          }).catch(function(){
-            var fallback=cachedTranscriptFor(parent) || [];
-            renderPersistedAndPending(fallback, null);
-            addMsg('assistant','(forked with '+forkConfigLabel(s)+' — type your next message to continue this branch in a new direction)');
-            if(cur===s) beginVisit(s);
-            if(isRefresh) setRefreshBusy(false);
-          });
-        } else {
-          renderPersistedAndPending(cachedTranscriptFor(parent) || [], null);
-          addMsg('assistant','(forked with '+forkConfigLabel(s)+' — type your next message to continue this branch in a new direction)');
-          if(cur===s) beginVisit(s);
-          if(isRefresh) setRefreshBusy(false);
-        }
-        if(cur===s) syncOpenHeader();
-      }).catch(function(){ if(isRefresh) setRefreshBusy(false); });
+        finishEmptyFork(msgs);
+      }).catch(function(){ finishEmptyFork(cachedTranscriptFor(parent)||[]); });
       return;
     }
-    var finishRefresh=function(){ if(isRefresh) setRefreshBusy(false); };
     var finishHistoryLoad=function(){
+      if(!selectionIsCurrent()) return;
       syncCurrentLiveState(s);
-      if(cur===s) beginVisit(s);
-      finishRefresh();
+      beginVisit(s);
     };
-    var fetchHistory=function(sourceRetried){
-      if(!s.file){
-        if(!cached) renderSessionHistory(s, []);
-        finishHistoryLoad();
-        return;
-      }
-      var boundFile=s.file;
-      var boundVendor=s.vendor||'';
-      fetch('/chat/messages?file='+encodeURIComponent(boundFile)+'&vendor='+encodeURIComponent(boundVendor)).then(function(r){return r.json();}).then(function(msgs){
-        if(cur!==s) return;
-        if((!Array.isArray(msgs) || !msgs.length) && !sourceRetried && s.sessionId){
-          return hydrateSessionSource(s, {force:true,preserveSort:!isRefresh}).then(function(found){
-            if(cur!==s) return;
-            var nextFile=found&&found.file||'';
-            var nextVendor=found&&found.vendor||s.vendor||'';
-            if(nextFile && (nextFile!==boundFile || nextVendor!==boundVendor)) return fetchHistory(true);
-            msgs = Array.isArray(msgs) ? msgs : [];
-            var prevAfterRetry=cachedTranscriptFor(s);
-            if(!prevAfterRetry || !sameTranscript(prevAfterRetry, msgs)) renderSessionHistory(s, msgs);
-            else cacheTranscript(s, msgs);
-            finishHistoryLoad();
-          }).catch(function(){
-            if(cur!==s) return;
-            msgs = Array.isArray(msgs) ? msgs : [];
-            var prevAfterFail=cachedTranscriptFor(s);
-            if(prevAfterFail && s._busVersion) cacheTranscript(s, prevAfterFail);
-            else if(!prevAfterFail || !sameTranscript(prevAfterFail, msgs)) renderSessionHistory(s, msgs);
-            else cacheTranscript(s, msgs);
-            finishHistoryLoad();
-          });
-        }
-        msgs = Array.isArray(msgs) ? msgs : [];
-        var prev=cachedTranscriptFor(s);
-        if(prev && s._busVersion) cacheTranscript(s, prev);
-        else if(!prev || !sameTranscript(prev, msgs)) renderSessionHistory(s, msgs);
-        else cacheTranscript(s, msgs);
-        finishHistoryLoad();
-      }).catch(function(){
-        if(cur!==s) return;
-        if(!cachedTranscriptFor(s)) renderSessionHistory(s, []);
-        finishHistoryLoad();
-      });
-    };
-    hydrateSessionSource(s, {force:isRefresh,preserveSort:!isRefresh}).then(function(){
-      if(cur!==s) return;
-      fetchHistory();
-      if(cur===s) syncOpenHeader();
-      renderSidebar();
-    }).catch(function(){ if(isRefresh) setRefreshBusy(false); });
+    // Navigation is cache-only once a complete baseline exists. /chat/messages
+    // is reserved for first open, explicit refresh, and later gap recovery.
+    if(hasTranscriptBaseline(s)){
+      finishHistoryLoad();
+      if(!s.file) hydrateSessionSource(s,{preserveSort:true}).then(function(){
+        if(selectionIsCurrent()){ syncOpenHeader(); renderSidebar(); }
+      }).catch(function(){});
+      return;
+    }
+    var rendered=cached;
+    loadTranscriptBaseline(s,{preserveSort:true}).then(function(msgs){
+      if(!selectionIsCurrent()) return;
+      var next=cachedTranscriptFor(s)||msgs||[];
+      if(!rendered || !sameTranscript(rendered,next)) renderPersistedAndPending(next,s.sessionId);
+      syncOpenHeader(); renderSidebar(); finishHistoryLoad();
+    }).catch(function(){
+      if(!selectionIsCurrent()) return;
+      if(!cachedTranscriptFor(s)) renderSessionHistory(s,[]);
+      finishHistoryLoad();
+    });
   }
   function refreshCurrentChat(){
     if(!cur) return;
+    var s=cur;
+    var before=cachedTranscriptFor(s);
+    var selectionGeneration=++transcriptSelectionGeneration;
     setRefreshBusy(true);
-    select(cur, {refresh:true});
+    loadTranscriptBaseline(s,{force:true,preserveSort:false}).then(function(msgs){
+      if(cur!==s || selectionGeneration!==transcriptSelectionGeneration) return;
+      var next=cachedTranscriptFor(s)||msgs||[];
+      if(!before || !sameTranscript(before,next)) renderPersistedAndPending(next,s.sessionId);
+      syncOpenHeader(); renderSidebar(); syncCurrentLiveState(s); beginVisit(s); setRefreshBusy(false);
+    }).catch(function(){
+      if(cur===s && selectionGeneration===transcriptSelectionGeneration) setRefreshBusy(false);
+    });
   }
   function liveStartedAt(res, sessionId){
     if(!res || !res.startedAt || !sessionId) return 0;
@@ -8646,7 +8687,11 @@ window.__CHANGELOG__ = ${changelogJson};
     } else if((ev.kind==='assistant_text' && ev.text) || ev.kind==='tool_use' || ev.kind==='tool_result') s.lastAssistantOutputAt=emittedAt;
     else if(ev.kind==='result' || ev.kind==='error') finishGenerationTiming(s,emittedAt,generationOutcome(ev));
     syncLiveTiming(s);
-    if(cur===s){ onEvent(ev, String(s.sessionId||''), emittedAt); return; }
+    if(cur===s){
+      onEvent(ev, String(s.sessionId||''), emittedAt);
+      if(ev.kind==='result'||ev.kind==='error') reconcileMissingTranscriptBaseline(s);
+      return;
+    }
     if(ev.kind==='user_turn_started'){
       var userTurn={text:ev.text||'',attachments:Array.isArray(ev.attachments)?ev.attachments:[]};
       var userShown=shownTurnText(userTurn);
@@ -8674,6 +8719,7 @@ window.__CHANGELOG__ = ${changelogJson};
       s.lastAssistantOutputAt=null;
       markUnread(s);
       refreshAnalysis(s);
+      reconcileMissingTranscriptBaseline(s);
     }
     applyGenerating(s);
     // Text/tool deltas only affect nodes already registered for this session:

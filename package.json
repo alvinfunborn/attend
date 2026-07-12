@@ -1,5 +1,5 @@
 {
-  "name": "attend",
+  "name": "@sinphife/attend",
   "version": "1.0.0",
   "description": "Local web dashboard for AI coding sessions, with integrations for Claude Code, Codex/ChatGPT, and Cursor CLI.",
   "repository": {
