@@ -1,111 +1,95 @@
 # attend
 
-> A local console for managing many Claude Code and Codex sessions.
+A local attention-management console for AI coding tasks. Current integrations: Claude Code, Codex/ChatGPT, and Cursor CLI.
 
 [中文 README](README.zh-CN.md)
 
-## Product Idea
+Attend began with a simple need: **add tags to tasks**.
 
-When you run many AI coding sessions, the hard part is choosing what to pick up next.
+When AI coding work spreads across many sessions, finding a session by project or recency is not enough. Tags provide the first useful layer: group related tasks, build focused views, and return to the right work without reconstructing the whole workspace. From that starting point, Attend grew into a set of attention-management tools for answering the next questions: Which task is still running? Which one replied? What needs a decision? What can wait? Which side discussion deserves to become its own task?
 
-`attend` treats every session as a piece of local working memory. It gives each thread enough signals to answer quickly:
+Attend keeps those signals next to the actual conversations, so organizing work and advancing it happen in the same local interface. The server binds to `127.0.0.1` by default.
 
-- What was this session about?
-- Is the AI still working, waiting, or done for now?
-- What does the AI need from me next?
-- How important is this inside this vault?
-- How expensive is it to re-enter?
-- Should I continue here or fork a new branch?
+## From tags to attention management
 
-## Core Signals
+- **Organize with tags.** Add tags to sessions, filter by any or all selected tags, and save reusable **Focus** views for recurring contexts.
+- **See what needs attention.** Switch between **All**, **Active**, and **Unread**; track `generating`, `new reply`, `in progress`, and `read`; archive seen work in the current view.
+- **Keep enough context to re-enter.** Search session metadata and transcripts, edit titles, pin important messages, and use `brief`, `state`, `priority`, `etaMin`, and `reason` as compact handoff signals.
+- **Separate work without losing its origin.** Fork sessions into related branches, view them as a fork tree, or start a comment thread on one response and promote that discussion into a regular session when it becomes a task of its own.
+- **Advance work where it is tracked.** Continue conversations, attach files, stop turns, and queue or edit follow-up messages without leaving the attention view.
+- **Review the shape of the workload.** Inspect local statistics for sessions, prompts, conversation volume, generation overlap, and session breadth.
 
-### Breathing Light
+## Features
 
-The light shows the session's live attention status:
+The detailed feature list follows the controls and tooltips in the current UI.
 
-- `generating`: the AI is working.
-- `unread`: a background reply is ready.
-- `seen`: you have looked at it, and it is still being tracked.
-- `read`: you parked it.
+- Browse sessions under one or more project directories. Search session metadata and transcript content.
+- Switch between **All**, **Active**, **Unread**, and reusable **Focus** views.
+- Add session tags, filter by any or all selected tags, and narrow the list by priority.
+- Track attention with four statuses: `generating`, `new reply`, `in progress`, and `read`. Statuses can be changed from the session list, and seen sessions in the current view can be archived together.
+- Start or continue sessions from an available vendor in the browser. Choose the vendor and its supported run options for the next action.
+- Attach or paste images and files, stop a running turn, and queue, edit, send, or delete follow-up messages.
+- Edit a session title and adjust its state, priority, or estimated re-entry time.
+- Comment on an AI response, including one that is still generating. Comments continue in a hidden side session, accept queued replies, and can be promoted into regular sessions. The first comment pins the response, and later replies can be opened from the response or its pin.
+- Pin messages, collapse completed turns, refresh a chat from its transcript, preview attachments and diagrams, and reveal referenced local paths.
+- Fork a session using the current draft as the opening turn. Forks may keep the same provider or switch providers, and related sessions can be viewed as a fork tree.
+- View local work statistics for recent sessions, prompts, conversation volume, and session breadth.
+- Use light or dark theme. UI preferences and Attend-owned session metadata are stored locally.
 
-This is the quickest way to see where the machine changed state while you were elsewhere.
+Some sessions also show analyzer-provided fields:
 
-### `brief`
+- `brief`: a short description of the current thread.
+- `state`: the suggested next handoff, such as `needs_input`, `needs_review`, or `done`.
+- `priority`: relative priority within the current vault.
+- `etaMin`: estimated minutes needed to re-enter the thread.
+- `reason`: a short explanation for the current signals.
 
-`brief` is the memory anchor for a session. It is the short label that lets you recognize the thread in a crowded list.
-
-It should capture the durable subject or decision point, especially when a long session has moved away from its original prompt.
-
-### `priority`
-
-`priority` is the session's relative importance inside the current vault, scored `0-10`.
-
-It favors work that affects users, production, deadlines, collaborators, deploys, broken builds, or the main goal of the vault.
-
-### `etaMin`
-
-`etaMin` estimates the minutes needed to re-enter the session, reread the latest state, and respond usefully.
-
-Low ETA is good for quick cleanup. High ETA means the session needs a real attention block.
-
-### `state`
-
-`state` is the AI's handoff label: what it thinks should happen next.
-
-- `continue_ready`: the next step is clear.
-- `needs_decision`: you need to choose a direction, scope, or tradeoff.
-- `needs_input`: the AI needs facts, files, credentials, environment details, or preferences.
-- `blocked`: progress is stopped by tooling, auth, CI, dependencies, or an external service.
-- `needs_review`: work is ready for your check.
-- `followup_suggested`: the task is done, with optional follow-up.
-- `done`: no next action is requested.
-
-### `avoidance`
-
-`avoidance` describes one engagement pattern:
-
-- `avoidance`: you keep returning and reading, but the task does not advance.
-
-It comes from local engagement telemetry such as visits, dwell time, scrolling, and prompts.
-
-## Tags
-
-Tags are built for large session lists:
-
-- global tags and per-session tags
-- automatic grouping by vendor and project directory
-- OR-style filtering for fast narrowing
-- assignments stored on both session id and stable `vendor + cwd + brief` keys
-- inherited tags when a session is forked
-
-## Fast Fork
-
-Forking is a first-class action because long AI threads often split into investigation, implementation, and product decisions.
-
-`attend` lets you branch from the browser:
-
-- Claude uses native fork support.
-- Codex forks by copying the rollout and resuming the copy.
-- Cross-provider forks carry transcript context into the new provider.
-- The fork starts with your first new message and inherits the parent tags.
+These fields are editable where the UI provides a control. Older or externally created sessions may use local heuristics instead of an analyzer.
 
 ## Quick Start
 
-```bash
-# scan the current directory
-npx attend
+Requirements:
 
-# scan specific vault roots
-npx attend "~/projects" "~/work" --port 5050
+- Node.js `>= 20`
+- At least one supported CLI installed: Claude Code, Codex/ChatGPT, or Cursor CLI (`cursor-agent`)
+
+Scan the current directory:
+
+```bash
+npx attend
 ```
 
-Run from GitHub:
+Scan specific project roots or use another port:
+
+```bash
+npx attend ~/projects ~/work --port 5050
+```
+
+Run directly from GitHub:
 
 ```bash
 npx github:alvinfunborn/attend
 ```
 
-Local development:
+Attend opens `http://localhost:5050` unless `--no-open` is set.
+
+## CLI
+
+```text
+attend [dirs...] [options]
+attend new <name>
+
+  dirs                         Project roots used to scope the session list
+  new <name>                   Create projects/<name>/brief.md
+  -p, --port <n>               Port (default: 5050)
+      --host <addr>            Bind address (default: 127.0.0.1)
+  -c, --config <path>          Path to attend.config.json
+      --no-open                Do not open the browser
+      --e2ee-passphrase <text> Encrypt browser/server API payloads
+  -h, --help                   Help
+```
+
+## Development
 
 ```bash
 git clone https://github.com/alvinfunborn/attend
@@ -114,95 +98,9 @@ npm install
 npm run dev
 ```
 
-By default, `attend` opens `http://localhost:5050`.
-
-Requirements:
-
-- Node.js `>= 20`
-- Claude Code and/or Codex installed to read and continue their sessions
-
-## CLI
-
-```text
-attend [dirs...] [options]
-
-  dirs                 Vault roots to scan (default: current directory)
-  -p, --port <n>       Port (default: 5050)
-      --host <addr>    Host to bind (default: 127.0.0.1)
-  -c, --config <path>  Path to attend.config.json
-      --no-open        Do not open the browser
-  -h, --help           Help
-```
-
-Precedence:
-
-```text
-CLI args > env > config file > platform defaults
-```
-
-Common environment variables:
-
-- `ATTEND_VAULTS`
-- `ATTEND_PORT`
-- `ATTEND_HOST`
-- `ATTEND_CLAUDE_PROJECTS`
-- `ATTEND_CLAUDE_MODELS` (manual comma-separated override)
-- `ATTEND_CLAUDE_MODELS_CACHE`
-- `ATTEND_CODEX_SESSIONS`
-- `ATTEND_CODEX_MODELS_CACHE`
-- `ATTEND_TAGS`
-
-When Attend is launched with a single vault root, user-owned state lives under
-`<vault>/.attend/`: tags, session status, overrides, engagement telemetry, and
-browser-independent UI state (theme, focus definitions, model/effort history,
-and message pins). Only daemon mappings and analysis cache remain global under
-`~/.attend/`. Device-only controls stay in browser storage: tag-filter mode,
-priority filter, active focus, sidebar width, and folded turns. Without a scoped
-vault, the legacy global fallback remains available. `ATTEND_TAGS` overrides the
-default tag path.
-
-Example `attend.config.json`:
-
-```json
-{
-  "vaultRoots": ["D:\\workspace\\projects", "C:\\Users\\you\\notes"],
-  "claudeProjects": "C:\\Users\\you\\.claude\\projects",
-  "claudeModelsCache": "C:\\Users\\you\\.claude\\cache\\gateway-models.json",
-  "codexSessions": "C:\\Users\\you\\.codex\\sessions",
-  "codexModelsCache": "C:\\Users\\you\\.codex\\models_cache.json",
-  "memorySources": [],
-  "port": 5050
-}
-```
-
-## How Signals Are Produced
-
-Sessions created or forked inside `attend` get an analyzer daemon. After the session advances, the daemon returns:
-
-```json
-{
-  "brief": "tighten tag filtering",
-  "state": "needs_review",
-  "priority": 7.2,
-  "etaMin": 12,
-  "reason": "navigation behavior changed and needs QA"
-}
-```
-
-Older or externally created sessions fall back to local heuristics.
-
-## Boundaries
-
-- Local-first, single-user tool.
-- Data stays on your machine.
-- Focused on session triage, resume, and fork.
-- Browser UI over a local server.
-
-## Development
+Checks:
 
 ```bash
-npm install
-npm run dev
 npm test
 npm run typecheck
 npm run lint

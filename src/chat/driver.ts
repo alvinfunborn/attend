@@ -1,9 +1,9 @@
-import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import type { UiEvent } from "./events.js";
 
-export type SessionEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+/** Opaque vendor-advertised effort identifier; Attend never enumerates these. */
+export type SessionEffort = string;
 
-/** Inputs to (re)start a chat run. `permissionMode` is Claude-only; Codex ignores it. */
+/** Inputs to (re)start a chat run. Provider-specific values stay opaque here. */
 export interface StartOpts {
   cwd: string;
   /** Stable browser/UI identity while the provider session id is still unknown. */
@@ -14,7 +14,7 @@ export interface StartOpts {
   firstAttachments?: ChatAttachment[];
   model?: string;
   effort?: SessionEffort;
-  permissionMode?: PermissionMode;
+  permissionMode?: string;
 }
 
 export interface ImageAttachment {
@@ -73,11 +73,8 @@ export interface ActiveSessionState {
 }
 
 /**
- * What the server needs from a chat backend, independent of vendor. Both engines
- * implement it: `ChatEngine` (Claude, Agent SDK, one long-lived streaming process)
- * and `CodexEngine` (Codex, `codex exec` — one process per turn). The server holds
- * one driver per vendor and dispatches by the session's vendor (invariant 4:
- * vendor-neutral data, vendor-locked execution).
+ * Attend's provider port. SDKs, app servers, and process transports implement
+ * this interface while the HTTP/SSE/queue layers remain vendor-neutral.
  */
 export interface ChatDriver {
   readonly vendor: string;

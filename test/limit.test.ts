@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RawSession } from "../src/core/types.js";
@@ -72,6 +73,11 @@ describe("withinScope", () => {
 
   it("matches any of several roots", () => {
     expect(withinScope(path.join(other, "x"), [proj, other])).toBe(true);
+  });
+
+  it("matches filesystem aliases such as macOS /tmp and /private/tmp", () => {
+    const realTmp = fs.realpathSync.native("/tmp");
+    expect(withinScope(path.join(realTmp, "attend-project"), ["/tmp"])).toBe(true);
   });
 
   it("excludes a session with no cwd once a scope is active", () => {

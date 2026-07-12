@@ -18,6 +18,7 @@ function session(id: string, prompts: number[]): RawSession {
     firstTs: prompts[0] ?? null,
     lastTs: prompts.at(-1) ?? null,
     userPromptTs: prompts,
+    userPromptActivity: prompts.map((at) => ({ at, chars: id.length })),
     prompts: prompts.length,
     actions: 0,
     visits: 1,
@@ -47,6 +48,20 @@ describe("WorkEventStore", () => {
       "user_prompt",
       "turn_started",
     ]);
+    expect(
+      reloaded.filter((event) => event.kind === "user_prompt").map((event) => event.chars),
+    ).toEqual([2, 2]);
+  });
+
+  it("enriches a legacy live prompt with transcript character counts", () => {
+    const file = path.join(os.tmpdir(), `attend-work-events-${Date.now()}-chars.json`);
+    const store = new WorkEventStore(file);
+    const now = Date.now();
+    store.record({ kind: "user_prompt", at: now, sessionId: "hello", source: "live" });
+
+    expect(store.backfillPrompts([session("hello", [now])])).toBe(1);
+    expect(store.list()[0]?.chars).toBe(5);
+    fs.rmSync(file, { force: true });
   });
 
   it("deduplicates repeated live callbacks within the configured window", () => {

@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { defaultClaudeModelsCachePath } from "./core/vendor/claude-models.js";
 import { defaultCodexModelsCachePath } from "./core/vendor/codex-models.js";
-import { resolveCodexBin } from "./core/vendor/detect.js";
+import { defaultCursorStateDbPath } from "./core/vendor/cursor-models.js";
+import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "./core/vendor/detect.js";
 
 export interface AttendConfig {
   /**
@@ -14,17 +14,23 @@ export interface AttendConfig {
   scopeRoots: string[];
   /** ~/.claude/projects */
   claudeProjects: string;
-  /** Manual Claude model override list. Empty = detected models / UI fallback. */
-  claudeModels: string[];
-  /** Claude Code gateway model cache, when its discovery is enabled locally. */
-  claudeModelsCache: string;
   /** ~/.codex/sessions */
   codexSessions: string;
+  /** ~/.cursor/projects (native Cursor IDE/CLI transcripts). */
+  cursorProjects: string;
+  /** Attend-captured Cursor CLI stream-json transcripts (compatibility fallback). */
+  cursorSessions: string;
+  /** Cursor Desktop's local model-picker state database. */
+  cursorStateDb: string;
   /** ~/.codex/models_cache.json */
   codexModelsCache: string;
+  /** concrete Claude Code executable used by the Agent SDK, or null to use its bundled CLI. */
+  claudeBin: string | null;
   /** resolved `codex` binary (PATH or app bundle), or null when not installed —
    *  gates in-browser Codex chat / the Codex daemon. */
   codexBin: string | null;
+  /** resolved `cursor-agent` binary, or null when it is not installed. */
+  cursorBin: string | null;
   /** Explicit memory files; when empty, per-project memory is auto-discovered. */
   memorySources: string[];
   port: number;
@@ -71,9 +77,10 @@ export interface CliInputs {
 interface ConfigFile {
   vaultRoots?: string[];
   claudeProjects?: string;
-  claudeModels?: string[];
-  claudeModelsCache?: string;
   codexSessions?: string;
+  cursorProjects?: string;
+  cursorSessions?: string;
+  cursorStateDb?: string;
   codexModelsCache?: string;
   memorySources?: string[];
   port?: number;
@@ -86,11 +93,14 @@ function platformDefaults(): AttendConfig {
   return {
     scopeRoots: [],
     claudeProjects: path.join(home, ".claude", "projects"),
-    claudeModels: [],
-    claudeModelsCache: defaultClaudeModelsCachePath(),
     codexSessions: path.join(home, ".codex", "sessions"),
+    cursorProjects: path.join(home, ".cursor", "projects"),
+    cursorSessions: path.join(attendHome, "cursor-sessions"),
+    cursorStateDb: defaultCursorStateDbPath(),
     codexModelsCache: defaultCodexModelsCachePath(),
+    claudeBin: resolveClaudeBin(),
     codexBin: resolveCodexBin(),
+    cursorBin: resolveCursorBin(),
     memorySources: [],
     port: 5050,
     host: "127.0.0.1",
@@ -180,17 +190,24 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     claudeProjects: path.resolve(
       env.ATTEND_CLAUDE_PROJECTS ?? file.claudeProjects ?? defaults.claudeProjects,
     ),
-    claudeModels: splitCsv(env.ATTEND_CLAUDE_MODELS) ?? file.claudeModels ?? defaults.claudeModels,
-    claudeModelsCache: path.resolve(
-      env.ATTEND_CLAUDE_MODELS_CACHE ?? file.claudeModelsCache ?? defaults.claudeModelsCache,
-    ),
     codexSessions: path.resolve(
       env.ATTEND_CODEX_SESSIONS ?? file.codexSessions ?? defaults.codexSessions,
+    ),
+    cursorProjects: path.resolve(
+      env.ATTEND_CURSOR_PROJECTS ?? file.cursorProjects ?? defaults.cursorProjects,
+    ),
+    cursorSessions: path.resolve(
+      env.ATTEND_CURSOR_SESSIONS ?? file.cursorSessions ?? defaults.cursorSessions,
+    ),
+    cursorStateDb: path.resolve(
+      env.ATTEND_CURSOR_STATE_DB ?? file.cursorStateDb ?? defaults.cursorStateDb,
     ),
     codexModelsCache: path.resolve(
       env.ATTEND_CODEX_MODELS_CACHE ?? file.codexModelsCache ?? defaults.codexModelsCache,
     ),
+    claudeBin: env.ATTEND_CLAUDE_BIN ?? defaults.claudeBin,
     codexBin: env.ATTEND_CODEX_BIN ?? defaults.codexBin,
+    cursorBin: env.ATTEND_CURSOR_BIN ?? defaults.cursorBin,
     memorySources: (file.memorySources ?? defaults.memorySources).map((p) => path.resolve(p)),
     port: Number.isFinite(port) ? port : defaults.port,
     host: cli.host ?? env.ATTEND_HOST ?? file.host ?? defaults.host,

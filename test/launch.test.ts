@@ -5,17 +5,22 @@ describe("buildCommand", () => {
   it("resume", () => {
     expect(buildCommand("resume", "claude", { sessionId: "x1" })).toBe("claude --resume x1");
     expect(buildCommand("resume", "codex", { sessionId: "x1" })).toBe("codex resume x1");
+    expect(buildCommand("resume", "cursor", { sessionId: "x1" })).toBe("cursor-agent --resume=x1");
   });
   it("fork", () => {
     expect(buildCommand("fork", "claude", { sessionId: "x1" })).toBe(
       "claude --resume x1 --fork-session",
     );
     expect(buildCommand("fork", "codex", { sessionId: "x1" })).toBe("codex fork x1");
+    expect(() => buildCommand("fork", "cursor", { sessionId: "x1" })).toThrow("interactive /fork");
   });
   it("new, with and without an initial prompt", () => {
     expect(buildCommand("new", "claude")).toBe("claude");
     expect(buildCommand("new", "codex", { prompt: "fix the bug" })).toBe('codex "fix the bug"');
     expect(buildCommand("new", "claude", { prompt: 'say "hi"' })).toBe('claude "say \\"hi\\""');
+    expect(buildCommand("new", "cursor", { model: "composer-2", prompt: "fix it" })).toBe(
+      'cursor-agent --model "composer-2" "fix it"',
+    );
   });
   it("new, with model and effort overrides", () => {
     expect(buildCommand("new", "claude", { model: "sonnet", effort: "high" })).toBe(

@@ -101,6 +101,8 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     firstTs: null,
     lastTs: null,
     userPromptTs: [],
+    userPromptActivity: [],
+    assistantTextActivity: [],
     prompts: 0,
     actions: 0,
     visits: 0,
@@ -132,7 +134,10 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     if (obj.type === "user") {
       const text = userPromptText(obj.message?.content);
       if (text !== null) {
-        if (ts !== null) session.userPromptTs?.push(ts);
+        if (ts !== null) {
+          session.userPromptTs?.push(ts);
+          session.userPromptActivity?.push({ at: ts, chars: text.length });
+        }
         session.prompts += 1;
         session.chars += text.length;
         if (session.title === null) session.title = snippet(text);
@@ -144,7 +149,10 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
       session.chars += txt;
       if (txt > 0) {
         session.lastTurnChars = txt;
-        if (ts !== null) session.lastAssistantTs = ts;
+        if (ts !== null) {
+          session.lastAssistantTs = ts;
+          session.assistantTextActivity?.push({ at: ts, chars: txt });
+        }
       }
     }
   }

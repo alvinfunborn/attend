@@ -22,7 +22,7 @@ export interface Brief {
   deferUntil: string | null;
 }
 
-/** One vendor session, normalized across Claude / Codex. */
+/** One vendor session normalized for the rest of Attend. */
 export interface RawSession {
   path: string;
   vendor: string;
@@ -42,10 +42,14 @@ export interface RawSession {
   /** epoch ms, or null when no timestamps were found */
   firstTs: number | null;
   lastTs: number | null;
-  /** epoch ms of the latest assistant text block, used for live output-silence timing. */
+  /** epoch ms of the latest assistant/tool activity, used for live quiet timing. */
   lastAssistantTs?: number | null;
   /** epoch ms timestamps for real user-authored prompts, newest not guaranteed. */
   userPromptTs?: number[];
+  /** timestamp + text length for exact prompt throughput windows. */
+  userPromptActivity?: Array<{ at: number; chars: number }>;
+  /** timestamp + visible assistant text length for exact total char throughput. */
+  assistantTextActivity?: Array<{ at: number; chars: number }>;
   prompts: number;
   actions: number;
   /** distinct engagement bursts — activity separated by a long idle gap counts as

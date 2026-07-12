@@ -190,11 +190,16 @@ describe("buildWorkStats", () => {
   it("reports exact trailing prompt totals instead of ambiguous hourly session rates", () => {
     const now = Date.now();
     const events = [
-      event("a1", "user_prompt", now - HOUR, "a"),
-      event("a2", "user_prompt", now - 2 * HOUR, "a"),
-      event("b1", "user_prompt", now - 3 * HOUR, "b"),
+      event("a1", "user_prompt", now - HOUR, "a", { chars: 10 }),
+      event("a2", "user_prompt", now - 2 * HOUR, "a", { chars: 20 }),
+      event("b1", "user_prompt", now - 3 * HOUR, "b", { chars: 30 }),
+      event("reply", "assistant_output", now - 30 * 60_000, "a", { chars: 40 }),
       event("old", "user_prompt", now - 25 * HOUR, "old"),
     ];
-    expect(trailingPromptActivity(events, now, 24)).toEqual({ sessions: 2, prompts: 3 });
+    expect(trailingPromptActivity(events, now, 24)).toEqual({
+      sessions: 2,
+      prompts: 3,
+      chars: 100,
+    });
   });
 });

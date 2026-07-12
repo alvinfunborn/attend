@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import type { RawSession } from "../core/types.js";
 import { readCodexTranscript } from "./codex/transcript.js";
+import { readCursorTranscript } from "./cursor/transcript.js";
 import { type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
 
 export interface SearchHit {
@@ -50,7 +51,12 @@ function readChunks(session: RawSession): SearchHit[] {
   }
   const cached = transcriptSearchCache.get(session.path);
   if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.chunks;
-  const read = session.vendor === "codex" ? readCodexTranscript : readClaudeTranscript;
+  const read =
+    session.vendor === "codex"
+      ? readCodexTranscript
+      : session.vendor === "cursor"
+        ? readCursorTranscript
+        : readClaudeTranscript;
   const chunks = chunksFromMessages(read(session.path, Number.POSITIVE_INFINITY));
   transcriptSearchCache.set(session.path, { mtimeMs: st.mtimeMs, size: st.size, chunks });
   return chunks;

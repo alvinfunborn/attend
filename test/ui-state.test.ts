@@ -15,6 +15,20 @@ describe("VaultUiStateStore", () => {
       pins: { "attend.pins.v1:s1": [{ key: "m:1", text: "keep" }] },
       sessionTitles: { s1: "Customer escalation" },
       forkParents: { s2: "s1" },
+      commentThreads: {
+        c1: {
+          id: "c1",
+          parentSessionId: "s1",
+          anchorKey: "assistant:1",
+          anchorText: "explanation",
+          providerSessionId: "side-1",
+          vendor: "claude",
+          cwd: dir,
+          createdAt: 123,
+          status: "unread",
+          messageCount: 2,
+        },
+      },
     });
 
     expect(new VaultUiStateStore(file).get()).toMatchObject({
@@ -24,6 +38,15 @@ describe("VaultUiStateStore", () => {
       pins: { "attend.pins.v1:s1": [{ key: "m:1", text: "keep" }] },
       sessionTitles: { s1: "Customer escalation" },
       forkParents: { s2: "s1" },
+      commentThreads: {
+        c1: expect.objectContaining({
+          parentSessionId: "s1",
+          anchorKey: "assistant:1",
+          providerSessionId: "side-1",
+          status: "unread",
+          messageCount: 2,
+        }),
+      },
     });
     fs.rmSync(dir, { recursive: true, force: true });
   });

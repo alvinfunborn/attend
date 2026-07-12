@@ -132,6 +132,52 @@ describe("makeCodexExec", () => {
 });
 
 describe("makeCodexFork", () => {
+  it("keeps a complete final JSONL record even before its trailing newline is appended", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-fork-"));
+    cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    fs.writeFileSync(
+      path.join(dir, "rollout-2026-06-01T00-00-00-parent-complete.jsonl"),
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: "parent-complete", session_id: "parent-complete", cwd: dir },
+      }),
+    );
+
+    const child = makeCodexFork(dir)("parent-complete");
+    expect(child).toBeTruthy();
+    const forkFile = fs.readdirSync(dir).find((name) => child && name.endsWith(`${child}.jsonl`));
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, forkFile ?? ""), "utf-8"));
+    expect(meta.payload).toMatchObject({ id: child, session_id: child });
+  });
+
+  it("drops an incomplete JSONL tail while the parent rollout is still being written", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-fork-"));
+    cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const meta = JSON.stringify({
+      type: "session_meta",
+      payload: { id: "parent-live", session_id: "parent-live", cwd: dir },
+    });
+    fs.writeFileSync(
+      path.join(dir, "rollout-2026-06-01T00-00-00-parent-live.jsonl"),
+      `${meta}\n{"type":"response_item","payload":{"type":"message"`,
+    );
+
+    const child = makeCodexFork(dir)("parent-live");
+    expect(child).toBeTruthy();
+    const forkFile = fs.readdirSync(dir).find((name) => child && name.endsWith(`${child}.jsonl`));
+    expect(forkFile).toBeTruthy();
+    const forkLines = fs
+      .readFileSync(path.join(dir, forkFile ?? ""), "utf-8")
+      .trim()
+      .split("\n");
+    expect(forkLines).toHaveLength(1);
+    expect(() => JSON.parse(forkLines[0] ?? "")).not.toThrow();
+    expect(JSON.parse(forkLines[0] ?? "").payload).toMatchObject({
+      id: child,
+      session_id: child,
+    });
+  });
+
   it("rewrites every session id field in the copied rollout metadata", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-fork-"));
     cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));

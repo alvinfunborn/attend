@@ -401,7 +401,7 @@ export function trailingPromptActivity(
   events: WorkEvent[],
   now: number,
   hours = 24,
-): { sessions: number; prompts: number } {
+): { sessions: number; prompts: number; chars: number } {
   const since = now - Math.max(1, hours) * HOUR_MS;
   const prompts = events.filter(
     (event) => event.kind === "user_prompt" && event.at >= since && event.at <= now,
@@ -409,6 +409,14 @@ export function trailingPromptActivity(
   return {
     sessions: new Set(prompts.map((event) => event.sessionId)).size,
     prompts: prompts.length,
+    chars: events
+      .filter(
+        (event) =>
+          (event.kind === "user_prompt" || event.kind === "assistant_output") &&
+          event.at >= since &&
+          event.at <= now,
+      )
+      .reduce((total, event) => total + Math.max(0, Number(event.chars) || 0), 0),
   };
 }
 

@@ -9,7 +9,31 @@ export interface VaultUiState {
   sessionTitles?: Record<string, string>;
   /** child provider session id -> parent provider session id */
   forkParents?: Record<string, string>;
+  /** Hidden provider sessions attached as comment threads to transcript messages. */
+  commentThreads?: Record<string, CommentThreadState>;
 }
+
+export interface CommentThreadState {
+  id: string;
+  parentSessionId: string;
+  anchorKey: string;
+  anchorText: string;
+  anchorData?: CommentAnchorData;
+  providerSessionId: string;
+  vendor: string;
+  cwd: string;
+  createdAt: number;
+  createdWhileGenerating?: boolean;
+  status?: "generating" | "unread" | "read" | "failed";
+  messageCount?: number;
+}
+
+export type CommentAnchorData =
+  | { kind: "message"; role: "user" | "assistant"; text: string }
+  | {
+      kind: "tool";
+      tool: { name: string; input?: unknown; result?: unknown; isError?: boolean };
+    };
 
 /** Vault-owned UI data that must survive browsers without leaking across vaults. */
 export class VaultUiStateStore {
@@ -34,6 +58,8 @@ export class VaultUiStateStore {
       this.state.sessionTitles = cleanStringRecord(next.sessionTitles);
     if (next.forkParents && typeof next.forkParents === "object")
       this.state.forkParents = cleanStringRecord(next.forkParents);
+    if (next.commentThreads && typeof next.commentThreads === "object")
+      this.state.commentThreads = cleanCommentThreads(next.commentThreads);
     this.persist();
     return this.get();
   }
@@ -59,6 +85,44 @@ export class VaultUiStateStore {
       // best-effort persistence
     }
   }
+}
+
+function cleanCommentThreads(
+  input: Record<string, CommentThreadState>,
+): Record<string, CommentThreadState> {
+  const out: Record<string, CommentThreadState> = {};
+  for (const [rawKey, raw] of Object.entries(input)) {
+    if (!raw || typeof raw !== "object") continue;
+    const id = String(raw.id || rawKey).trim();
+    const parentSessionId = String(raw.parentSessionId || "").trim();
+    const anchorKey = String(raw.anchorKey || "").trim();
+    const providerSessionId = String(raw.providerSessionId || "").trim();
+    const vendor = String(raw.vendor || "").trim();
+    const cwd = String(raw.cwd || "").trim();
+    if (!id || !parentSessionId || !anchorKey || !providerSessionId || !vendor || !cwd) continue;
+    out[id] = {
+      id,
+      parentSessionId,
+      anchorKey,
+      anchorText: String(raw.anchorText || "").slice(0, 20_000),
+      ...(raw.anchorData && typeof raw.anchorData === "object"
+        ? { anchorData: structuredClone(raw.anchorData) }
+        : {}),
+      providerSessionId,
+      vendor,
+      cwd,
+      createdAt: Number(raw.createdAt) || Date.now(),
+      ...(raw.createdWhileGenerating ? { createdWhileGenerating: true } : {}),
+      ...(raw.status === "generating" ||
+      raw.status === "unread" ||
+      raw.status === "read" ||
+      raw.status === "failed"
+        ? { status: raw.status }
+        : {}),
+      messageCount: Math.max(0, Math.floor(Number(raw.messageCount) || 0)),
+    };
+  }
+  return out;
 }
 
 function cleanStringRecord(input: Record<string, unknown>): Record<string, string> {

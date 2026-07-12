@@ -3,8 +3,8 @@ import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { Analysis } from "../../core/daemon/cache.js";
 import { parseAnalysis, parseAvoidancePrompt } from "../../core/daemon/parse.js";
-import type { QueryFn } from "../engine.js";
-import { toUiEvents } from "../events.js";
+import type { QueryFn } from "../claude/driver.js";
+import { toUiEventsFromClaude } from "../claude/events.js";
 import { readClaudeTranscript } from "../transcript.js";
 import {
   REQUEST_RULES,
@@ -49,7 +49,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
   async spawn(cwd: string): Promise<string | null> {
     let sessionId: string | null = null;
     for await (const msg of this.queryFn({ prompt: SEED, options: this.options(cwd) })) {
-      for (const ev of toUiEvents(msg))
+      for (const ev of toUiEventsFromClaude(msg))
         if (ev.kind === "session" && ev.sessionId) sessionId = ev.sessionId;
     }
     return sessionId;
@@ -66,7 +66,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     let text = "";
     const options = { ...this.options(cwd), resume: daemonId };
     for await (const msg of this.queryFn({ prompt: requestPrompt(transcript), options })) {
-      for (const ev of toUiEvents(msg)) if (ev.kind === "assistant_text") text += ev.text;
+      for (const ev of toUiEventsFromClaude(msg)) if (ev.kind === "assistant_text") text += ev.text;
     }
     return parseAnalysis(text);
   }
@@ -79,7 +79,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     let text = "";
     const options = { ...this.options(cwd), resume: daemonId };
     for await (const msg of this.queryFn({ prompt: avoidancePromptRequest(transcript), options })) {
-      for (const ev of toUiEvents(msg)) if (ev.kind === "assistant_text") text += ev.text;
+      for (const ev of toUiEventsFromClaude(msg)) if (ev.kind === "assistant_text") text += ev.text;
     }
     return parseAvoidancePrompt(text);
   }

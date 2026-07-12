@@ -2,9 +2,63 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { readCodexModelOptions } from "../src/core/vendor/codex-models.js";
+import {
+  inspectCodexModelCache,
+  inspectCodexModels,
+  readCodexModelOptions,
+} from "../src/core/vendor/codex-models.js";
 
 describe("readCodexModelOptions", () => {
+  it("uses the Codex CLI effective catalog before any internal file", () => {
+    const calls: string[][] = [];
+    const inspection = inspectCodexModels("codex", "/missing/cache.json", (_bin, args) => {
+      calls.push(args);
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          models: [
+            {
+              slug: "gpt-5.6-sol",
+              visibility: "list",
+              priority: 1,
+              default_reasoning_level: "medium",
+              supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
+            },
+          ],
+        }),
+      };
+    });
+
+    expect(calls).toEqual([["debug", "models"]]);
+    expect(inspection).toEqual({
+      models: [
+        {
+          value: "gpt-5.6-sol",
+          label: "gpt-5.6-sol",
+          efforts: ["low", "medium"],
+          defaultEffort: "medium",
+        },
+      ],
+      warning: null,
+    });
+  });
+
+  it("falls back to the catalog bundled with Codex when live discovery fails", () => {
+    const inspection = inspectCodexModels("codex", "/missing/cache.json", (_bin, args) =>
+      args.includes("--bundled")
+        ? {
+            status: 0,
+            stdout: JSON.stringify({
+              models: [{ slug: "gpt-5.6-sol", visibility: "list", priority: 1 }],
+            }),
+          }
+        : { status: 1, stdout: "" },
+    );
+
+    expect(inspection.models.map((model) => model.value)).toEqual(["gpt-5.6-sol"]);
+    expect(inspection.warning).toContain("catalog bundled with Codex");
+  });
+
   it("reads visible Codex models from the local models cache in priority order", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-models-"));
     const file = path.join(dir, "models_cache.json");
@@ -21,8 +75,8 @@ describe("readCodexModelOptions", () => {
     );
 
     expect(readCodexModelOptions(file)).toEqual([
-      { value: "gpt-5.5", label: "gpt-5.5" },
-      { value: "gpt-5.4", label: "gpt-5.4" },
+      { value: "gpt-5.5", label: "GPT-5.5" },
+      { value: "gpt-5.4", label: "GPT-5.4" },
     ]);
   });
 
@@ -75,5 +129,17 @@ describe("readCodexModelOptions", () => {
 
   it("falls back to no dynamic options when the cache is missing or invalid", () => {
     expect(readCodexModelOptions(path.join(os.tmpdir(), "missing-models-cache.json"))).toEqual([]);
+  });
+
+  it("reports an explicit compatibility warning when the internal schema changes", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-schema-"));
+    const file = path.join(dir, "models_cache.json");
+    fs.writeFileSync(file, JSON.stringify({ model_catalog: [] }));
+
+    expect(inspectCodexModelCache(file)).toEqual({
+      models: [],
+      warning: "Codex internal model cache changed format; using Attend's last known models.",
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

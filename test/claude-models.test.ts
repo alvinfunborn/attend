@@ -1,57 +1,67 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { readClaudeModelOptions } from "../src/core/vendor/claude-models.js";
+import type { ModelInfo, Query } from "@anthropic-ai/claude-agent-sdk";
+import { describe, expect, it, vi } from "vitest";
+import { inspectClaudeModels } from "../src/core/vendor/claude-models.js";
 
-describe("readClaudeModelOptions", () => {
-  it("reads Claude models from the local gateway cache", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-claude-models-"));
-    const file = path.join(dir, "gateway-models.json");
-    fs.writeFileSync(
-      file,
-      JSON.stringify({
-        models: [
-          { id: "claude-sonnet-5", priority: 2 },
-          { id: "provider.claude-sonnet-5", priority: 0 },
-          { apiName: "claude-fable-5", priority: 1 },
-          { id: "claude-hidden-1", visibility: "hidden", priority: -1 },
-        ],
-      }),
-    );
+function modelQuery(models: ModelInfo[]): { query: Query; close: ReturnType<typeof vi.fn> } {
+  const close = vi.fn();
+  return {
+    query: { supportedModels: async () => models, close } as unknown as Query,
+    close,
+  };
+}
 
-    expect(readClaudeModelOptions(file, [])).toEqual([
-      { value: "claude-fable-5", label: "claude-fable-5" },
-      { value: "claude-sonnet-5", label: "claude-sonnet-5" },
-    ]);
+describe("inspectClaudeModels", () => {
+  it("uses Claude's model IDs and exact per-model effort order", async () => {
+    const fake = modelQuery([
+      {
+        value: "default",
+        resolvedModel: "claude-default-resolved",
+        displayName: "Default (recommended)",
+        description: "vendor default",
+        supportsEffort: true,
+        supportedEffortLevels: ["low", "high", "max"],
+      } as ModelInfo & { resolvedModel: string },
+      {
+        value: "future-model",
+        displayName: "Future Model",
+        description: "new vendor model",
+        supportsEffort: true,
+        supportedEffortLevels: ["low", "xhigh"],
+      },
+    ] as Array<ModelInfo & { resolvedModel?: string }>);
 
-    fs.rmSync(dir, { recursive: true, force: true });
+    await expect(
+      inspectClaudeModels(
+        "/tmp",
+        () => fake.query,
+        30_000,
+        undefined,
+        async () => ({
+          effective: { effortLevel: "high" },
+        }),
+      ),
+    ).resolves.toEqual({
+      models: [{ value: "future-model", label: "Future Model", efforts: ["low", "xhigh"] }],
+      defaults: { model: "claude-default-resolved", effort: "high" },
+      warning: null,
+    });
+    expect(fake.close).toHaveBeenCalledOnce();
   });
 
-  it("reads availableModels from Claude settings and prefers family aliases over full ids", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-claude-settings-"));
-    const cache = path.join(dir, "gateway-models.json");
-    const settings = path.join(dir, "settings.json");
-    fs.writeFileSync(
-      cache,
-      JSON.stringify({ models: [{ id: "claude-fable-5" }, { id: "claude-opus-4-8" }] }),
-    );
-    fs.writeFileSync(
-      settings,
-      JSON.stringify({ policy: { availableModels: ["fable", "not-a-model", "claude-fable-5"] } }),
-    );
+  it("returns no invented options when Claude discovery fails", async () => {
+    const close = vi.fn();
+    const fake = {
+      supportedModels: async () => {
+        throw new Error("unavailable");
+      },
+      close,
+    } as unknown as Query;
 
-    expect(readClaudeModelOptions(cache, [settings])).toEqual([
-      { value: "fable", label: "fable" },
-      { value: "claude-opus-4-8", label: "claude-opus-4-8" },
-    ]);
-
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("falls back to no dynamic options when local sources are missing or invalid", () => {
-    expect(
-      readClaudeModelOptions(path.join(os.tmpdir(), "missing-gateway-models.json"), []),
-    ).toEqual([]);
+    await expect(inspectClaudeModels("/tmp", () => fake)).resolves.toEqual({
+      models: [],
+      defaults: { model: "", effort: "" },
+      warning: "Claude model discovery failed; Attend will use Claude's default model.",
+    });
+    expect(close).toHaveBeenCalledOnce();
   });
 });

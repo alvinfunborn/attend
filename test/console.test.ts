@@ -5,15 +5,140 @@ const view: ConsoleView = {
   sessions: [],
   knownDirs: [],
   scopeRoots: [],
-  sessions24h: 0,
-  prompts24h: 0,
+  changelogMarkdown: "# Changelog\n\n## 1.0.0\n\n- First release.",
+  sessions1h: 2,
+  prompts1h: 5,
+  chars1h: 1_250,
   vendors: [],
   claudeModels: [],
   codexModels: [],
+  cursorModels: [],
   tags: [],
 };
 
 describe("renderConsole", () => {
+  it("attaches hidden comment threads to assistant messages and pins only on send", () => {
+    const html = renderConsole(view);
+    expect(html).toContain('class="commentdrawer" id="commentDrawer"');
+    expect(html).toContain(
+      ".commentanchor { margin: 0.65rem 0.9rem 0; min-width: 0; }",
+    );
+    expect(html).not.toContain(".commentanchor::before");
+    expect(html).not.toContain("-webkit-line-clamp: 3;");
+    expect(html).toContain('id="commentAnchorLabel">REFERENCE</span>');
+    expect(html).toContain('id="commentAnchorToggle">hide</span>');
+    expect(html).toContain('id="commentAnchorContent"');
+    expect(html).toContain("function commentAnchorDataFromBlock(block)");
+    expect(html).toContain("function renderCommentAnchorBlock(text,key,data)");
+    expect(html).toContain("function toggleCommentAnchor()");
+    expect(html).toContain("data&&data.kind==='tool'?'TOOL REFERENCE':'REFERENCE'");
+    expect(html).toContain("addTool(data.tool,{reference:true,target:content})");
+    expect(html).toContain("if(opts.reference){");
+    expect(html).toContain(".commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center;");
+    expect(html).toContain(".commentactions { flex-shrink: 0; display: flex; align-items: center;");
+    expect(html).toContain(".commentpromote { height: 1.75rem; min-height: 1.75rem;");
+    expect(html).toContain(".commentclose { width: 1.75rem; height: 1.75rem;");
+    expect(html).toContain('<div class="commentactions">');
+    expect(html).not.toContain("border-bottom: 1px solid var(--line-2); background: transparent; color: var(--ink-3); font-size: 0.73rem;");
+    expect(html).toContain("setIconButton(cb,'comment','Comment on this response');");
+    expect(html).toContain(
+      "if(commentDrawerState.anchorMsg) ensureMessagePinned(commentDrawerState.anchorMsg);",
+    );
+    expect(html).toContain(
+      "function commentThreadForAnchor(parentSessionId, anchorKey, anchorText)",
+    );
+    expect(html).toContain("function normalizedCommentAnchor(text)");
+    expect(html).toContain("currentText.indexOf(savedText)===0");
+    const bootstrap = html.slice(
+      html.indexOf("function applyBootstrap(view)"),
+      html.indexOf("function startUnlockFlow()"),
+    );
+    expect(bootstrap).toContain(
+      "commentThreads = VAULT_STATE.commentThreads && typeof VAULT_STATE.commentThreads==='object' ? VAULT_STATE.commentThreads : {};",
+    );
+    expect(html).toContain("var cb=el('button','pincomment '+String(thread.status||''),label);");
+    expect(html).toContain("fetch('/comments/send'");
+    expect(html).toContain("if(onCommentBusEvent(message)) return;");
+    expect(html).toContain("status=el('div','msg assistant thinking')");
+    expect(html).toContain("commentDrawerState.generating?'■ stop'");
+    expect(html).not.toContain("commentDrawerState.generating?'queue':'send'");
+    expect(html).toContain("if(open) setCommentGenerating(true,ev.startedAt);");
+    expect(html).not.toContain("if(input) input.disabled=!!on;");
+    expect(html).toContain('id="commentInput" rows="1" placeholder="message"');
+    expect(html).not.toContain("resizeCommentInput");
+    expect(html).toContain(
+      "if(ev.key==='Enter'&&!ev.shiftKey&&!isImeConfirming(ev)){ ev.preventDefault(); sendComment(); }",
+    );
+    expect(html).toContain(".foot button.send, .commentfoot button.send");
+    expect(html).toContain(".foot button.send.stopping, .commentfoot button.send.stopping");
+    expect(html).toContain('class="composer commentcomposer"');
+    expect(html).toContain("var node=el('div','msg '+role), bubble=el('div','bubble');");
+    expect(html).toContain("setBubbleText(bubble,text||'',role==='user'||role==='assistant');");
+    expect(html).toContain("commentSend.onclick=commentPrimaryAction;");
+    expect(html).toContain("function stopCommentTurn(){");
+    expect(html).toContain(
+      "fetch('/chat/abort?session='+encodeURIComponent(thread.providerSessionId)",
+    );
+    expect(html).toContain("var commentMessageCache = {};");
+    expect(html).toContain(
+      "renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false);",
+    );
+    expect(html).toContain("cacheOpenCommentMessages();");
+    expect(html).toContain('id="commentPromote" type="button">promote to session</button>');
+    expect(html).not.toContain("button.hidden=!thread;");
+    expect(html).toContain("button.disabled=!thread||commentDrawerState.busy");
+    expect(html).toContain("function promoteCommentThread(){");
+    expect(html).toContain("fetch('/comments/promote'");
+    expect(html).toContain("commentPromote.onclick=promoteCommentThread;");
+  });
+
+  it("pins and comments on structured tool blocks using the shared block controls", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function toolBlockKey(tc)");
+    expect(html).toContain("block.setAttribute('data-msg-key',toolBlockKey(tc));");
+    expect(html).toContain("setIconButton(pin,'pin','Pin this tool block to the top');");
+    expect(html).toContain("setIconButton(comment,'comment','Comment on this tool block');");
+    expect(html).toContain("openCommentsForMessage(block);");
+    expect(html).toContain("if(msgEl && msgEl.classList && msgEl.classList.contains('toolc'))");
+    expect(html).toContain("return toolBlockSnapshot(msgEl);");
+    expect(html).toContain("msgs.querySelectorAll('.msg, .toolc')");
+    expect(html).toContain("msgs.querySelectorAll('.msg.assistant, .toolc')");
+    expect(html).toContain("updateToolBlockResult(t,ev.text,ev.isError);");
+    expect(html).toContain("refreshPinnedToolSnapshot(block);");
+    expect(html).toContain("commentDrawerState.anchorMsg.hasAttribute('data-tool-pending')");
+    expect(html).toContain(".toolrow:hover > .msg-pin, .toolrow:hover > .msg-comment");
+    expect(html).toContain("var row=el('div','toolrow'); row.appendChild(d);");
+    expect(html).toContain("row.appendChild(pin); syncMessagePinState(block);");
+  });
+
+  it("anchors a new session's first user turn before replaying app-server events", () => {
+    const html = renderConsole(view);
+    const start = html.indexOf("var ns={vendor:vendor");
+    const end = html.indexOf("SESS.unshift(ns); drainOrphanBusEvents(ns);", start);
+    const newSessionBody = html.slice(start, end);
+    expect(newSessionBody.indexOf("cacheTranscript(ns, []);")).toBeGreaterThan(-1);
+    expect(
+      newSessionBody.indexOf("rememberPendingUserMsg(res.session, shown, attachments);"),
+    ).toBeGreaterThan(newSessionBody.indexOf("cacheTranscript(ns, []);"));
+    expect(
+      newSessionBody.indexOf("cacheTranscriptUserMsg(ns, shown, attachments);"),
+    ).toBeGreaterThan(
+      newSessionBody.indexOf("rememberPendingUserMsg(res.session, shown, attachments);"),
+    );
+    expect(newSessionBody).not.toContain("cacheTranscript(ns, shown ?");
+  });
+
+  it("keeps the new-session form open while the user works elsewhere in the console", () => {
+    const html = renderConsole(view);
+    expect(html).toContain(
+      "byId('newClose').onclick=function(ev){ ev.stopPropagation(); closeNewBox(); };",
+    );
+    expect(html).toContain(
+      "if(e.key==='Escape' && newBoxOpen() && !newSessionPending){ closeNewBox(); }",
+    );
+    expect(html).not.toContain("if(box.contains(ev.target) || btn.contains(ev.target)) return;");
+  });
+
   it("uses the sidebar session-row hierarchy in the open chat header", () => {
     const html = renderConsole(view);
     expect(html).toContain('<div class="headrow it-titlerow">');
@@ -33,15 +158,20 @@ describe("renderConsole", () => {
     );
   });
 
-  it("resends the latest edited user message and forks historical edits", () => {
+  it("forks completed edits but resends the latest message from a user-stopped turn", () => {
     const html = renderConsole(view);
-    expect(html).toContain("function isLatestUserMessage(msgEl)");
-    expect(html).toContain("function editLatestAndResend(msgEl, bubble)");
-    expect(html).toContain("dispatchSend({ text:v, attachments:[] }, v);");
-    expect(html).toContain(
-      "if(isLatestUserMessage(msgEl) && !turnActive) editLatestAndResend(msgEl, bubble);",
-    );
     expect(html).toContain("function editAndForkFromMessage(msgEl, bubble)");
+    expect(html).toContain("function editUserMessage(msgEl, bubble)");
+    expect(html).toContain("function canResendStoppedLatest(msgEl)");
+    expect(html).toContain("cur.lastGenerationStoppedByUser");
+    expect(html).toContain("if(cur && stoppedByUser) cur.lastGenerationStoppedByUser=true;");
+    expect(html).toContain("if(cur) cur.lastGenerationStoppedByUser=false;");
+    expect(html).toContain(
+      "if(canResendStoppedLatest(msgEl)) editStoppedLatestAndResend(msgEl, bubble);",
+    );
+    expect(html).toContain("else editAndForkFromMessage(msgEl, bubble);");
+    expect(html).toContain("dispatchSend({ text:v, attachments:[] }, v);");
+    expect(html).toContain("'resend ▸'");
     expect(html).toContain("if(!cur || !cur.sessionId || cur.pendingFork) return;");
     expect(html).toContain("startForkFromPrefix(prefix, { text:v, attachments:[] });");
     expect(html).toContain(".inline-edit { position: relative;");
@@ -53,16 +183,33 @@ describe("renderConsole", () => {
     expect(html).toContain("if(hasPrefix) body.contextMessages=parentHistory;");
   });
 
+  it("keeps composer forks on the parent while edited-message forks open the branch", () => {
+    const html = renderConsole(view);
+    const prefixFork = html.slice(
+      html.indexOf("function startForkFromPrefix(prefixHistory, firstTurn){"),
+      html.indexOf("function startFork(config){"),
+    );
+    const composerFork = html.slice(
+      html.indexOf("function startFork(config){"),
+      html.indexOf("function fork(){"),
+    );
+    expect(prefixFork).toContain("select(ns);");
+    expect(prefixFork).toContain("materializeFork(ns, firstTurn);");
+    expect(composerFork).not.toContain("select(ns);");
+    expect(composerFork).toContain("materializeFork(ns, firstTurn, {background:true});");
+    expect(html).toContain("var background=!!(opts&&opts.background&&cur!==branch);");
+    expect(html).toContain("if(!background) addMsg('user', shown, true, turn.attachments);");
+  });
+
   it("renders attachment controls for new sessions and submits their payload", () => {
     const html = renderConsole(view);
     expect(html).toContain('id="newAttachDrop"');
     expect(html).toContain('id="nfile" type="file" multiple hidden');
     expect(html).toContain("bindNewAttachments();");
     expect(html).toContain("body:JSON.stringify({text:text, attachments:attachments");
-    expect(html).toContain("cacheTranscript(ns, shown ? [{role:'user'");
-    expect(html).toContain(
-      "if(shown){ rememberPendingUserMsg(res.session, shown, attachments); noteUserTurn(ns, shown); }",
-    );
+    expect(html).toContain("cacheTranscript(ns, []);");
+    expect(html).toContain("rememberPendingUserMsg(res.session, shown, attachments);");
+    expect(html).toContain("cacheTranscriptUserMsg(ns, shown, attachments);");
     expect(html).toContain("SESS.unshift(ns); drainOrphanBusEvents(ns); select(ns);");
   });
 
@@ -94,10 +241,29 @@ describe("renderConsole", () => {
   it("hides the chat composer until a session is selected", () => {
     const html = renderConsole(view);
     expect(html).toContain('<body class="no-session">');
-    expect(html).toContain("body.no-session #queue, body.no-session .foot { display: none; }");
+    expect(html).toContain(
+      "body.no-session #queue, body.no-session .foot, body.no-session .chat-scrollbottom { display: none; }",
+    );
     expect(html).toContain("document.body.classList.add('no-session');");
     expect(html).toContain("document.body.classList.remove('no-session');");
     expect(html).toContain("cur = null;");
+  });
+
+  it("shows the changelog when no chat session is selected", () => {
+    const html = renderConsole(view);
+    expect(html).toContain('class="changelog" id="ph"');
+    expect(html).toContain('id="changelogContent"');
+    expect(html).toContain('window.__CHANGELOG__ = "# Changelog\\n\\n## 1.0.0');
+    expect(html).toContain("changelogContent.innerHTML = renderMarkdown(CHANGELOG_MARKDOWN);");
+    expect(html).not.toContain("Conversations, without losing focus");
+    expect(html).toContain(
+      "var noSessionChangelog = byId('ph') ? byId('ph').cloneNode(true) : null;",
+    );
+    expect(html).toContain("replaceMessages(noSessionChangelog.cloneNode(true));");
+    expect(html).toContain("sub.textContent='Recent changes';");
+    expect(html).not.toContain(
+      "Pick a session on the left to see its chat, then type below to continue it",
+    );
   });
 
   it("supports pasted clipboard files in both attachment composers", () => {
@@ -226,16 +392,54 @@ describe("renderConsole", () => {
     );
   });
 
+  it("does not change recent ordering merely because a session was opened", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("if(s && s.sortTs==null && s.lastTs!=null) s.sortTs=s.lastTs;");
+    expect(html).toContain("hydrateSessionSource(s, {force:isRefresh,preserveSort:!isRefresh})");
+    expect(html).toContain(
+      "if(!preserveSort){ syncActivitySortTs(s, found.lastTs); sortSessions(); }",
+    );
+  });
+
+  it("projects composer drafts only after the composer loses focus", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function draftTextForSession(s)");
+    expect(html).toContain("function composerOwnsDraftForSession(s)");
+    expect(html).toContain("document.activeElement===input");
+    expect(html).toContain("function appendLatestPrompt(host, s, cls)");
+    expect(html).toContain(
+      "var draft=composerOwnsDraftForSession(s) ? '' : draftTextForSession(s);",
+    );
+    expect(html).toContain("draft?'Draft':'Latest'");
+    expect(html).not.toContain("draft-latest");
+    expect(html).toContain("setIconButton(edit,'edit','Edit draft');");
+    expect(html).toContain("if(cur!==s) select(s);");
+    expect(html).toContain(".draft-edit { display: inline-flex;");
+    expect(html).toContain("background: transparent; color: #dc2626;");
+    expect(html).toContain("line.appendChild(el('span','prompt-line-text',String(value||'')));");
+    expect(html).toContain("appendLatestPrompt(item, s, 'it-firstline');");
+    expect(html).toContain(
+      "else if(!hasDraft && hadDraft) renderSidebar();\n    syncOpenHeader();",
+    );
+    expect(html).toContain("byId('input').addEventListener('focus',function(){");
+    expect(html).toContain("byId('input').addEventListener('blur',function(){");
+  });
+
   it("clears the parent draft after using it as a fork opening turn", () => {
     const html = renderConsole(view);
-    expect(html).toContain("function forkTitleFromSession(s)");
-    expect(html).toContain("title:forkTitleFromSession(cur)");
-    expect(html).toContain("(s && s.brief) || (s && s.title) || (s && s.lastPrompt)");
+    expect(html).toContain("function forkTitleFromSession(s, userMsg)");
+    expect(html).toContain("title:forkTitleFromSession(cur, firstTurn.text)");
+    expect(html).toContain(
+      "if(String(turn&&turn.text||'').trim()) branch.title=forkTitleFromSession(parent, turn.text);",
+    );
+    expect(html).toContain("var message=String(userMsg||'').trim();");
+    expect(html).toContain("stripForkPrefix(message || (s && s.brief)");
     expect(html).toContain("function clearDraftForSession(s)");
     expect(html).toContain("consumeParentDraft:!!(firstTurn.text || firstTurn.attachments.length)");
     expect(html).toContain(
       "if(branch.pendingFork.consumeParentDraft) clearDraftForSession(parent);",
     );
+    expect(html).toContain("if(background && parent && cur===parent) syncOpenHeader();");
   });
 
   it("renders a fork opener before the stale parent answer it is replacing", () => {
@@ -255,7 +459,7 @@ describe("renderConsole", () => {
   it("anchors a materialized fork opener before adding it to the transcript cache", () => {
     const html = renderConsole(view);
     const forkBody = html.slice(
-      html.indexOf("function materializeFork(branch,turn){"),
+      html.indexOf("function materializeFork(branch,turn,opts){"),
       html.indexOf("function vendorInfo(id){"),
     );
     const cacheParent = forkBody.indexOf("cacheTranscript(branch, parentHistory);");
@@ -269,7 +473,9 @@ describe("renderConsole", () => {
     expect(rememberOpener).toBeGreaterThan(cacheParent);
     expect(cacheOpener).toBeGreaterThan(rememberOpener);
     expect(forkBody).not.toContain("parentHistory.concat([{ role:'user'");
-    expect(forkBody).toContain("if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);");
+    expect(forkBody).toContain(
+      "if(latestLiveSnapshot && (!background || snapshotActive.indexOf(res.session)>=0)) applyLiveSnapshot(latestLiveSnapshot);",
+    );
     expect(forkBody).toContain("clientSessionId:branch.clientBranchId");
     expect(forkBody).toContain("branch.providerSessionId=res.session;");
     expect(forkBody).toContain("rememberForkRelation(res.session,branch.forkParentId);");
@@ -302,12 +508,21 @@ describe("renderConsole", () => {
     expect(html).toContain("refreshRunConfigControls(true); applyRunConfig();");
   });
 
+  it("does not steal focus when an async chat turn ends", () => {
+    const html = renderConsole(view);
+    const start = html.indexOf("function setInputEnabled(on)");
+    const end = html.indexOf("function draftKey", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(html.slice(start, end)).not.toContain(".focus(");
+  });
+
   it("applies same-session run config immediately and submits it on send", () => {
     const html = renderConsole(view);
     expect(html).toContain('id="runPop"');
     expect(html).toContain('id="runCfgBtn"');
     expect(html).toContain("function applyRunConfig()");
-    expect(html).toContain("return (config.model || 'current model')+' · '+config.effort;");
+    expect(html).toContain("config.model || cliDefault(config.vendor, 'model') || 'CLI default'");
+    expect(html).toContain("cliDefault(config.vendor, 'effort') || 'CLI default'");
     expect(html).toContain("if(cur.runConfigDirty)");
     expect(html).toContain("body.runConfig=true;");
   });
@@ -360,13 +575,29 @@ describe("renderConsole", () => {
     expect(html).toContain("applyCodexModelSnapshot(res && res.models);");
     expect(html).toContain("var codexModelRefreshTimer=window.setInterval");
     expect(html).toContain("if(codexModelRefreshCount>=12)");
+    expect(html).toContain('id="nmodelWarning"');
+    expect(html).toContain('id="rmodelWarning"');
+    expect(html).toContain("applyModelWarning('claude', res && res.warning);");
+    expect(html).toContain("applyModelWarning('codex', res && res.warning);");
   });
 
   it("remembers model effort when new, chat, and fork configs are used", () => {
     const html = renderConsole(view);
+    expect(html).toContain(
+      "newPrefs[vendor]={ model:String(model||'').trim(), effort:String(effort||'').trim() };",
+    );
     expect(html).toContain("rememberModelEffort(vendor, model, effort);");
     expect(html).toContain("rememberModelEffort(config.vendor, config.model, config.effort);");
     expect(html).toContain("rememberModelEffort(vendor, cur.model||'', cur.effort||'');");
+  });
+
+  it("cascades a changed chat vendor to its most recently used model and effort", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var recent=newPrefs[vendor] || {};");
+    expect(html).toContain(
+      "var model=(keep ? defaults.model : String(recent.model||'').trim()) || cliDefault(vendor, 'model');",
+    );
+    expect(html).toContain("var effort=keep ? defaults.effort : linkedEffortFor(vendor, model);");
   });
 
   it("uses the server as the queued-draft source of truth", () => {
@@ -377,6 +608,13 @@ describe("renderConsole", () => {
     expect(html).toContain("method:'PATCH'");
     expect(html).toContain("method:'DELETE'");
     expect(html).toContain("if(ev.kind==='queued_turn_started'){");
+    expect(html).toContain("function syncQueuedEditShape(){");
+    expect(html).toContain("ta.oninput=syncQueuedEditShape;");
+    const queueEditorStart = html.indexOf("function makeQueuedEditor(turn, i)");
+    const queueEditorEnd = html.indexOf("// The send button doubles as Stop", queueEditorStart);
+    expect(html.slice(queueEditorStart, queueEditorEnd)).not.toContain(
+      "ta.oninput=syncInlineEditShape;",
+    );
     expect(html).not.toContain("function advanceQueuedIfIdle()");
     expect(html).not.toContain("function pumpQueuedDrafts()");
     expect(html).not.toContain("setInterval(pumpQueuedDrafts, 1000);");
@@ -418,6 +656,18 @@ describe("renderConsole", () => {
 
   it("themes the new-session choosers and commits dropdown picks on click", () => {
     const html = renderConsole(view);
+    expect(html).toContain(
+      "--vendor-cursor-fg: #18181b; --vendor-cursor-bg: #f4f4f5; --vendor-cursor-border: #a1a1aa;",
+    );
+    expect(html).toContain(
+      "--vendor-cursor-fg: #f4f4f5; --vendor-cursor-bg: #27272a; --vendor-cursor-border: #71717a;",
+    );
+    expect(html).toContain(
+      "? { fg:'var(--vendor-cursor-fg)', bg:'var(--vendor-cursor-bg)', border:'var(--vendor-cursor-border)' }",
+    );
+    expect(html).toContain(
+      ".vtag.cursor { color: var(--vendor-cursor-fg); background: var(--vendor-cursor-bg); border-color: var(--vendor-cursor-border); }",
+    );
     expect(html).toContain("applyVendorChooserTheme(input.value);");
     expect(html).toContain("applyDirChooserTheme(input.value);");
     expect(html).toContain(".chooser-opt-label { font-size: 0.78rem; color: inherit;");
@@ -452,6 +702,15 @@ describe("renderConsole", () => {
     );
   });
 
+  it("shows full model names when hovering truncated model selectors", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var isModel=sel.id==='nmodel'||sel.id==='rmodel';");
+    expect(html).toContain("if(isModel && fullText) item.setAttribute('data-hover-tip',fullText);");
+    expect(html).toContain(
+      "if((sel.id==='nmodel'||sel.id==='rmodel') && selectedText) ctrl.button.setAttribute('data-hover-tip',selectedText);",
+    );
+  });
+
   it("renders a persisted one-click dark theme toggle", () => {
     const html = renderConsole(view);
     expect(html).toContain('id="themeToggle"');
@@ -465,10 +724,12 @@ describe("renderConsole", () => {
     const html = renderConsole(view);
     expect(html).toContain('<span class="brand-name">Attend</span>');
     expect(html).not.toContain("brand-dot");
-    expect(html).toContain('id="sessions24h"');
-    expect(html).toContain('id="prompts24h"');
-    expect(html).toContain('class="statlbl">pushes/24h</span>');
-    expect(html).not.toContain('class="statlbl">chars/H</span>');
+    expect(html).toContain('id="sessions1h" class="statval">2</span>');
+    expect(html).toContain('id="prompts1h" class="statval">5</span>');
+    expect(html).toContain('id="chars1h" class="statval">1.3k</span>');
+    expect(html).toContain('class="statlbl">sessions/1h</span>');
+    expect(html).toContain('class="statlbl">pushes/1h</span>');
+    expect(html).toContain('class="statlbl">chars/1h</span>');
     expect(html).toContain("function applyStats(stats)");
     expect(html).toContain("applyStats(res && res.stats);");
     expect(html).not.toContain("fetch('/stats')");
@@ -551,20 +812,67 @@ describe("renderConsole", () => {
     expect(html).toContain(
       "body.appendChild(el('span','latestpin-text',previewTextFromMsg(msgEl)));",
     );
+    expect(html).toContain("body.appendChild(el('span','latestpin-k','YOU'));");
+    expect(html).toContain(".latestpin-k { flex-shrink: 0; color: #3730a3; border: 0; background: transparent; padding: 0;");
+    expect(html).toContain(".pinrole { flex-shrink: 0;");
+    expect(html).toContain("color: #64748b; border: 0; background: transparent; padding: 0;");
     expect(html).not.toContain("Latest you");
+    expect(html).not.toContain("latest · you");
     expect(html).not.toContain("latestPinJump");
     expect(html).not.toContain("latestpin-jump");
+  });
+
+  it("pins comment messages and shows their scrolled latest user message as YOU", () => {
+    const html = renderConsole(view);
+    expect(html).toContain('id="commentTopStack"');
+    expect(html).toContain('id="commentPinTray"');
+    expect(html).toContain('id="commentLatestPin"');
+    expect(html).toContain("node.setAttribute('data-msg-key','comment:'+(commentMsgOrdinal++));");
+    expect(html).toContain("setIconButton(pin,'pin','Pin this comment message to the top');");
+    expect(html).toContain("return block&&block.closest&&block.closest('#commentMsgs') ? commentPinSession() : cur;");
+    expect(html).toContain("return String(thread&&thread.vendor||cur&&cur.vendor||'assistant');");
+    expect(html).toContain("function renderCommentPinTray()");
+    expect(html).toContain("function updateCommentLatestPin()");
+    expect(html).toContain("body.appendChild(el('span','latestpin-k','YOU'));");
+    expect(html).toContain("commentLatestPin.onclick=jumpToCommentLatestPin;");
+    expect(html).toContain("scheduleCommentLatestPin();");
+  });
+
+  it("shows shared scroll-to-bottom controls when chat or comments leave the bottom", () => {
+    const html = renderConsole(view);
+    expect(html).toContain('id="chatScrollBottom"');
+    expect(html).toContain('id="commentScrollBottom"');
+    expect(html).toContain("setIconButton(chatScrollBottom,'down','Scroll to bottom')");
+    expect(html).toContain("setIconButton(commentScrollBottom,'down','Scroll comments to bottom')");
+    expect(html).toContain("function nearScrollBottom(node)");
+    expect(html).toContain("chatScrollBottom.onclick=scrollChatToBottom;");
+    expect(html).toContain("commentScrollBottom.onclick=scrollCommentsToBottom;");
+    expect(html).toContain("if(host&&commentStick) host.scrollTop=host.scrollHeight;");
+    expect(html).toContain("commentStick=nearScrollBottom(commentMsgs)");
+    expect(html).toContain(".scrollbottom[hidden] { display: none; }");
+  });
+
+  it("floats the comment composer and keeps messages, queues, and scroll control above it", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("--comment-composer-overlay-height: 4rem; --comment-queue-overlay-height: 0px;");
+    expect(html).toContain(".commentfoot { position: absolute; left: 0; right: 0; bottom: 0;");
+    expect(html).toContain("padding: 0 0.9rem 0.75rem; border-top: 0; background: transparent;");
+    expect(html).toContain("calc(var(--comment-composer-overlay-height) + var(--comment-queue-overlay-height) + 0.8rem)");
+    expect(html).toContain("bottom: calc(var(--comment-composer-overlay-height) + var(--comment-queue-overlay-height) + 0.55rem)");
+    expect(html).toContain("function syncCommentOverlayOffsets()");
+    expect(html).toContain("scheduleCommentOverlayOffsets();");
+    expect(html).toContain("new ResizeObserver(scheduleCommentOverlayOffsets).observe(commentFoot)");
   });
 
   it("orders pinned message previews by their actual chat position", () => {
     const html = renderConsole(view);
     expect(html).toContain("function msgDomOrder()");
-    expect(html).toContain("var nodes=msgs.querySelectorAll('.msg');");
+    expect(html).toContain("var nodes=msgs.querySelectorAll('.msg, .toolc');");
     expect(html).toContain(
       "Object.prototype.hasOwnProperty.call(order, ak) ? order[ak] : msgKeyIndex(ak)",
     );
     expect(html).toContain("var pins=sortPinsInChatOrder(currentPins());");
-    expect(html).toContain("savePins(cur, sortPinsInChatOrder(pins));");
+    expect(html).toContain("savePins(scope,inComments?sortCommentPins(pins):sortPinsInChatOrder(pins));");
   });
 
   it("uses safe text rendering for pinned message previews", () => {
@@ -610,6 +918,8 @@ describe("renderConsole", () => {
     expect(html).toContain("window.setInterval(tickLiveTimings,1000);");
     expect(html).toContain("var emittedAt=Number(message&&message.emittedAt)||Date.now();");
     expect(html).toContain("var lastAssistantAt=res&&res.lastAssistantAt||{};");
+    expect(html).toContain("ev.kind==='tool_use' || ev.kind==='tool_result'");
+    expect(html).toContain("if(activity) lastAssistantAt[sessionId]");
   });
 
   it("clears turn-scoped ETA and state while preserving priority", () => {
@@ -631,17 +941,20 @@ describe("renderConsole", () => {
 
   it("shows full First and Latest text through lightweight hover tips", () => {
     const html = renderConsole(view);
-    expect(html).toContain("function sessionPromptLine(cls, label, value)");
+    expect(html).toContain("function sessionPromptLine(cls, label, value, leading)");
     expect(html).toContain("line.setAttribute('data-hover-tip',text);");
     expect(html).toContain("reasonEl.setAttribute('data-hover-tip',reason);");
     expect(html).toContain(".prompt-line-label { color: var(--ink-4); font-weight: 700;");
-    expect(html).toContain(".prompt-line-latest { color: var(--latest-label);");
-    expect(html).toContain("--latest-label: #4f46e5;");
-    expect(html).toContain("--latest-label: #a5b4fc;");
+    expect(html).toContain(
+      ".prompt-line-latest ~ .prompt-line-text, .prompt-line-draft ~ .prompt-line-text { font-style: italic; }",
+    );
+    expect(html).toContain(".it-reason { flex: 1 1 5rem;");
+    expect(html).toContain("font-style: normal;");
+    expect(html).not.toContain("--latest-label:");
     expect(html).toContain("sessionPromptLine('it-firstline','First',s.title)");
-    expect(html).toContain("sessionPromptLine('it-firstline','Latest',s.lastPrompt)");
+    expect(html).toContain("appendLatestPrompt(item, s, 'it-firstline')");
     expect(html).toContain("sessionPromptLine('sub-line it-firstline','First',cur.title)");
-    expect(html).toContain("sessionPromptLine('sub-line it-firstline','Latest',cur.lastPrompt)");
+    expect(html).toContain("appendLatestPrompt(sub, cur, 'sub-line it-firstline')");
     expect(html).not.toContain('id="tabtip"');
     expect(html).not.toContain("function showTabTip");
     expect(html).not.toContain("function bindSessionTip");
@@ -653,16 +966,32 @@ describe("renderConsole", () => {
     expect(html.indexOf('id="forkTreeBtn"')).toBeLessThan(html.indexOf('id="refreshBtn"'));
     expect(html).toContain('id="forkTreeViewport"');
     expect(html).toContain("function forkTreeLayout(s)");
+    expect(html).toContain("var nodeW=300,nodeH=112,columnStep=364,rowStep=134;");
+    expect(html).toContain(
+      ".forktree-node { position: absolute; width: 300px; height: 112px; box-sizing: border-box; padding: 0;",
+    );
+    expect(html).toContain(
+      ".forktree-node-content { width: var(--forktree-content-size, 100%); height: var(--forktree-content-size, 100%); box-sizing: border-box; display: flex; flex-direction: column; padding: 0.38rem 0.65rem;",
+    );
     expect(html).toContain("function forkTreeMini(s)");
     expect(html).toContain('html[data-theme="dark"] .forktree-mini circle.current');
     expect(html).toContain("filter: drop-shadow(0 0 2px rgba(129,140,248,0.95));");
     expect(html).toContain("configureForkTreeTrigger(treeButton,s);");
     expect(html).toContain("syncHeaderForkTree();");
     expect(html).toContain("zoomForkTree(ev.deltaY<0?1.12:1/1.12");
-    expect(html).toContain("--forktree-text-scale");
-    expect(html).toContain("stage.style.setProperty('--forktree-text-width'");
+    expect(html).toContain('id="forkTreePan"');
+    expect(html).toContain("stage.style.transform='scale('+scale+')';");
+    expect(html).toContain("--forktree-content-scale',String(1/scale)");
+    expect(html).toContain("--forktree-content-size',String(scale*100)+'%'");
+    expect(html).toContain("var content=el('div','forktree-node-content');");
+    expect(html).toContain("button.appendChild(content);");
+    expect(html).not.toContain("stage.style.zoom");
     expect(html).toContain("var st=session ? statusState(session) : 'read';");
     expect(html).toContain("var dot=el('span','forktree-node-dot it-status '+st);");
+    expect(html).toContain("renderSessionTitle(titleNode,session,'forktree-node-title');");
+    expect(html).toContain("renderSessionSignals(signals,session);");
+    expect(html).toContain("sessionPromptLine('it-firstline','First',session.title)");
+    expect(html).toContain("foot.appendChild(sessionContextRow(session));");
     expect(html).toContain("syncForkTreeNodeStatus(s);");
     expect(html).toContain("forkTreeView.x=forkTreeView.ox+(ev.clientX-forkTreeView.sx);");
     expect(html).toContain("selectForkTreeSession(node.id)");
@@ -677,6 +1006,10 @@ describe("renderConsole", () => {
     expect(html).toContain("var badge=stateBadge(s); if(badge) host.appendChild(badge);");
     expect(html).toContain("function sessionContextRow(s)");
     expect(html).toContain("foot.appendChild(sessionContextRow(s));");
+    expect(html).toContain("prompts.setAttribute('data-hover-tip',count+' user message'+(count===1?'':'s')+' in this session');");
+    expect(html).toContain(".it-context .ctx-prompts { color: var(--ink-4);");
+    expect(html).not.toContain(".it-context .ctx-prompts { color: #7c3aed;");
+    expect(html).not.toContain('html[data-theme="dark"] .it-context .ctx-prompts');
     expect(html).toContain("(!s.stateset && (a.state||null)!==(s.state||null))");
   });
 
@@ -696,6 +1029,11 @@ describe("renderConsole", () => {
     expect(html).toContain("document.addEventListener('click', signalMenuDocClose);");
     expect(html).toContain("showSignalMenu(sp, s, 'priority'");
     expect(html).toContain("showSignalMenu(badge, s, 'state'");
+    expect(html).toContain(".state.editable:hover { filter: brightness(0.96); transform: none; }");
+    expect(html).toContain(".prilabel:hover { filter: brightness(0.96); transform: none; }");
+    expect(html).toContain("font-variant-numeric: tabular-nums; transition: none; }");
+    expect(html).not.toContain("transform: translateY(-1px)");
+    expect(html).not.toContain("transition: filter 0.12s, transform 0.08s");
     expect(html).toContain('id="avoidPanel" hidden');
     expect(html).toContain("function renderAvoidancePanel()");
     expect(html).toContain("function avoidanceStats(s)");
@@ -759,10 +1097,12 @@ describe("renderConsole", () => {
     expect(html).toContain("syncComposerHeight();\n    if(!cur) return;");
     expect(html).toContain(".foot button.runbtn.dirty:hover:not(:disabled)");
     expect(html).toContain(".foot button.splitbtn:hover:not(:disabled)");
-    expect(html).toContain("html[data-theme=\"dark\"] .foot button.splitbtn { color: #ddd6fe;");
+    expect(html).toContain('html[data-theme="dark"] .foot button.splitbtn { color: #ddd6fe;');
     expect(html).toContain("background: rgba(139,92,246,0.2); border-color: #a78bfa;");
     expect(html).toContain("badge.classList.add('editable');");
     expect(html).toContain("badge.onkeydown=function(ev)");
+    expect(html).toContain('html[data-theme="dark"] .tagadd-compact:hover,');
+    expect(html).toContain('html[data-theme="dark"] .it-tagadd:hover { color: #99f6e4; background: rgba(20,184,166,0.16);');
   });
 
   it("keeps tag-filter switching cheap when many filters are active", () => {
@@ -770,8 +1110,32 @@ describe("renderConsole", () => {
     expect(html).toContain('id="viewTabs"');
     expect(html).toContain('id="tagModeToggle"');
     expect(html).toContain('id="tagModeValue">any</span>');
+    expect(html).toContain('id="tagSearch" class="searchbox" placeholder="Search tags…"');
+    expect(html).toContain('id="tagSearchClear" class="search-clear"');
+    expect(html).toContain(".tagsearchwrap .searchbox { width: 100%; height: 1.25rem;");
+    expect(html.indexOf('<span class="tagttl">tags</span>')).toBeLessThan(
+      html.indexOf('id="tagSearch"'),
+    );
+    expect(html.indexOf('id="tagSearch"')).toBeLessThan(html.indexOf('id="tagModeToggle"'));
+    expect(html).toContain("var tagSearchQ='';");
+    expect(html).toContain("function tagDefMatchesSearch(def)");
+    expect(html).toContain("function sessionMatchesTagSearch(s)");
+    expect(html).toContain("var defs=filterTagDefs().filter(tagDefMatchesSearch);");
+    expect(html).toContain("function tagSessionCounts()");
+    expect(html).toContain("var tagCounts=tagSessionCounts();");
+    expect(html).toContain("btn.appendChild(el('span','gtagcount',String(count)));");
+    expect(html).toContain(".gtagcount { margin-left: 0.32rem; font-size: 0.58rem;");
+    expect(html).toContain(".gtag.deletable .gtagbtn { padding-right: 0.18rem; }");
+    expect(html).toContain("(def.deletable?' deletable':'')");
+    expect(html).toContain("if(!sessionMatchesTagSearch(s)) return false;");
+    expect(html).toContain("byId('tagSearch').addEventListener('input'");
+    expect(html).toContain("byId('tagSearchClear').onclick=function()");
+    expect(html).toContain("renderTagFilters(); reconcileCurrentSessionToFilter();");
     expect(html).toContain(
-      ".tagmode-toggle:hover { color: var(--ink); background: transparent; box-shadow: none; text-decoration: underline;",
+      ".tagbar .taghead { display: flex; flex-wrap: wrap; align-items: flex-end;",
+    );
+    expect(html).toContain(
+      ".tagmode-toggle { appearance: none; align-self: flex-end; min-width: 0; padding: 0.05rem 0;",
     );
     expect(html).toContain(
       ".instant-tip:hover::after, .instant-tip:focus-visible::after { opacity: 1; visibility: visible; }",
@@ -806,6 +1170,62 @@ describe("renderConsole", () => {
     expect(html).toContain("byId('tagModeToggle').onclick=function(ev)");
   });
 
+  it("switches session rows before live rerenders can swallow the click", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function isSessionRowControl(target, row)");
+    expect(html).toContain("item.onpointerdown=function(ev)");
+    expect(html).toContain("ev.pointerType!=='mouse'");
+    expect(html).toContain("ev.button!==0 || isSessionRowControl(ev.target,item)");
+    expect(html).toContain("typeof node.onclick==='function'");
+    expect(html).toContain(
+      "item.onclick=function(ev){ if(!isSessionRowControl(ev.target,item) && cur!==s) select(s); };",
+    );
+  });
+
+  it("patches streamed sidebar activity without rebuilding every session row", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function sessionEventNeedsSidebarRebuild(ev)");
+    expect(html).toContain("if(sessionEventNeedsSidebarRebuild(ev)){");
+    expect(html).toContain(
+      "if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started') sortSessions();",
+    );
+    const start = html.indexOf("function onBusSessionEvent(message)");
+    const end = html.indexOf("function onCommentBusEvent(message)", start);
+    const body = html.slice(start, end);
+    expect(body).toContain("applyGenerating(s);");
+    expect(body).not.toContain("applyGenerating(s);\n    renderSidebar();");
+  });
+
+  it("reorders a composer draft once instead of rebuilding on every keystroke", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var hadDraft=!!draftTextForSession(cur);");
+    expect(html).toContain("if(hasDraft && !hadDraft) touchSession(cur);");
+    expect(html).toContain("else if(!hasDraft && hadDraft) renderSidebar();");
+    expect(html).not.toContain("if(String(this.value||'').trim()) touchSession(cur);");
+  });
+
+  it("preserves tag-editor input and dropdown scroll across live rerenders", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var globalTagDraft = '';");
+    expect(html).toContain("var sessionTagEditorState = {};");
+    expect(html).toContain("input.value=state.value;");
+    expect(html).toContain("state.value=input.value;");
+    expect(html).toContain("var restoreScroll=state.scrollTop;");
+    expect(html).toContain("sug.scrollTop=restoreScroll;");
+    expect(html).toContain("sug.onscroll=function(){ state.scrollTop=sug.scrollTop; };");
+    expect(html).toContain("input.setSelectionRange(state.start,state.end)");
+  });
+
+  it("closes tag editors with Escape and matches suggestions beyond prefixes", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function closeSessionTagEditor(s)");
+    expect(html).toContain("ev.stopImmediatePropagation(); closeSessionTagEditor(s);");
+    expect(html).toContain("ev.stopImmediatePropagation(); closeGlobalTagEditor();");
+    expect(html).toContain("function tagSuggestionMatches(tag, query)");
+    expect(html).toContain("hay.indexOf(term)>=0");
+    expect(html).toContain("!assigned[k] && tagSuggestionMatches(k, q)");
+  });
+
   it("keeps a multi-select priority tag first and formats its selected levels", () => {
     const html = renderConsole(view);
     expect(html).toContain("var PRIORITY_FILTER_KEY = 'attend.priorityFilter.v1';");
@@ -821,22 +1241,28 @@ describe("renderConsole", () => {
     expect(html).toContain("option.appendChild(priorityMeter(11-level*2,'',false));");
     expect(html).toContain("return 'P'+levels[0]+'-P'+levels[levels.length-1];");
     expect(html).toContain("return levels.map(function(level){ return 'P'+level; }).join(',');");
-    expect(html).toContain("wrap.appendChild(priorityChip);\n    var defs=filterTagDefs();");
+    expect(html).toContain(
+      "wrap.appendChild(priorityChip);\n    var defs=filterTagDefs().filter(tagDefMatchesSearch);",
+    );
     expect(html).toContain("[5,4,3,2,1].forEach(function(level)");
     expect(html).toContain(
       "priorityBtn.onclick=function(ev){\n      ev.preventDefault(); ev.stopPropagation();\n      closeSignalMenu();",
     );
     expect(html).toContain("if(!sessionMatchesPriorityFilter(s)) return false;");
     expect(html).toContain(
-      "return sessionMatchesPriorityFilter(s) && sessionMatchesTagFilter(s, currentFilterTags());",
+      "return sessionMatchesPriorityFilter(s) && sessionMatchesTagFilter(s, currentFilterTags()) && sessionMatchesTagSearch(s) && sessionMatchesSidebarSearch(s);",
     );
   });
 
   it("renders a scoped archive button for seen sessions", () => {
     const html = renderConsole(view);
     expect(html).toContain('id="bulkArchiveSeen"');
-    expect(html).toContain(".bulkarchive { align-self: flex-end; flex-shrink: 0; min-width: 0; font-size: 0.62rem;");
+    expect(html).toContain(
+      ".bulkarchive { align-self: flex-end; flex-shrink: 0; min-width: 0; font-size: 0.62rem;",
+    );
     expect(html).toContain("function sessionMatchesBulkArchiveScope(s)");
+    expect(html).toContain("function sessionMatchesSidebarSearch(s)");
+    expect(html).toContain("sessionMatchesTagSearch(s) && sessionMatchesSidebarSearch(s)");
     expect(html).toContain("if(activeTagView==='unread') return false;");
     expect(html).toContain("attentionState(s)==='seen'");
     expect(html).toContain(
@@ -882,13 +1308,39 @@ describe("renderConsole", () => {
   it("injects discovered Claude models for the new-session model picker", () => {
     const html = renderConsole({
       ...view,
-      claudeModels: [
-        { value: "fable", label: "fable" },
-        { value: "claude-fable-5", label: "claude-fable-5" },
-      ],
+      claudeModels: [{ value: "vendor-model", label: "Vendor Model", efforts: ["vendor-effort"] }],
     });
-    expect(html).toContain('window.__CLAUDE_MODELS__ = [{"value":"fable","label":"fable"}');
+    expect(html).toContain(
+      'window.__CLAUDE_MODELS__ = [{"value":"vendor-model","label":"Vendor Model","efforts":["vendor-effort"]}',
+    );
     expect(html).toContain("function claudeModelOptions()");
+  });
+
+  it("injects concrete CLI model and effort defaults", () => {
+    const html = renderConsole({
+      ...view,
+      modelDefaults: { codex: { model: "gpt-current", effort: "high" } },
+    });
+    expect(html).toContain(
+      'window.__MODEL_DEFAULTS__ = {"codex":{"model":"gpt-current","effort":"high"}}',
+    );
+    expect(html).toContain("function optionsWithDefault(options, value, suffix)");
+    expect(html).toContain("opt.label=opt.label+' ('+suffix+')';");
+    expect(html).not.toContain("vendor default");
+  });
+
+  it("keeps defaults inside the vendor model and effort lists", () => {
+    const html = renderConsole(view);
+    expect(html).not.toContain("NEW_MODEL_OPTIONS");
+    expect(html).not.toContain("NEW_EFFORT_OPTIONS");
+    expect(html).not.toContain("vendor default");
+    expect(html).not.toContain("function defaultModelOption(");
+    expect(html).not.toContain("function defaultEffortOption(");
+    expect(html).toContain(
+      "return optionsWithDefault(dynamic, cliDefault('claude', 'model'), 'CLI default');",
+    );
+    expect(html).toContain("label:(meta.effortLabels && meta.effortLabels[e]) || e");
+    expect(html).toContain("if(vendor==='cursor') return cursorModelOptions();");
   });
 
   it("does not split URL paths into local file links", () => {
@@ -933,8 +1385,10 @@ describe("renderConsole", () => {
     expect(html).toContain(".searchbox.filtering");
     expect(html).toContain("function syncSearchFilterState(input)");
     expect(html).toContain(
-      "filterQ=this.value.trim().toLowerCase(); syncSearchFilterState(this); sortSessions(); renderSidebar();",
+      "function applySessionSearch(input){ filterQ=input.value.trim().toLowerCase(); syncSearchFilterState(input); sortSessions(); renderSidebar();",
     );
+    expect(html).toContain('id="searchClear" class="search-clear"');
+    expect(html).toContain("byId('searchClear').onclick=function()");
     expect(html).toContain("item.appendChild(el('div','it-searchhit', hitText));");
     expect(html).toContain("scheduleContentSearch();");
   });

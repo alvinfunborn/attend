@@ -43,6 +43,7 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     expect(s.actions).toBe(2);
     expect(s.firstTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
     expect(s.lastTs).toBe(Date.parse("2026-05-01T10:03:00Z"));
+    expect(s.lastAssistantTs).toBe(Date.parse("2026-05-01T10:03:00Z"));
     expect(s.userPromptTs).toEqual([Date.parse("2026-05-01T10:01:00Z")]);
   });
 
@@ -64,6 +65,8 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     expect(s.prompts).toBe(0);
     expect(s.actions).toBe(0);
     expect(s.lastAssistantTs).toBe(Date.parse("2026-05-01T10:00:00Z"));
+    expect(s.assistantTextActivity).toEqual([{ at: Date.parse("2026-05-01T10:00:00Z"), chars: 2 }]);
+    expect(s.chars).toBe(2);
   });
 
   it("skips synthetic <…>-wrapped user turns so title/lastPrompt are the real prompts", () => {

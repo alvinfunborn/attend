@@ -84,18 +84,17 @@ function isFinalAnswer(item: Payload): boolean {
   return item.phase === "final_answer";
 }
 
-function hasAssistantOutputText(item: Payload): boolean {
+function assistantOutputTextLength(item: Payload): number {
   if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content)) {
-    return false;
+    return 0;
   }
-  return item.content.some(
-    (part) =>
-      !!part &&
-      typeof part === "object" &&
-      (part as { type?: string }).type === "output_text" &&
-      typeof (part as { text?: unknown }).text === "string" &&
-      ((part as { text: string }).text?.length ?? 0) > 0,
-  );
+  return item.content.reduce((total, part) => {
+    if (!part || typeof part !== "object" || (part as { type?: string }).type !== "output_text") {
+      return total;
+    }
+    const text = (part as { text?: unknown }).text;
+    return total + (typeof text === "string" ? text.length : 0);
+  }, 0);
 }
 
 /**
@@ -165,6 +164,8 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
     firstTs: null,
     lastTs: null,
     userPromptTs: [],
+    userPromptActivity: [],
+    assistantTextActivity: [],
     prompts: 0,
     actions: 0,
     visits: 0,
@@ -224,18 +225,30 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       }
     } else if (kind === "response_item" && item) {
       const text = userPromptText(item);
+      const assistantChars = assistantOutputTextLength(item);
       if (text !== null) {
-        if (ts !== null) session.userPromptTs?.push(ts);
+        if (ts !== null) {
+          session.userPromptTs?.push(ts);
+          session.userPromptActivity?.push({ at: ts, chars: text.length });
+        }
         session.prompts += 1;
-        // Only user-prompt chars: Codex assistant output isn't reliably parsed,
-        // and we never fabricate vendor data (DESIGN invariant 3).
         session.chars += text.length;
         if (session.title === null) session.title = snippet(text);
         session.lastPrompt = snippet(text);
       } else if (item.type && ACTION_ITEM_TYPES.has(item.type)) {
         session.actions += 1;
       }
-      if (ts !== null && hasAssistantOutputText(item)) session.lastAssistantTs = ts;
+      if (
+        ts !== null &&
+        (assistantChars > 0 ||
+          (!!item.type && (ACTION_ITEM_TYPES.has(item.type) || item.type.endsWith("_call_output"))))
+      ) {
+        session.lastAssistantTs = ts;
+      }
+      if (ts !== null && assistantChars > 0) {
+        session.assistantTextActivity?.push({ at: ts, chars: assistantChars });
+        session.chars += assistantChars;
+      }
       if (isFinalAnswer(item)) activeTurn = null;
     }
   }

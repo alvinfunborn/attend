@@ -9,6 +9,7 @@ const MAX_EVENTS = 200_000;
 
 export type WorkEventKind =
   | "user_prompt"
+  | "assistant_output"
   | "turn_started"
   | "turn_finished"
   | "queue_enqueued"
@@ -23,6 +24,8 @@ export interface WorkEvent {
   queueId?: string;
   ok?: boolean;
   state?: AnalysisState | null;
+  /** real user prompt text length; absent on legacy persisted events */
+  chars?: number;
   source: "transcript" | "live";
 }
 
@@ -40,25 +43,12 @@ function normalizeEvent(value: WorkEvent): WorkEvent | null {
   const at = validAt(value.at);
   const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
   if (!at || !sessionId || !value.id || !value.kind) return null;
-  return { ...value, at, sessionId };
+  const chars = Math.max(0, Math.floor(Number(value.chars) || 0));
+  return { ...value, at, sessionId, ...(chars ? { chars } : {}) };
 }
 
 function promptId(sessionId: string, at: number): string {
   return `prompt:${sessionId}:${Math.floor(at)}`;
-}
-
-function hasNearby(sorted: number[], at: number, tolerance: number): boolean {
-  let low = 0;
-  let high = sorted.length;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if ((sorted[middle] ?? 0) < at) low = middle + 1;
-    else high = middle;
-  }
-  return (
-    Math.abs((sorted[low] ?? Number.POSITIVE_INFINITY) - at) <= tolerance ||
-    Math.abs((sorted[low - 1] ?? Number.NEGATIVE_INFINITY) - at) <= tolerance
-  );
 }
 
 export class WorkEventStore {
@@ -110,32 +100,69 @@ export class WorkEventStore {
   backfillPrompts(sessions: RawSession[]): number {
     this.load();
     let added = 0;
-    const livePromptTimes = new Map<string, number[]>();
+    const livePrompts = new Map<string, WorkEvent[]>();
+    const liveAssistantOutputs = new Map<string, WorkEvent[]>();
     for (const event of this.events) {
-      if (event.kind !== "user_prompt" || event.source !== "live") continue;
-      const times = livePromptTimes.get(event.sessionId) ?? [];
-      times.push(event.at);
-      livePromptTimes.set(event.sessionId, times);
+      if (event.source !== "live") continue;
+      const target = event.kind === "user_prompt" ? livePrompts : liveAssistantOutputs;
+      if (event.kind !== "user_prompt" && event.kind !== "assistant_output") continue;
+      const entries = target.get(event.sessionId) ?? [];
+      entries.push(event);
+      target.set(event.sessionId, entries);
     }
-    for (const times of livePromptTimes.values()) times.sort((a, b) => a - b);
+    for (const prompts of livePrompts.values()) prompts.sort((a, b) => a.at - b.at);
+    for (const outputs of liveAssistantOutputs.values()) outputs.sort((a, b) => a.at - b.at);
     for (const session of sessions) {
       if (!session.sessionId) continue;
-      for (const at of session.userPromptTs ?? []) {
-        const valid = validAt(at);
+      const promptActivity = session.userPromptActivity?.length
+        ? session.userPromptActivity
+        : (session.userPromptTs ?? []).map((at) => ({ at, chars: 0 }));
+      for (const prompt of promptActivity) {
+        const valid = validAt(prompt.at);
         if (!valid) continue;
         const id = promptId(session.sessionId, valid);
         if (this.ids.has(id)) continue;
-        const nearby = hasNearby(livePromptTimes.get(session.sessionId) ?? [], valid, 5_000);
-        if (nearby) continue;
+        const nearby = (livePrompts.get(session.sessionId) ?? []).find(
+          (event) => Math.abs(event.at - valid) <= 5_000,
+        );
+        if (nearby) {
+          if (!nearby.chars && prompt.chars > 0) {
+            nearby.chars = Math.floor(prompt.chars);
+            added += 1;
+          }
+          continue;
+        }
         const event: WorkEvent = {
           id,
           kind: "user_prompt",
           at: valid,
           sessionId: session.sessionId,
           vendor: session.vendor,
+          ...(prompt.chars > 0 ? { chars: Math.floor(prompt.chars) } : {}),
           source: "transcript",
         };
         this.events.push(event);
+        this.ids.add(id);
+        added += 1;
+      }
+      for (const output of session.assistantTextActivity ?? []) {
+        const valid = validAt(output.at);
+        if (!valid || output.chars <= 0) continue;
+        const nearby = (liveAssistantOutputs.get(session.sessionId) ?? []).some(
+          (event) => Math.abs(event.at - valid) <= 5_000,
+        );
+        if (nearby) continue;
+        const id = `assistant:${session.sessionId}:${Math.floor(valid)}`;
+        if (this.ids.has(id)) continue;
+        this.events.push({
+          id,
+          kind: "assistant_output",
+          at: valid,
+          sessionId: session.sessionId,
+          vendor: session.vendor,
+          chars: Math.floor(output.chars),
+          source: "transcript",
+        });
         this.ids.add(id);
         added += 1;
       }

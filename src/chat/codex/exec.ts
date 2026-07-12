@@ -1,53 +1,32 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import type { ChatAttachment, ImageAttachment, SessionEffort } from "../driver.js";
+import type {
+  ProcessForkFn,
+  ProcessSandbox,
+  ProcessTurnFn,
+  ProcessTurnHandle,
+  ProcessTurnRequest,
+} from "../process/types.js";
 import type { CodexEvent } from "./events.js";
+import { prepareCodexInput } from "./input.js";
 
-export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
-
-/** One Codex `exec` turn: a fresh thread (no `resume`) or a continuation. */
-export interface CodexExecRequest {
-  cwd: string;
-  prompt: string;
-  attachments?: ChatAttachment[];
-  /** thread id to continue; omitted for a brand-new thread */
-  resume?: string;
-  /** model override for this session/turn */
-  model?: string;
-  /** reasoning effort override for this session/turn (per-model; newer models add max/ultra) */
-  effort?: SessionEffort;
-  /** filesystem policy; chat defaults to danger-full-access, the daemon stays read-only */
-  sandbox?: CodexSandbox;
-  /** JSON Schema file forcing the final message's shape (the analyzer uses it) */
-  outputSchemaFile?: string;
-}
-
-/** A running turn: its event stream, plus a way to stop it (the Stop button). */
-export interface CodexExecHandle {
-  events: AsyncIterable<CodexEvent>;
-  kill(): void;
-}
+export type CodexSandbox = ProcessSandbox;
+export type CodexExecRequest = ProcessTurnRequest;
+export type CodexExecHandle = ProcessTurnHandle<CodexEvent>;
 
 /**
  * Runs one `codex exec` turn and streams its JSONL events. Injectable so the
  * engine and analyzer are unit-testable without spawning a process (mirrors the
  * Claude side's injectable `query`).
  */
-export type CodexExecFn = (req: CodexExecRequest) => CodexExecHandle;
+export type CodexExecFn = ProcessTurnFn<CodexEvent>;
 
 /** Build the real exec function bound to a resolved `codex` binary path. */
 export function makeCodexExec(bin: string): CodexExecFn {
   return (req) => spawnCodexExec(bin, req);
-}
-
-interface PreparedCodexExecInput {
-  prompt: string;
-  imagePaths: string[];
-  cleanup(): void;
 }
 
 function quoteConfigString(value: string): string {
@@ -61,78 +40,9 @@ function configArgs(req: CodexExecRequest): string[] {
   return args;
 }
 
-function sanitizeAttachmentName(name: string): string {
-  const base = path.basename(name).trim();
-  return base.replace(/[^A-Za-z0-9._-]+/g, "-") || "attachment";
-}
-
-function imageExt(mediaType: ImageAttachment["mediaType"]): string {
-  if (mediaType === "image/jpeg") return ".jpg";
-  if (mediaType === "image/gif") return ".gif";
-  if (mediaType === "image/webp") return ".webp";
-  return ".png";
-}
-
-function appendTextAttachment(prompt: string, name: string, text: string): string {
-  const block = [`[Attached text: ${name}]`, text].join("\n");
-  return prompt ? `${prompt}\n\n${block}` : block;
-}
-
-function appendFileAttachment(
-  prompt: string,
-  name: string,
-  mediaType: string,
-  filePath: string,
-): string {
-  const block = [
-    `[Attached file: ${name}]`,
-    `MIME type: ${mediaType}`,
-    `Local path: ${filePath}`,
-    "Read this file from the local path when you need its contents.",
-  ].join("\n");
-  return prompt ? `${prompt}\n\n${block}` : block;
-}
-
-export function prepareCodexExecInput(req: CodexExecRequest): PreparedCodexExecInput {
-  let prompt = req.prompt;
-  const imagePaths: string[] = [];
-  let tempDir: string | null = null;
-  let fileCount = 0;
-  const cleanup = () => {
-    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
-  };
-
-  for (const attachment of req.attachments ?? []) {
-    if (attachment.kind === "text") {
-      prompt = appendTextAttachment(prompt, attachment.name, attachment.text);
-      continue;
-    }
-    if (attachment.kind === "document") {
-      cleanup();
-      throw new Error("Codex chat does not support PDF attachments");
-    }
-    if (!tempDir) {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-codex-"));
-    }
-    fileCount++;
-    if (attachment.kind === "file") {
-      const file = path.join(
-        tempDir,
-        `${String(fileCount).padStart(2, "0")}-${sanitizeAttachmentName(attachment.name)}`,
-      );
-      fs.writeFileSync(file, Buffer.from(attachment.data, "base64"));
-      prompt = appendFileAttachment(prompt, attachment.name, attachment.mediaType, file);
-      continue;
-    }
-    const file = path.join(
-      tempDir,
-      `${String(fileCount).padStart(2, "0")}-${sanitizeAttachmentName(attachment.name)}${imageExt(attachment.mediaType)}`,
-    );
-    fs.writeFileSync(file, Buffer.from(attachment.data, "base64"));
-    imagePaths.push(file);
-  }
-
-  return { prompt, imagePaths, cleanup };
+/** @deprecated Use the transport-neutral Codex input preparer. */
+export function prepareCodexExecInput(req: CodexExecRequest) {
+  return prepareCodexInput(req.prompt, req.attachments);
 }
 
 /**
@@ -232,7 +142,7 @@ function killCodexExec(child: ChildProcess): void {
  * turn so the old answer does not render before the new opening message.
  * `codex exec resume <newId>` then diverges into the branch.
  */
-export type CodexForkFn = (parentId: string, branchText?: string) => string | null;
+export type CodexForkFn = ProcessForkFn;
 
 export function makeCodexFork(sessionsDir: string): CodexForkFn {
   return (parentId, branchText) => forkRollout(sessionsDir, parentId, branchText);
@@ -308,7 +218,22 @@ function forkRollout(
   }
   const newId = randomUUID();
   const out: string[] = [];
-  const lines = raw.split(/\r?\n/).filter((line) => line.trim());
+  // A generating Codex turn appends to the rollout while fork reads it. A
+  // concurrent read can observe the final JSONL record halfway through the
+  // write. Snapshot every completed line, but never copy that unterminated tail
+  // into the child rollout; Codex would reject the child as a malformed
+  // conversation document. This keeps mid-generation fork supported while
+  // branching from the last fully persisted event.
+  const chunks = raw.split(/\r?\n/);
+  if (!/\r?\n$/.test(raw)) {
+    const tail = chunks[chunks.length - 1];
+    try {
+      JSON.parse(tail ?? "");
+    } catch {
+      chunks.pop();
+    }
+  }
+  const lines = chunks.filter((line) => line.trim());
   const forkFrom = lastMatchingUserLine(lines, branchText);
   const sourceLines = forkFrom === null ? lines : lines.slice(0, forkFrom);
   for (const line of sourceLines) {

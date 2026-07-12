@@ -9,10 +9,13 @@ const ENV_KEYS = [
   "ATTEND_PORT",
   "ATTEND_HOST",
   "ATTEND_CLAUDE_PROJECTS",
-  "ATTEND_CLAUDE_MODELS",
-  "ATTEND_CLAUDE_MODELS_CACHE",
+  "ATTEND_CLAUDE_BIN",
   "ATTEND_CODEX_SESSIONS",
   "ATTEND_CODEX_MODELS_CACHE",
+  "ATTEND_CURSOR_SESSIONS",
+  "ATTEND_CURSOR_PROJECTS",
+  "ATTEND_CURSOR_STATE_DB",
+  "ATTEND_CURSOR_BIN",
   "ATTEND_TAGS",
   "ATTEND_ENGAGEMENT",
 ];
@@ -27,10 +30,6 @@ describe("resolveConfig precedence", () => {
     expect(c.port).toBe(5050);
     expect(c.host).toBe("127.0.0.1");
     expect(c.scopeRoots).toEqual([]); // no dirs → list every session
-    expect(c.claudeModels).toEqual([]);
-    expect(c.claudeModelsCache).toBe(
-      path.join(os.homedir(), ".claude", "cache", "gateway-models.json"),
-    );
     expect(c.open).toBe(true);
   });
 
@@ -60,8 +59,6 @@ describe("resolveConfig precedence", () => {
       JSON.stringify({
         port: 8123,
         host: "0.0.0.0",
-        claudeModels: ["opus", "claude-fable-5"],
-        claudeModelsCache: path.join(dir, "claude-models.json"),
       }),
       "utf-8",
     );
@@ -69,25 +66,10 @@ describe("resolveConfig precedence", () => {
       const c = resolveConfig({ positionals: [], config: cfg });
       expect(c.port).toBe(8123);
       expect(c.host).toBe("0.0.0.0");
-      expect(c.claudeModels).toEqual(["opus", "claude-fable-5"]);
-      expect(c.claudeModelsCache).toBe(path.join(dir, "claude-models.json"));
       expect(resolveConfig({ positionals: [], config: cfg, port: "9000" }).port).toBe(9000);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  it("lets env override Claude model options", () => {
-    process.env.ATTEND_CLAUDE_MODELS = "fable, opus, claude-fable-5";
-    process.env.ATTEND_CLAUDE_MODELS_CACHE = "/tmp/attend-claude-models.json";
-    expect(resolveConfig({ positionals: [] }).claudeModels).toEqual([
-      "fable",
-      "opus",
-      "claude-fable-5",
-    ]);
-    expect(resolveConfig({ positionals: [] }).claudeModelsCache).toBe(
-      path.resolve("/tmp/attend-claude-models.json"),
-    );
   });
 
   it("--no-open disables auto-open", () => {
@@ -97,6 +79,21 @@ describe("resolveConfig precedence", () => {
   it("resolves the tag store path from env", () => {
     process.env.ATTEND_TAGS = "/tmp/attend-tags.json";
     expect(resolveConfig({ positionals: [] }).tags).toBe(path.resolve("/tmp/attend-tags.json"));
+  });
+
+  it("allows overriding the Claude executable used by the Agent SDK", () => {
+    process.env.ATTEND_CLAUDE_BIN = "/opt/claude/current/claude";
+    expect(resolveConfig({ positionals: [] }).claudeBin).toBe("/opt/claude/current/claude");
+  });
+
+  it("allows overriding Cursor CLI, native projects, and captured sessions", () => {
+    process.env.ATTEND_CURSOR_BIN = "/opt/cursor/cursor-agent";
+    process.env.ATTEND_CURSOR_PROJECTS = "/tmp/cursor-projects";
+    process.env.ATTEND_CURSOR_SESSIONS = "/tmp/attend-cursor-sessions";
+    const config = resolveConfig({ positionals: [] });
+    expect(config.cursorBin).toBe("/opt/cursor/cursor-agent");
+    expect(config.cursorProjects).toBe(path.resolve("/tmp/cursor-projects"));
+    expect(config.cursorSessions).toBe(path.resolve("/tmp/attend-cursor-sessions"));
   });
 
   it("defaults tags to the scoped vault when one vault root is set", () => {

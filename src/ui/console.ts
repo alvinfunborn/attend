@@ -1,5 +1,5 @@
 import type { AnalysisState } from "../core/daemon/cache.js";
-import type { ModelOption } from "../core/model-options.js";
+import type { ModelDefaults, ModelOption } from "../core/model-options.js";
 import type { Pattern } from "../core/types.js";
 import type { VaultUiState } from "../core/ui-state.js";
 import type { VendorAvailability } from "../core/vendor/detect.js";
@@ -69,12 +69,14 @@ export interface SessionView {
   /** live-only UI state, refreshed from /chat/live-stream while the page is open */
   generating?: boolean;
   generatingStartedAt?: number | null;
-  /** epoch ms of the latest assistant text emitted during the active turn */
+  /** epoch ms of the latest assistant text/tool activity during the active turn */
   lastAssistantOutputAt?: number | null;
   /** completed duration of the latest turn, retained in the tab until the next turn */
   lastGenerationDurationMs?: number | null;
   /** terminal state paired with lastGenerationDurationMs */
   lastGenerationOutcome?: "generated" | "stopped" | "failed" | null;
+  /** local-only: the latest turn ended through this UI's explicit Stop action */
+  lastGenerationStoppedByUser?: boolean;
   /** turn ended and the daemon has not yet supplied the next ETA/state */
   analysisPending?: boolean;
   /** client-created sessions can remember their run overrides for later forks */
@@ -92,18 +94,28 @@ export interface ConsoleView {
   sessions: SessionView[];
   knownDirs: string[];
   scopeRoots: string[];
+  /** Markdown rendered in the chat pane when no session is selected. */
+  changelogMarkdown: string;
   /** browser tab title; usually derived from the launch/scope directory */
   pageTitle?: string;
-  /** distinct sessions with a real user prompt in the trailing 24h */
-  sessions24h: number;
-  /** real user prompts in the trailing 24h */
-  prompts24h: number;
+  /** distinct sessions with a real user prompt in the trailing hour */
+  sessions1h: number;
+  /** real user prompts in the trailing hour */
+  prompts1h: number;
+  /** visible user + assistant conversation characters in the trailing hour */
+  chars1h: number;
   /** locally-detected vendor CLIs — populates the "+ new" provider picker */
   vendors: VendorAvailability[];
   /** Claude models discovered from local Claude Code state, or configured overrides. */
   claudeModels: ModelOption[];
-  /** Codex models discovered from ~/.codex/models_cache.json, when present. */
+  /** Codex models discovered through the CLI, with its internal cache as last fallback. */
   codexModels: ModelOption[];
+  /** Cursor Desktop-enabled models intersected with the Cursor CLI catalog. */
+  cursorModels: ModelOption[];
+  /** Compatibility warnings for vendor-owned internal model sources. */
+  modelWarnings?: { claude?: string | null; codex?: string | null; cursor?: string | null };
+  /** Effective model/effort defaults read from each vendor's CLI. */
+  modelDefaults?: Partial<Record<string, ModelDefaults>>;
   /** global tag list used by the sidebar manager + per-session assignment */
   tags: string[];
   /** vault-owned browser-independent preferences and message UI state. */
@@ -142,7 +154,9 @@ const STYLE = `
     --status-unread: #059669; --status-unread-soft: rgba(16,185,129,0.24);
     --status-seen: #0284c7; --status-seen-soft: rgba(14,165,233,0.18);
     --status-read: #cbd5e1;
-    --latest-label: #4f46e5;
+    /* Cursor's brand is monochrome. Keep its vendor identity neutral instead of
+       assigning it a product-unrelated green, with explicit light/dark surfaces. */
+    --vendor-cursor-fg: #18181b; --vendor-cursor-bg: #f4f4f5; --vendor-cursor-border: #a1a1aa;
     --radius: 8px; --radius-sm: 6px; --radius-pill: 999px;
     --shadow-sm: 0 1px 2px rgba(15,23,42,0.06);
     --shadow-md: 0 6px 18px rgba(15,23,42,0.10), 0 2px 6px rgba(15,23,42,0.06);
@@ -177,7 +191,7 @@ const STYLE = `
     --status-unread: #34d399; --status-unread-soft: rgba(52,211,153,0.24);
     --status-seen: #38bdf8; --status-seen-soft: rgba(56,189,248,0.2);
     --status-read: #475569;
-    --latest-label: #a5b4fc;
+    --vendor-cursor-fg: #f4f4f5; --vendor-cursor-bg: #27272a; --vendor-cursor-border: #71717a;
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.28);
     --shadow-md: 0 8px 22px rgba(0,0,0,0.34), 0 2px 8px rgba(0,0,0,0.28);
     --shadow-pop: 0 18px 40px rgba(0,0,0,0.48), 0 6px 16px rgba(0,0,0,0.34);
@@ -224,6 +238,9 @@ const STYLE = `
   .side .topnav a { font-size: 0.78rem; color: var(--accent); text-decoration: none; align-self: center; margin-left: auto; }
   .searchwrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
   .search-ico { position: absolute; left: 0.7rem; width: 0.9rem; height: 0.9rem; stroke: var(--ink-4); stroke-width: 1.7; fill: none; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+  .search-clear { position: absolute; right: 0.4rem; width: 1.25rem; height: 1.25rem; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; background: transparent; box-shadow: none; color: var(--ink-4); font-size: 0.9rem; line-height: 1; }
+  .search-clear:hover { color: var(--ink); background: var(--button-hover); box-shadow: none; }
+  .search-clear[hidden] { display: none; }
   #newToggle { flex-shrink: 0; font-weight: 700; color: var(--primary-fg); border-color: var(--primary-hover); background: var(--primary-hover); box-shadow: var(--shadow-sm); padding: 0.4rem 0.85rem; }
   #newToggle:hover { background: var(--primary-bg); border-color: var(--primary-bg); box-shadow: 0 4px 14px var(--accent-ring); }
   .theme-toggle { width: 2rem; height: 2rem; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; color: var(--ink-3); background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
@@ -239,10 +256,14 @@ const STYLE = `
     .it-live-label { display: none; }
   }
   .tagbar { padding: 0.7rem 0.95rem; border-bottom: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; gap: 0.5rem; }
-  .tagbar .taghead { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .tagbar .taghead { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem; }
   .tagbar .tagttl { font-size: 0.66rem; font-weight: 700; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
-  .taghead-label { display: flex; align-items: baseline; gap: 0.4rem; }
-  .tagmode-toggle { appearance: none; min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--ink-4); font-size: 0.61rem; text-transform: lowercase; cursor: pointer; }
+  .taghead-label { display: flex; flex: 1 1 auto; align-items: center; gap: 0.45rem; min-width: 0; }
+  .tagsearchwrap { flex: 0 1 8.5rem; min-width: 5.5rem; max-width: 9rem; }
+  .tagsearchwrap .searchbox { width: 100%; height: 1.25rem; box-sizing: border-box; padding: 0.08rem 1.65rem 0.08rem 0.6rem; border-radius: var(--radius-pill); font-size: 0.65rem; line-height: 1; }
+  .tagsearchwrap .search-ico { display: none; }
+  .tagsearchwrap .search-clear { right: 0.16rem; width: 0.95rem; height: 0.95rem; font-size: 0.72rem; }
+  .tagmode-toggle { appearance: none; align-self: flex-end; min-width: 0; padding: 0.05rem 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--ink-4); font-size: 0.61rem; line-height: normal; text-transform: lowercase; cursor: pointer; }
   .tagmode-toggle:hover { color: var(--ink); background: transparent; box-shadow: none; text-decoration: underline; text-underline-offset: 2px; }
   .tagmode-toggle:focus-visible { outline: 1px solid var(--focus); outline-offset: 2px; }
   .instant-tip { position: relative; }
@@ -283,8 +304,10 @@ const STYLE = `
   .gtag.on { border-color: #0f766e; background: #ccfbf1; box-shadow: inset 0 0 0 1px #0f766e; }
   .gtagbtn, .gtagdel { border: 0; border-radius: 0; font-size: 0.7rem; background: transparent; padding: 0.18rem 0.55rem; box-shadow: none; }
   .gtagbtn { color: #0f172a; display: inline-flex; align-items: center; }
+  .gtagcount { margin-left: 0.32rem; font-size: 0.58rem; font-weight: 650; line-height: 1; opacity: 0.58; font-variant-numeric: tabular-nums; }
+  .gtag.deletable .gtagbtn { padding-right: 0.18rem; }
   .gtag.on .gtagbtn { background: transparent; color: #115e59; }
-  .gtagdel { color: var(--ink-4); padding: 0.18rem 0.46rem; margin-left: 0; }
+  .gtagdel { color: var(--ink-4); padding: 0.18rem 0.4rem 0.18rem 0.24rem; margin-left: 0; }
   .gtag.on .gtagdel { border-left: 1px solid rgba(15,118,110,0.24); }
   .gtagdel:hover { background: #fef2f2; color: #b91c1c; }
   .gtag.auto .gtagbtn { font-weight: 600; }
@@ -360,6 +383,8 @@ const STYLE = `
   .chooser-opt-note { flex-shrink: 0; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #0f766e; background: #ccfbf1; border-radius: 3px; padding: 0.04rem 0.34rem; }
   .chooser-empty { padding: 0.45rem 0.5rem; font-size: 0.74rem; color: var(--ink-4); }
   .newbox .nmsg { font-size: 0.72rem; color: var(--ink-4); }
+  .modelwarn { padding: 0.42rem 0.55rem; border: 1px solid var(--warning); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: 0.7rem; line-height: 1.4; }
+  .modelwarn[hidden] { display: none; }
   .nbtn-primary { color: var(--primary-fg); background: var(--primary-hover); border-color: var(--primary-hover); box-shadow: var(--shadow-sm); }
   .nbtn-primary:hover:not(:disabled) { background: var(--primary-bg); border-color: var(--primary-bg); box-shadow: 0 4px 14px var(--accent-ring); }
   #list { overflow-y: auto; flex: 1; padding: 0.3rem 0; }
@@ -405,9 +430,12 @@ const STYLE = `
   .it-live-quiet { color: var(--ink-3); font-weight: 650; transition: color 0.15s; }
   .it-live-quiet.warm { color: #b45309; }
   .it-live-quiet.hot { color: #dc2626; font-weight: 750; }
-  .it-firstline { font-size: 0.72rem; color: #6b7280; margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .it-firstline { font-size: 0.72rem; color: var(--ink-3); margin-top: 0.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prompt-line-label { color: var(--ink-4); font-weight: 700; }
-  .prompt-line-latest { color: var(--latest-label); }
+  .prompt-line-latest ~ .prompt-line-text, .prompt-line-draft ~ .prompt-line-text { font-style: italic; }
+  .draft-edit { display: inline-flex; align-items: center; justify-content: center; vertical-align: -0.12rem; width: 1rem; height: 1rem; margin: 0 0.18rem 0 0; padding: 0; border: 0; border-radius: 3px; background: transparent; color: #dc2626; box-shadow: none; }
+  .draft-edit svg { width: 0.72rem; height: 0.72rem; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .draft-edit:hover { color: #b91c1c; background: var(--danger-soft); box-shadow: none; }
   .it-searchhit { font-size: 0.72rem; color: #4338ca; margin-top: 0.12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .it-meta { font-size: 0.7rem; color: #6b7280; margin-top: 0.2rem; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 0.35rem; }
   .it-footrow { margin-top: 0.4rem; display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
@@ -423,10 +451,11 @@ const STYLE = `
   .it-tagadd:hover { background: #f0fdfa; border-color: transparent; }
   .it-context { margin-left: auto; min-width: 0; max-width: 58%; display: inline-flex; align-items: center; justify-content: flex-end; gap: 0.34rem; overflow: hidden; white-space: nowrap; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.68rem; font-weight: 700; }
   .it-context .ctx-sep { color: var(--ink-4); flex-shrink: 0; opacity: 0.72; }
-  .it-context .ctx-prompts { color: #7c3aed; flex-shrink: 0; }
+  .it-context .ctx-prompts { color: var(--ink-4); flex-shrink: 0; }
   .it-context .vtag, .it-context .ptag { padding: 0; border: 0; background: transparent; border-radius: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .it-context .vtag.claude { color: #d97706; background: transparent; border-color: transparent; }
   .it-context .vtag.codex { color: #6366f1; background: transparent; border-color: transparent; }
+  .it-context .vtag.cursor { color: var(--vendor-cursor-fg); background: transparent; border-color: transparent; }
   .it-context .ptag { color: var(--project-fg, #64748b); font-weight: 700; }
   /* per-tab tag editor + custom suggestion dropdown (replaces the native datalist) */
   .tagedit { position: relative; margin-top: 0.4rem; }
@@ -441,9 +470,9 @@ const STYLE = `
   .tagsug-opt:hover, .tagsug-opt.on { background: var(--accent-soft); color: #3730a3; }
   .tagsug-create { color: var(--ink-3); }
   .tagsug-new { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #0f766e; background: #ccfbf1; border-radius: 3px; padding: 0.04rem 0.34rem; }
-  .state { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-height: 1.28rem; font-size: 0.68rem; line-height: 1; font-weight: 800; letter-spacing: 0; padding: 0.18rem 0.55rem 0.16rem; border-radius: 7px; background: #f8fafc; color: #475569; border: 1px solid #64748b; font-family: ui-monospace, "Cascadia Mono", monospace; text-decoration: underline; text-underline-offset: 2px; box-shadow: inset 0 0 0 1px rgba(100,116,139,0.16); transition: filter 0.12s, transform 0.08s, box-shadow 0.12s; }
+  .state { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-height: 1.28rem; font-size: 0.68rem; line-height: 1; font-weight: 800; letter-spacing: 0; padding: 0.18rem 0.55rem 0.16rem; border-radius: 7px; background: #f8fafc; color: #475569; border: 1px solid #64748b; font-family: ui-monospace, "Cascadia Mono", monospace; text-decoration: underline; text-underline-offset: 2px; box-shadow: inset 0 0 0 1px rgba(100,116,139,0.16); transition: none; }
   .state.editable { cursor: pointer; }
-  .state.editable:hover { filter: saturate(1.18) brightness(0.97); transform: translateY(-1px); box-shadow: inset 0 0 0 1px currentColor, var(--shadow-sm); }
+  .state.editable:hover { filter: brightness(0.96); transform: none; }
   .state.continue_ready { background: #ecfdf5; color: #059669; border-color: #047857; box-shadow: inset 0 0 0 1px rgba(4,120,87,0.18); }
   .state.needs_decision { background: #fff7ed; color: #ea580c; border-color: #c2410c; box-shadow: inset 0 0 0 1px rgba(194,65,12,0.18); }
   .state.needs_input { background: #fffbeb; color: #b45309; border-color: #92400e; box-shadow: inset 0 0 0 1px rgba(146,64,14,0.18); }
@@ -451,21 +480,25 @@ const STYLE = `
   .state.needs_review { background: #ecfdf5; color: #0f766e; border-color: #0f766e; box-shadow: inset 0 0 0 1px rgba(15,118,110,0.18); }
   .state.followup_suggested { background: #eff6ff; color: #0284c7; border-color: #0369a1; box-shadow: inset 0 0 0 1px rgba(3,105,161,0.18); }
   .state.done { background: #f1f5f9; color: #475569; border-color: #64748b; box-shadow: inset 0 0 0 1px rgba(100,116,139,0.18); }
-  .it-reason { flex: 1 1 5rem; min-width: 3rem; font-size: 0.68rem; color: #9ca3af; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Reason is the current-state explanation, not disposable metadata. Keep it
+     quieter than the title, but readable; italic and underline already carry
+     latest/draft and editable/manual semantics elsewhere in the row. */
+  .it-reason { flex: 1 1 5rem; min-width: 3rem; font-size: 0.68rem; color: var(--ink-3); font-weight: 550; font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .it-title.pending { color: #9ca3af; font-weight: 500; }
-  .prilabel { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-height: 1.08rem; min-width: 1.7rem; padding: 0.08rem 0.28rem; border-radius: 4px; background: transparent; color: var(--ink-3); cursor: pointer; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.68rem; line-height: 1; font-weight: 800; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+  .prilabel { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-height: 1.08rem; min-width: 1.7rem; padding: 0.08rem 0.28rem; border-radius: 4px; background: transparent; color: var(--ink-3); cursor: pointer; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.68rem; line-height: 1; font-weight: 800; letter-spacing: 0; font-variant-numeric: tabular-nums; transition: none; }
   .prilabel.l1 { color: var(--priority-1-fg); background: var(--priority-1-bg); }
   .prilabel.l2 { color: var(--priority-2-fg); background: var(--priority-2-bg); }
   .prilabel.l3 { color: var(--priority-3-fg); background: var(--priority-3-bg); }
   .prilabel.l4 { color: var(--priority-4-fg); background: var(--priority-4-bg); }
   .prilabel.l5 { color: var(--priority-5-fg); background: var(--priority-5-bg); }
-  .prilabel:hover { box-shadow: inset 0 0 0 1px rgba(100,116,139,0.28); }
-  .b-eta { flex-shrink: 0; color: #b45309; background: #fffbeb; padding: 0.04rem 0.36rem; border-radius: 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
+  .prilabel:hover { filter: brightness(0.96); transform: none; }
+  .b-eta { flex-shrink: 0; color: #b45309; background: #fffbeb; padding: 0.04rem 0.36rem; border-radius: 4px; cursor: pointer; font-variant-numeric: tabular-nums; transition: none; }
   .b-eta:hover { background: #fef3c7; }
   .vtag, .ptag { flex-shrink: 0; display: inline-flex; align-items: center; border-radius: 999px; padding: 0.06rem 0.46rem; font-size: 0.66rem; font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif; border: 1px solid transparent; }
   .vtag { font-weight: 700; letter-spacing: 0.01em; }
   .vtag.claude { color: #c2410c; background: #fff7ed; border-color: #fdba74; }
   .vtag.codex { color: #3730a3; background: #eef2ff; border-color: #a5b4fc; }
+  .vtag.cursor { color: var(--vendor-cursor-fg); background: var(--vendor-cursor-bg); border-color: var(--vendor-cursor-border); }
   .ptag { font-weight: 600; }
   #h-sig .score, #h-sig .eta { cursor: pointer; }
   /* a manually-pinned priority/ETA: dashed underline marks it as user-set */
@@ -541,7 +574,7 @@ const STYLE = `
   .latestpin.show { display: flex; }
   .latestpin:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -3px; }
   .latestpin-body { flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.65rem; overflow: hidden; }
-  .latestpin-k { flex-shrink: 0; color: #3730a3; border: 1px solid rgba(79,70,229,0.42); background: rgba(99,102,241,0.12); border-radius: 8px; padding: 0.2rem 0.52rem; font-size: 0.64rem; line-height: 1; font-weight: 850; letter-spacing: 0.11em; text-transform: uppercase; font-family: ui-monospace, "Cascadia Mono", monospace; }
+  .latestpin-k { flex-shrink: 0; color: #3730a3; border: 0; background: transparent; padding: 0; font-size: 0.64rem; line-height: 1; font-weight: 850; letter-spacing: 0.11em; text-transform: uppercase; font-family: ui-monospace, "Cascadia Mono", monospace; }
   .latestpin-arrow { margin-left: auto; flex-shrink: 0; color: #64748b; font-family: ui-monospace, "Cascadia Mono", monospace; }
   .latestpin-text { flex: 1; min-width: 0; max-width: none; background: transparent; color: var(--ink-2); border: 0; border-radius: 0; box-shadow: none; padding: 0; font-family: inherit; font-size: 0.86rem; font-style: normal; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; font-variant: normal; text-rendering: optimizeLegibility; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Back-compat for previews rendered by an older open tab before the next refresh. */
@@ -558,7 +591,7 @@ const STYLE = `
   .pintray.show { display: flex; }
   .pinitem { width: 100%; min-width: 0; display: flex; align-items: center; gap: 0.65rem; border: 1px solid rgba(148,163,184,0.34); border-radius: 9px; background: rgba(255,255,255,0.56); padding: 0.4rem 0.58rem; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.22); }
   .pinitem:hover { border-color: var(--accent); }
-  .pinrole { flex-shrink: 0; font-size: 0.66rem; line-height: 1; font-weight: 850; letter-spacing: 0.09em; text-transform: uppercase; color: #64748b; border: 1px solid rgba(148,163,184,0.34); border-radius: 8px; padding: 0.28rem 0.52rem; font-family: ui-monospace, "Cascadia Mono", monospace; }
+  .pinrole { flex-shrink: 0; font-size: 0.66rem; line-height: 1; font-weight: 850; letter-spacing: 0.09em; text-transform: uppercase; color: #64748b; border: 0; background: transparent; padding: 0; font-family: ui-monospace, "Cascadia Mono", monospace; }
   .pintext { flex: 1; min-width: 0; max-width: none; font-family: inherit; font-size: 0.86rem; font-style: normal; line-height: 1.45; font-weight: 400; letter-spacing: 0; text-transform: none; font-variant: normal; text-rendering: optimizeLegibility; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pinx { flex-shrink: 0; border: 0; background: transparent; color: var(--ink-4); box-shadow: none; padding: 0.08rem 0.22rem; line-height: 1; font-size: 1.1rem; }
   .pinx:hover { color: #b91c1c; background: transparent; }
@@ -566,22 +599,62 @@ const STYLE = `
   .msg { display: flex; align-items: center; gap: 0.28rem; }
   .msg.user { justify-content: flex-end; align-items: center; gap: 0.28rem; }
   /* hover-revealed controls for user/assistant bubbles */
-  .msg-edit, .msg-pin, .msg-fold { flex-shrink: 0; opacity: 0; pointer-events: none; width: 1.72rem; height: 1.72rem; display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: var(--msg-control-bg); color: var(--ink-4); padding: 0; box-shadow: none; line-height: 1; transition: opacity 0.12s, color 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s; }
+  .msg-edit, .msg-pin, .msg-fold, .msg-comment { flex-shrink: 0; opacity: 0; pointer-events: none; width: 1.72rem; height: 1.72rem; display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 7px; background: var(--msg-control-bg); color: var(--ink-4); padding: 0; box-shadow: none; line-height: 1; transition: opacity 0.12s, color 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s; }
   .msg-edit { order: -3; }
   .msg-fold { order: -1; }
   .msg-pin { order: 1; }
+  .msg-comment { order: 2; position: relative; }
   .msg.user .msg-pin { order: -2; }
   .msg.assistant .msg-pin { order: 1; }
-  .msg-edit svg, .msg-pin svg, .msg-fold svg { width: 0.98rem; height: 0.98rem; stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .msg-edit svg, .msg-pin svg, .msg-fold svg, .msg-comment svg { width: 0.98rem; height: 0.98rem; stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
   .msg-pin .pin-body { fill: transparent; transition: fill 0.12s; }
-  .msg:hover .msg-edit, .msg:hover .msg-pin, .msg:hover .msg-fold, .msg:focus-within .msg-edit, .msg:focus-within .msg-pin, .msg:focus-within .msg-fold, .msg-pin.on { opacity: 1; pointer-events: auto; }
-  .msg-edit:hover, .msg-pin:hover, .msg-fold:hover { color: var(--ink); border-color: var(--msg-control-border); background: var(--msg-control-hover-bg); box-shadow: var(--shadow-sm); }
+  .msg:hover .msg-edit, .msg:hover .msg-pin, .msg:hover .msg-fold, .msg:hover .msg-comment, .msg:focus-within .msg-edit, .msg:focus-within .msg-pin, .msg:focus-within .msg-fold, .msg:focus-within .msg-comment, .msg-pin.on, .msg-comment.has-comments { opacity: 1; pointer-events: auto; }
+  .msg-edit:hover, .msg-pin:hover, .msg-fold:hover, .msg-comment:hover { color: var(--ink); border-color: var(--msg-control-border); background: var(--msg-control-hover-bg); box-shadow: var(--shadow-sm); }
+  .msg-comment.has-comments { color: var(--accent); }
+  .msg-comment-count { position: absolute; right: -0.18rem; top: -0.24rem; min-width: 0.82rem; height: 0.82rem; padding: 0 0.16rem; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--accent); color: white; font-size: 0.52rem; font-weight: 700; line-height: 1; }
   .msg-pin.on { color: var(--accent); border-color: var(--msg-control-active-border); background: var(--msg-control-active-bg); }
   .msg-pin.on .pin-body { fill: rgba(79,70,229,0.16); }
   .msg.editing { justify-content: stretch; }
   .msg.editing .msg-edit { display: none; }
   .msg.editing .msg-pin { display: none; }
   .msg.editing .msg-fold { display: none; }
+  .msg.editing .msg-comment { display: none; }
+  .pincomment { flex-shrink: 0; border: 0; border-radius: var(--radius-pill); padding: 0.16rem 0.42rem; background: var(--accent-soft); color: var(--accent); font-size: 0.62rem; font-weight: 700; box-shadow: none; }
+  .pincomment.generating { animation: pulse 1.25s ease-in-out infinite; }
+  .pincomment.unread::after { content: ""; display: inline-block; width: 0.38rem; height: 0.38rem; margin-left: 0.28rem; border-radius: 50%; background: #22c55e; vertical-align: 0.04rem; }
+  .commentdrawer { position: fixed; inset: 0; z-index: 95; display: flex; justify-content: flex-end; background: rgba(15,23,42,0.24); }
+  .commentdrawer[hidden] { display: none; }
+  .commentpanel { --comment-composer-overlay-height: 4rem; --comment-queue-overlay-height: 0px; position: relative; width: min(34rem, 92vw); height: 100%; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--line); box-shadow: var(--shadow-pop); }
+  .commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center; gap: 0.65rem; padding: 0 0.65rem 0 0.9rem; border-bottom: 1px solid var(--line-2); }
+  .commenttitle { flex: 1; min-width: 0; color: var(--ink); font-size: 0.84rem; line-height: 1; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .commentactions { flex-shrink: 0; display: flex; align-items: center; gap: 0.14rem; }
+  .commentpromote { height: 1.75rem; min-height: 1.75rem; padding: 0 0.5rem; border-color: transparent; background: transparent; color: var(--accent); box-shadow: none; font-size: 0.68rem; line-height: 1; font-weight: 700; }
+  .commentpromote:hover:not(:disabled) { border-color: transparent; background: var(--accent-soft); color: var(--accent); box-shadow: none; }
+  .commentpromote:disabled { border-color: transparent; background: transparent; }
+  .commentclose { width: 1.75rem; height: 1.75rem; min-height: 1.75rem; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: transparent; background: transparent; color: var(--ink-3); box-shadow: none; font-size: 1.05rem; line-height: 1; }
+  .commentclose:hover { border-color: transparent; background: var(--button-hover); color: var(--ink); box-shadow: none; }
+  .commentanchor { margin: 0.65rem 0.9rem 0; min-width: 0; }
+  .commentanchor-head { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.38rem; cursor: pointer; }
+  .commentanchor-head:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; border-radius: 3px; }
+  .commentanchor-label { flex: 1; min-width: 0; color: var(--ink-4); font-size: 0.59rem; line-height: 1; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+  .commentanchor-toggle { color: var(--ink-4); font-size: 0.61rem; line-height: 1; }
+  .commentanchor[aria-expanded="false"] .commentanchor-content { display: none; }
+  .commentanchor-content { min-width: 0; max-height: 35vh; overflow: auto; }
+  .commentanchor-content > .msg { align-items: center; }
+  .commentanchor-content > .msg .bubble { max-width: 100%; }
+  .commentanchor-content > .toolc { max-width: 100%; }
+  .commenttopstack { margin: 0.55rem 0.9rem 0; }
+  .commentmsgs { flex: 1; min-height: 0; overflow-y: auto; padding: 0.8rem 0.9rem calc(var(--comment-composer-overlay-height) + var(--comment-queue-overlay-height) + 0.8rem); display: flex; flex-direction: column; gap: 0.6rem; }
+  .commentfoot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 20; padding: 0 0.9rem 0.75rem; border-top: 0; background: transparent; }
+  .commentcomposer { width: 100%; box-sizing: border-box; }
+  .commentcomposer .composerrow { min-height: 2.15rem; }
+  .commentfoot .commentcomposer textarea { height: 2.15rem; min-height: 2.15rem; max-height: 2.15rem; padding: 0.42rem 5.2rem 0.42rem 0.35rem; overflow-y: auto; }
+  .scrollbottom { position: absolute; z-index: 24; width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--line-2); border-radius: 50%; background: var(--surface); color: var(--ink-3); box-shadow: var(--shadow-md); }
+  .scrollbottom:hover { color: var(--accent); border-color: var(--accent); background: var(--surface); }
+  .scrollbottom[hidden] { display: none; }
+  .scrollbottom svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .chat-scrollbottom { right: 1.55rem; bottom: calc(var(--composer-overlay-height) + var(--queue-overlay-height) + var(--avoid-overlay-height) + 0.55rem); }
+  .comment-scrollbottom { right: 1.35rem; bottom: calc(var(--comment-composer-overlay-height) + var(--comment-queue-overlay-height) + 0.55rem); }
   .msg.editing .inline-edit { width: 100%; }
   /* shared in-place editor (sent-message resend + queued-draft edit) */
   .inline-edit { position: relative; width: 100%; --inline-edit-actions-space: 9.4rem; }
@@ -664,8 +737,11 @@ const STYLE = `
   .unlock-btn { border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent); color: white; padding: 0.55rem 0.75rem; font-weight: 800; cursor: pointer; }
   .unlock-msg { min-height: 1.1rem; margin-top: 0.55rem; color: #b91c1c; font-size: 0.76rem; }
   .tool { align-self: flex-start; font-family: ui-monospace, monospace; font-size: 0.72rem; color: #5b21b6; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 6px; padding: 0.2rem 0.5rem; }
+  .toolrow { align-self: flex-start; max-width: 100%; display: flex; align-items: center; gap: 0.28rem; }
+  .toolrow > .toolc { min-width: 0; max-width: calc(100% - 4rem); }
   .toolc { align-self: flex-start; max-width: 88%; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.74rem; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 6px; }
   .toolc > summary { cursor: pointer; padding: 0.28rem 0.6rem; color: #5b21b6; list-style: none; user-select: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .toolrow:hover > .msg-pin, .toolrow:hover > .msg-comment, .toolrow:focus-within > .msg-pin, .toolrow:focus-within > .msg-comment, .toolrow > .msg-pin.on, .toolrow > .msg-comment.has-comments { opacity: 1; pointer-events: auto; }
   .toolc > summary::-webkit-details-marker { display: none; }
   .toolc > summary::before { content: "▸ "; color: #a78bda; }
   .toolc[open] > summary::before { content: "▾ "; }
@@ -720,8 +796,20 @@ const STYLE = `
   .rq.busy { opacity: 0.8; }
   .rplan { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; line-height: 1.5; color: var(--ink-2); max-height: 420px; overflow: auto; }
   .placeholder { margin: auto; color: #9ca3af; text-align: center; font-size: 0.9rem; max-width: 32ch; line-height: 1.5; }
+  .changelog { width: min(38rem, calc(100% - 2rem)); margin: auto; color: var(--ink); }
+  .changelog-kicker { color: var(--accent); font-size: 0.66rem; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+  .changelog-content > h1 { margin: 0.35rem 0 0; font-size: 1.45rem; line-height: 1.2; letter-spacing: -0.025em; }
+  .changelog-content > p { margin: 0.45rem 0 0; color: var(--ink-3); font-size: 0.78rem; line-height: 1.55; }
+  .changelog-content h2 { margin: 1.25rem 0 0; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 1rem; line-height: 1.35; }
+  .changelog-content h3 { margin: 0.9rem 0 0; color: var(--ink-2); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; }
+  .changelog-content ul { margin: 0.55rem 0 0; padding-left: 1.15rem; color: var(--ink-3); font-size: 0.78rem; line-height: 1.55; }
+  .changelog-content li + li { margin-top: 0.35rem; }
+  .changelog-hint { margin-top: 1rem; color: var(--ink-4); font-size: 0.72rem; line-height: 1.5; }
+  @media (max-width: 620px) {
+    .changelog { width: calc(100% - 1rem); }
+  }
   .foot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 20; border-top: 0; padding: 0 1.1rem 1rem; background: transparent; }
-  body.no-session #queue, body.no-session .foot { display: none; }
+  body.no-session #queue, body.no-session .foot, body.no-session .chat-scrollbottom { display: none; }
   .composer { min-width: 0; display: flex; flex-direction: column; gap: 0.35rem; border: 1px solid var(--line-2); border-radius: var(--radius); padding: 0.45rem; background: var(--input-bg); box-shadow: var(--shadow-sm); transition: background 0.15s, box-shadow 0.15s, border-color 0.15s; }
   .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
   .composer.drop { border-color: #818cf8; background: var(--drop-bg); box-shadow: 0 0 0 4px rgba(99,102,241,0.12), 0 0 0 1px #818cf8; }
@@ -791,17 +879,28 @@ const STYLE = `
   .forktree-control svg { width: 0.9rem; height: 0.9rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .forktree-viewport { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--surface-2); cursor: grab; touch-action: none; }
   .forktree-viewport.dragging { cursor: grabbing; }
-  .forktree-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+  .forktree-pan { position: absolute; left: 0; top: 0; will-change: transform; }
+  .forktree-stage { position: relative; left: 0; top: 0; transform-origin: 0 0; }
   .forktree-edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
   .forktree-edge { fill: none; stroke: var(--line-2); stroke-width: 1.5; }
-  .forktree-node { position: absolute; width: 176px; height: 58px; display: grid; grid-template-columns: 0.65rem minmax(0,1fr); grid-template-rows: auto auto; column-gap: 0.48rem; align-content: center; padding: 0.48rem 0.58rem; overflow: hidden; text-align: left; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink-2); box-shadow: var(--shadow-sm); }
+  .forktree-node { position: absolute; width: 300px; height: 112px; box-sizing: border-box; padding: 0; overflow: hidden; text-align: left; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink-2); box-shadow: var(--shadow-sm); }
   .forktree-node:hover { border-color: var(--accent); background: var(--surface); box-shadow: var(--shadow-md); }
   .forktree-node.current { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring), var(--shadow-md); }
   .forktree-node.missing { cursor: default; opacity: 0.64; }
-  .forktree-node-dot { grid-row: 1 / span 2; align-self: center; width: 0.56rem; height: 0.56rem; cursor: default; }
+  .forktree-node-content { width: var(--forktree-content-size, 100%); height: var(--forktree-content-size, 100%); box-sizing: border-box; display: flex; flex-direction: column; padding: 0.38rem 0.65rem; transform: scale(var(--forktree-content-scale, 1)); transform-origin: left top; }
+  .forktree-node-head { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
+  .forktree-node-dot { align-self: center; width: 0.56rem; height: 0.56rem; cursor: default; }
   .forktree-node-dot.it-status:hover { transform: none; }
-  .forktree-node-title { display: block; justify-self: start; width: var(--forktree-text-width, 100%); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transform: scale(var(--forktree-text-scale, 1)); transform-origin: left center; color: var(--ink); font-size: 0.74rem; font-weight: 700; }
-  .forktree-node-meta { display: block; justify-self: start; width: var(--forktree-text-width, 100%); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transform: scale(var(--forktree-text-scale, 1)); transform-origin: left center; color: var(--ink-4); font-size: 0.62rem; font-family: ui-monospace, monospace; }
+  .forktree-node-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 0.82rem; font-weight: 700; }
+  .forktree-node-title.session-title.has-aux .session-title-main { max-width: 62%; }
+  .forktree-node-age { flex-shrink: 0; color: var(--ink-4); font-size: 0.62rem; font-family: ui-monospace, monospace; white-space: nowrap; }
+  .forktree-node-signals.it-meta { min-height: 0.85rem; margin-top: 0.18rem; font-size: 0.66rem; }
+  .forktree-node .it-firstline { margin-top: 0.16rem; font-size: 0.68rem; }
+  .forktree-node-foot { margin-top: auto; padding-top: 0.22rem; border-top: 1px solid var(--row-line); }
+  .forktree-node-foot .it-tags { flex-wrap: nowrap; overflow: hidden; }
+  .forktree-node-foot .it-tag { flex-shrink: 0; font-size: 0.61rem; padding: 0.06rem 0.34rem; }
+  .forktree-node-foot .it-context { max-width: 64%; font-size: 0.62rem; }
+  .forktree-node-missing { margin: auto 0; color: var(--ink-4); font-size: 0.68rem; font-family: ui-monospace, monospace; }
   .work-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
   .work-kpi { min-width: 0; padding: 0 0.8rem 0.85rem; border-right: 1px solid var(--line); }
   .work-kpi:first-child { padding-left: 0; }
@@ -843,10 +942,10 @@ const STYLE = `
   .work-dormant-row:hover { background: var(--item-hover); }
   .work-dormant-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.76rem; font-weight: 700; }
   .work-dormant-project, .work-dormant-age, .work-dormant-meta { color: var(--ink-3); font-size: 0.68rem; white-space: nowrap; }
-  .foot button.send { height: 1.8rem; min-height: 1.8rem; background: var(--primary-hover); color: var(--primary-fg); border-color: var(--primary-hover); padding: 0 0.78rem; font-weight: 600; box-shadow: var(--shadow-sm); }
-  .foot button.send:hover:not(:disabled) { background: var(--primary-bg); border-color: var(--primary-bg); box-shadow: 0 4px 14px var(--accent-ring); }
-  .foot button.send.stopping { background: #b91c1c; border-color: #b91c1c; }
-  .foot button.send.stopping:hover { background: #991b1b; }
+  .foot button.send, .commentfoot button.send { height: 1.8rem; min-height: 1.8rem; background: var(--primary-hover); color: var(--primary-fg); border-color: var(--primary-hover); padding: 0 0.78rem; font-weight: 600; box-shadow: var(--shadow-sm); }
+  .foot button.send:hover:not(:disabled), .commentfoot button.send:hover:not(:disabled) { background: var(--primary-bg); border-color: var(--primary-bg); box-shadow: 0 4px 14px var(--accent-ring); }
+  .foot button.send.stopping, .commentfoot button.send.stopping { background: #b91c1c; border-color: #b91c1c; }
+  .foot button.send.stopping:hover, .commentfoot button.send.stopping:hover { background: #991b1b; }
   .foot button.runbtn { width: 100%; height: 1.8rem; min-height: 1.8rem; max-width: 13rem; color: #334155; border-color: #cbd5e1; background: var(--surface); padding: 0 0.58rem; font-size: 0.72rem; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .foot button.runbtn:hover:not(:disabled) { background: var(--surface-2); border-color: #94a3b8; }
   .foot button.runbtn.dirty { color: #3730a3; border-color: #a5b4fc; background: #eef2ff; }
@@ -901,7 +1000,7 @@ const STYLE = `
   html[data-theme="dark"] .viewtabgroup.on .viewtab.on { background: transparent; box-shadow: none; }
   html[data-theme="dark"] .viewtabgroup.on .viewtabx { border-left-color: rgba(129,140,248,0.26); }
   html[data-theme="dark"] .viewtabgroup.on .viewtabx:hover { color: #fecdd3; background: rgba(127,29,29,0.28); }
-  html[data-theme="dark"] .prilabel:hover { box-shadow: inset 0 0 0 1px rgba(203,213,225,0.28); }
+  html[data-theme="dark"] .prilabel:hover { filter: brightness(1.08); box-shadow: none; }
   html[data-theme="dark"] .prilabel.l1 { color: #fca5a5; background: rgba(220,38,38,0.14); }
   html[data-theme="dark"] .prilabel.l2 { color: #fbbf24; background: rgba(245,158,11,0.14); }
   html[data-theme="dark"] .prilabel.l3 { color: #5eead4; background: rgba(16,185,129,0.14); }
@@ -921,8 +1020,8 @@ const STYLE = `
   html[data-theme="dark"] .bulkarchive:disabled { color: var(--ink-4); background: transparent; box-shadow: none; }
   html[data-theme="dark"] .it-context .vtag.claude { color: #f0ab8a; }
   html[data-theme="dark"] .it-context .vtag.codex { color: #c4b5fd; }
+  html[data-theme="dark"] .it-context .vtag.cursor { color: var(--vendor-cursor-fg); }
   html[data-theme="dark"] .it-context .ptag { color: var(--project-fg-dark, #cbd5e1); }
-  html[data-theme="dark"] .it-context .ctx-prompts { color: #d8b4fe; }
   html[data-theme="dark"] .it-live-total { color: #60a5fa; }
   html[data-theme="dark"] .it-live.generated .it-live-total { color: #5eead4; }
   html[data-theme="dark"] .it-live.stopped .it-live-total { color: #fbbf24; }
@@ -933,6 +1032,7 @@ const STYLE = `
   html[data-theme="dark"] .tipmeta-v { color: #dbe4ee; }
   html[data-theme="dark"] .tipmeta .vtag.claude { color: #f0ab8a; background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .vtag.codex { color: #c4b5fd; background: transparent; border-color: transparent; }
+  html[data-theme="dark"] .tipmeta .vtag.cursor { color: var(--vendor-cursor-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .ptag { color: var(--project-fg-dark, #cbd5e1); }
   html[data-theme="dark"] .msg.error .bubble,
   html[data-theme="dark"] .toolc .tool-out.err { background: #451a1a; color: #fecaca; border-color: #7f1d1d; }
@@ -964,11 +1064,11 @@ const STYLE = `
   html[data-theme="dark"] .topstack-title::before { color: #a5b4fc; }
   html[data-theme="dark"] .latestpin { background: rgba(49,46,129,0.22); border-color: rgba(99,102,241,0.62); }
   html[data-theme="dark"] .latestpin:hover { background: rgba(49,46,129,0.34); border-color: #818cf8; }
-  html[data-theme="dark"] .latestpin-k { color: #c7d2fe; border-color: rgba(129,140,248,0.54); background: rgba(99,102,241,0.22); }
+  html[data-theme="dark"] .latestpin-k { color: #c7d2fe; border-color: transparent; background: transparent; }
   html[data-theme="dark"] .latestpin-arrow { color: #94a3b8; }
   html[data-theme="dark"] .pinitem { background: rgba(30,41,59,0.72); border-color: #2f3a4a; box-shadow: inset 0 0 0 1px rgba(148,163,184,0.08); }
   html[data-theme="dark"] .pinitem:hover { border-color: #818cf8; }
-  html[data-theme="dark"] .pinrole { color: #94a3b8; border-color: #344256; background: rgba(15,23,42,0.22); }
+  html[data-theme="dark"] .pinrole { color: #94a3b8; border-color: transparent; background: transparent; }
   html[data-theme="dark"] .pintext { color: #dbe4ee; }
   html[data-theme="dark"] .msg-pin.on .pin-body { fill: rgba(129,140,248,0.2); }
   html[data-theme="dark"] .gtagdel:hover,
@@ -979,6 +1079,8 @@ const STYLE = `
   html[data-theme="dark"] .it-tag:not(.auto),
   html[data-theme="dark"] .tagadd-compact,
   html[data-theme="dark"] .it-tagadd { color: #5eead4; }
+  html[data-theme="dark"] .tagadd-compact:hover,
+  html[data-theme="dark"] .it-tagadd:hover { color: #99f6e4; background: rgba(20,184,166,0.16); border-color: transparent; }
   /* Mobile: one page at a time — the session list, or the chat. Selecting a
      session slides to chat (body.show-chat); the back button returns to the list. */
   @media (max-width: 760px) {
@@ -1043,6 +1145,13 @@ function brandScopeLabel(pageTitle: string): string {
   return pageTitle.replace(/^Attend\s*[—-]\s*/, "").trim() || "console";
 }
 
+function compactThroughput(value: number): string {
+  const n = Math.max(0, Number(value) || 0);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
 export function renderConsole(v: ConsoleView): string {
   const sessJson = JSON.stringify(v.sessions).replace(/</g, "\\u003c");
   const dirsJson = JSON.stringify(v.knownDirs).replace(/</g, "\\u003c");
@@ -1053,12 +1162,17 @@ export function renderConsole(v: ConsoleView): string {
   const vendorsJson = JSON.stringify(v.vendors).replace(/</g, "\\u003c");
   const claudeModelsJson = JSON.stringify(v.claudeModels).replace(/</g, "\\u003c");
   const codexModelsJson = JSON.stringify(v.codexModels).replace(/</g, "\\u003c");
+  const cursorModelsJson = JSON.stringify(v.cursorModels).replace(/</g, "\\u003c");
+  const modelWarningsJson = JSON.stringify(v.modelWarnings ?? {}).replace(/</g, "\\u003c");
+  const modelDefaultsJson = JSON.stringify(v.modelDefaults ?? {}).replace(/</g, "\\u003c");
   const tagsJson = JSON.stringify(v.tags).replace(/</g, "\\u003c");
   const vaultStateJson = JSON.stringify(v.vaultState ?? {}).replace(/</g, "\\u003c");
   const e2eeJson = JSON.stringify(v.e2ee ?? { enabled: false }).replace(/</g, "\\u003c");
+  const changelogJson = JSON.stringify(v.changelogMarkdown).replace(/</g, "\\u003c");
 
-  const sessions24h = String(Math.max(0, Math.round(v.sessions24h)));
-  const prompts24h = String(Math.max(0, Math.round(v.prompts24h)));
+  const sessions1h = compactThroughput(v.sessions1h);
+  const prompts1h = compactThroughput(v.prompts1h);
+  const chars1h = compactThroughput(v.chars1h);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1076,13 +1190,17 @@ export function renderConsole(v: ConsoleView): string {
       <span class="brand-name">Attend</span>
       <span class="brand-scope" title="${escapeHtmlText(pageTitle)}">${escapeHtmlText(brandScope)}</span>
       <button id="workStatsBtn" class="brand-stats" type="button" aria-label="open work statistics" aria-expanded="false">
-        <span class="statcard" title="distinct prompted sessions · trailing 24h">
-          <span id="sessions24h" class="statval">${sessions24h}</span>
-          <span class="statlbl">sessions/24h</span>
+        <span class="statcard" title="distinct prompted sessions · trailing 1h">
+          <span id="sessions1h" class="statval">${sessions1h}</span>
+          <span class="statlbl">sessions/1h</span>
         </span>
-        <span class="statcard" title="user prompts · trailing 24h">
-          <span id="prompts24h" class="statval">${prompts24h}</span>
-          <span class="statlbl">pushes/24h</span>
+        <span class="statcard" title="user prompts · trailing 1h">
+          <span id="prompts1h" class="statval">${prompts1h}</span>
+          <span class="statlbl">pushes/1h</span>
+        </span>
+        <span class="statcard" title="user + assistant conversation characters · trailing 1h">
+          <span id="chars1h" class="statval">${chars1h}</span>
+          <span class="statlbl">chars/1h</span>
         </span>
       </button>
     </div>
@@ -1103,6 +1221,7 @@ export function renderConsole(v: ConsoleView): string {
         <path d="M10.2 10.2 14 14"></path>
       </svg>
       <input id="search" class="searchbox" placeholder="Search sessions…" autocomplete="off">
+      <button id="searchClear" class="search-clear" type="button" aria-label="clear session search" hidden>×</button>
     </div>
     <button id="newToggle" aria-expanded="false">+ new</button>
   </div>
@@ -1130,6 +1249,7 @@ export function renderConsole(v: ConsoleView): string {
         <select id="neffort" class="chooser-select" aria-label="effort"></select>
       </div>
     </div>
+    <div class="modelwarn" id="nmodelWarning" hidden></div>
       <div class="pickgrp">
         <div class="picklbl">project dir</div>
         <div class="chooser" id="ndirBox">
@@ -1162,6 +1282,10 @@ export function renderConsole(v: ConsoleView): string {
     <div class="taghead">
       <div class="taghead-label">
         <span class="tagttl">tags</span>
+        <div class="searchwrap tagsearchwrap">
+          <input id="tagSearch" class="searchbox" placeholder="Search tags…" autocomplete="off" aria-label="search tags and sessions in this view">
+          <button id="tagSearchClear" class="search-clear" type="button" aria-label="clear tag search" hidden>×</button>
+        </div>
         <button id="tagModeToggle" class="tagmode-toggle instant-tip instant-tip-left" type="button" aria-pressed="false" data-tooltip="Show sessions matching any selected tag. Click to require all selected tags.">show sessions with <span id="tagModeValue">any</span> <span id="tagModeNoun">tag</span></button>
       </div>
       <button id="bulkArchiveSeen" class="bulkarchive instant-tip instant-tip-right" type="button" disabled data-tooltip="No seen sessions matching the current view and focus filters to archive">archive 0 seen sessions in this view</button>
@@ -1197,7 +1321,7 @@ export function renderConsole(v: ConsoleView): string {
           </button>
         </div>
       </div>
-      <div class="it-meta" id="h-sig"></div><div class="s" id="h-sub">Select a session, or + new</div><div id="h-tags"></div>
+      <div class="it-meta" id="h-sig"></div><div class="s" id="h-sub">Recent changes</div><div id="h-tags"></div>
     </div>
   </div>
   <div class="topstack" id="topStack" aria-hidden="true">
@@ -1206,9 +1330,16 @@ export function renderConsole(v: ConsoleView): string {
       <div class="latestpin-body" id="latestPinBody"></div>
     </div>
   </div>
-  <div id="msgs"><div class="placeholder" id="ph">Pick a session on the left to see its chat, then type below to continue it — all in the browser.</div></div>
+  <div id="msgs">
+    <section class="changelog" id="ph" aria-label="Changelog">
+      <div class="changelog-kicker">What's new</div>
+      <div class="changelog-content" id="changelogContent"></div>
+      <div class="changelog-hint">Select a session on the left to open its chat, or choose + new to start one.</div>
+    </section>
+  </div>
   <div id="avoidPanel" hidden></div>
   <div id="queue"></div>
+  <button class="scrollbottom chat-scrollbottom" id="chatScrollBottom" type="button" aria-label="scroll to bottom" title="Scroll to bottom" hidden></button>
   <div class="foot">
     <div class="composer" id="composer">
       <div class="attachtray" id="attachTray"></div>
@@ -1242,6 +1373,7 @@ export function renderConsole(v: ConsoleView): string {
                   <select id="reffort" class="chooser-select" aria-label="session effort"></select>
                 </div>
               </div>
+              <div class="modelwarn" id="rmodelWarning" hidden></div>
               <div class="forkmsg" id="runMsg"></div>
             </div>
           </div>
@@ -1254,6 +1386,42 @@ export function renderConsole(v: ConsoleView): string {
   </div>
 </div>
 <div class="hover-tip" id="hoverTip" role="tooltip" hidden></div>
+<div class="commentdrawer" id="commentDrawer" hidden aria-hidden="true">
+  <section class="commentpanel" role="dialog" aria-modal="true" aria-labelledby="commentTitle">
+    <header class="commenthead">
+      <div class="commenttitle" id="commentTitle">Comment thread</div>
+      <div class="commentactions">
+        <button class="commentpromote" id="commentPromote" type="button">promote to session</button>
+        <button class="commentclose" id="commentClose" type="button" aria-label="close comments">×</button>
+      </div>
+    </header>
+    <div class="commentanchor" id="commentAnchor" aria-expanded="true">
+      <div class="commentanchor-head" id="commentAnchorHead" role="button" tabindex="0">
+        <span class="commentanchor-label" id="commentAnchorLabel">REFERENCE</span>
+        <span class="commentanchor-toggle" id="commentAnchorToggle">hide</span>
+      </div>
+      <div class="commentanchor-content" id="commentAnchorContent"></div>
+    </div>
+    <div class="topstack commenttopstack" id="commentTopStack" aria-hidden="true">
+      <div class="pintray" id="commentPinTray" aria-hidden="true"></div>
+      <div class="latestpin" id="commentLatestPin" aria-hidden="true" role="button" tabindex="0" aria-label="jump to latest user comment">
+        <div class="latestpin-body" id="commentLatestPinBody"></div>
+      </div>
+    </div>
+    <div class="commentmsgs" id="commentMsgs"></div>
+    <button class="scrollbottom comment-scrollbottom" id="commentScrollBottom" type="button" aria-label="scroll comments to bottom" title="Scroll to bottom" hidden></button>
+    <div class="commentfoot">
+      <div class="composer commentcomposer">
+        <div class="composerrow">
+          <textarea id="commentInput" rows="1" placeholder="message"></textarea>
+          <div class="composeractions">
+            <button class="send commentsend" id="commentSend" type="button">send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
 <div class="forktree-overlay" id="forkTree" hidden aria-hidden="true">
   <section class="forktree-panel" role="dialog" aria-modal="true" aria-labelledby="forkTreeTitle">
     <header class="forktree-head">
@@ -1269,7 +1437,7 @@ export function renderConsole(v: ConsoleView): string {
       </div>
     </header>
     <div class="forktree-viewport" id="forkTreeViewport">
-      <div class="forktree-stage" id="forkTreeStage"></div>
+      <div class="forktree-pan" id="forkTreePan"><div class="forktree-stage" id="forkTreeStage"></div></div>
     </div>
   </section>
 </div>
@@ -1329,9 +1497,13 @@ window.__PAGE_TITLE__ = ${pageTitleJson};
 window.__VENDORS__ = ${vendorsJson};
 window.__CLAUDE_MODELS__ = ${claudeModelsJson};
 window.__CODEX_MODELS__ = ${codexModelsJson};
+window.__CURSOR_MODELS__ = ${cursorModelsJson};
+window.__MODEL_WARNINGS__ = ${modelWarningsJson};
+window.__MODEL_DEFAULTS__ = ${modelDefaultsJson};
 window.__TAGS__ = ${tagsJson};
 window.__VAULT_STATE__ = ${vaultStateJson};
 window.__E2EE__ = ${e2eeJson};
+window.__CHANGELOG__ = ${changelogJson};
 </script>
 <script>
 (function(){
@@ -1344,6 +1516,10 @@ window.__E2EE__ = ${e2eeJson};
   var VENDORS = window.__VENDORS__ || [];
   var CLAUDE_MODELS = window.__CLAUDE_MODELS__ || [];
   var CODEX_MODELS = window.__CODEX_MODELS__ || [];
+  var CURSOR_MODELS = window.__CURSOR_MODELS__ || [];
+  var MODEL_WARNINGS = window.__MODEL_WARNINGS__ || {};
+  var MODEL_DEFAULTS = window.__MODEL_DEFAULTS__ || {};
+  var CHANGELOG_MARKDOWN = window.__CHANGELOG__ || '';
   var E2EE = {
     enabled: !!(window.__E2EE__ && window.__E2EE__.enabled),
     unlocked: false,
@@ -1438,16 +1614,18 @@ window.__E2EE__ = ${e2eeJson};
     VENDORS = view.vendors || [];
     CLAUDE_MODELS = view.claudeModels || [];
     CODEX_MODELS = view.codexModels || [];
+    CURSOR_MODELS = view.cursorModels || [];
+    MODEL_WARNINGS = view.modelWarnings || {};
+    MODEL_DEFAULTS = view.modelDefaults || {};
     TAGS = view.tags || [];
     VAULT_STATE = view.vaultState || {};
+    commentThreads = VAULT_STATE.commentThreads && typeof VAULT_STATE.commentThreads==='object' ? VAULT_STATE.commentThreads : {};
     applyVaultSessionTitles();
     newPrefs = loadNewPrefs();
     focusViews = loadFocusViews();
     activeFocusId = loadActiveFocusId(focusViews);
     setTheme(VAULT_STATE.theme || currentTheme(), false);
-    var sessions24h=byId('sessions24h'), prompts24h=byId('prompts24h');
-    if(sessions24h) sessions24h.textContent=String(Math.max(0,Math.round(Number(view.sessions24h)||0)));
-    if(prompts24h) prompts24h.textContent=String(Math.max(0,Math.round(Number(view.prompts24h)||0)));
+    applyStats(view);
     document.title = PAGE_TITLE;
   }
   function unlockE2ee(passphrase){
@@ -1491,39 +1669,23 @@ window.__E2EE__ = ${e2eeJson};
       }).finally(function(){ if(btn) btn.disabled=false; });
     };
   }
-  var NEW_MODEL_OPTIONS = {
-    claude: [
-      { value:'', label:'current CLI model' },
-      { value:'fable', label:'fable' },
-      { value:'sonnet', label:'sonnet' },
-      { value:'opus', label:'opus' },
-      { value:'haiku', label:'haiku' }
-    ],
-    codex: [
-      { value:'', label:'current CLI model' },
-      { value:'gpt-5.5', label:'gpt-5.5' },
-      { value:'gpt-5.4', label:'gpt-5.4' },
-      { value:'gpt-5.4-mini', label:'gpt-5.4-mini' },
-      { value:'gpt-5.3-codex-spark', label:'gpt-5.3-codex-spark' },
-      { value:'gpt-5.1-codex-max', label:'gpt-5.1-codex-max' },
-      { value:'codex-mini-latest', label:'codex-mini-latest' }
-    ]
-  };
-  var NEW_EFFORT_OPTIONS = {
-    claude: [
-      { value:'low', label:'low' },
-      { value:'medium', label:'medium' },
-      { value:'high', label:'high' },
-      { value:'xhigh', label:'xhigh' },
-      { value:'max', label:'max' }
-    ],
-    codex: [
-      { value:'low', label:'low' },
-      { value:'medium', label:'medium' },
-      { value:'high', label:'high' },
-      { value:'xhigh', label:'xhigh' }
-    ]
-  };
+  function cliDefault(vendor, key){
+    var defaults=MODEL_DEFAULTS[vendor]||{};
+    return String(defaults[key]||'').trim();
+  }
+  function optionsWithDefault(options, value, suffix){
+    var list=(options||[]).map(function(opt){ return Object.assign({}, opt); });
+    value=String(value||'').trim();
+    if(!value) return list;
+    var found=false;
+    list.forEach(function(opt){
+      if(opt.value!==value) return;
+      found=true;
+      opt.label=opt.label+' ('+suffix+')';
+    });
+    if(!found) list.unshift({ value:value, label:value+' ('+suffix+')' });
+    return list;
+  }
   function loadNewPrefs(){
     var parsed=VAULT_STATE && VAULT_STATE.modelPrefs;
     return parsed && typeof parsed==='object' ? parsed : {};
@@ -1611,10 +1773,12 @@ window.__E2EE__ = ${e2eeJson};
   var scopedTagFilters = { active: [], unread: [] };
   var bulkArchiveSeenBusy = false;
   var globalTagEditing = false;
+  var globalTagDraft = '';
   var draggedGlobalTag = null;
   var suppressTagClickUntil = 0;
   var editingTagSession = null;
   var headerTagEditing = false;
+  var sessionTagEditorState = {};
   var titleEditing = false;
   var WORK_STATS_RANGE_KEY = 'attend.workStatsRange';
   var WORK_STATS_RANGES = ['1h','3h','6h','12h','today','24h','3d','7d','15d'];
@@ -1627,6 +1791,15 @@ window.__E2EE__ = ${e2eeJson};
   var newSessionPending = false;
   var localPendingMsgs = {};
   var orphanBusEvents = {};
+  var commentThreads = VAULT_STATE.commentThreads && typeof VAULT_STATE.commentThreads==='object' ? VAULT_STATE.commentThreads : {};
+  var commentMessageCache = {};
+  var commentGenTimer = null;
+  var commentGenStart = 0;
+  var commentStick = true;
+  var commentMsgOrdinal = 0;
+  var commentLatestUserMsgEl = null;
+  var commentLatestPinRaf = 0;
+  var commentDrawerState = { threadId:'', parentSessionId:'', anchorKey:'', anchorText:'', anchorMsg:null, busy:false, generating:false, stopping:false, promoting:false, assistant:null };
   var PROJECT_COLORS = [
     { fg:'#9a3412', bg:'#fff7ed', border:'#fdba74' },
     { fg:'#0f766e', bg:'#f0fdfa', border:'#99f6e4' },
@@ -1677,16 +1850,22 @@ window.__E2EE__ = ${e2eeJson};
   var latestUserMsgEl = null;
   var latestPinRaf = 0;
   var overlayLayoutRaf = 0;
+  var commentOverlayLayoutRaf = 0;
   var msgOrdinal = 0;
+  var toolOrdinal = 0;
   var viewVisit = null;
   var applyingTurnFolds = false;
   function byId(id){ return document.getElementById(id); }
   function el(tag, cls, txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
-  function sessionPromptLine(cls, label, value){
+  var changelogContent = byId('changelogContent');
+  if(changelogContent) changelogContent.innerHTML = renderMarkdown(CHANGELOG_MARKDOWN);
+  var noSessionChangelog = byId('ph') ? byId('ph').cloneNode(true) : null;
+  function sessionPromptLine(cls, label, value, leading){
     var text=label+' · '+String(value||'');
     var line=el('div',cls+' prompt-line');
     line.appendChild(el('span','prompt-line-label prompt-line-'+String(label||'').toLowerCase(),label));
     line.appendChild(document.createTextNode(' · '));
+    if(leading) line.appendChild(leading);
     line.appendChild(el('span','prompt-line-text',String(value||'')));
     line.setAttribute('data-hover-tip',text);
     return line;
@@ -1711,6 +1890,10 @@ window.__E2EE__ = ${e2eeJson};
       path('M8 17v-5H6l3-4V3h6v5l3 4h-2v5H8z', 'pin-body');
     } else if(name==='collapse'){
       path('M6 12h12');
+    } else if(name==='comment'){
+      path('M4 5.5h16v11H9l-5 4v-15z');
+    } else if(name==='down'){
+      path('M6 9l6 6 6-6');
     }
     return svg;
   }
@@ -1723,9 +1906,11 @@ window.__E2EE__ = ${e2eeJson};
   }
   function applyStats(stats){
     if(!stats) return;
-    var sessions24h=byId('sessions24h'), prompts24h=byId('prompts24h');
-    if(sessions24h) sessions24h.textContent=String(Math.max(0,Math.round(Number(stats.sessions24h)||0)));
-    if(prompts24h) prompts24h.textContent=String(Math.max(0,Math.round(Number(stats.prompts24h)||0)));
+    function compact(value){ var n=Math.max(0,Number(value)||0); return n>=1000000?(n/1000000).toFixed(1)+'M':n>=1000?(n/1000).toFixed(1)+'k':String(Math.round(n)); }
+    var sessions1h=byId('sessions1h'), prompts1h=byId('prompts1h'), chars1h=byId('chars1h');
+    if(sessions1h) sessions1h.textContent=compact(stats.sessions1h);
+    if(prompts1h) prompts1h.textContent=compact(stats.prompts1h);
+    if(chars1h) chars1h.textContent=compact(stats.chars1h);
   }
   function workModeInfo(mode){
     if(mode==='focus') return { label:'Narrow', range:'1–2 sessions / prompted H' };
@@ -1971,6 +2156,20 @@ window.__E2EE__ = ${e2eeJson};
   function scheduleOverlayOffsets(){
     if(overlayLayoutRaf) return;
     overlayLayoutRaf=requestAnimationFrame(syncOverlayOffsets);
+  }
+  function syncCommentOverlayOffsets(){
+    commentOverlayLayoutRaf=0;
+    var panel=document.querySelector('.commentpanel'), foot=document.querySelector('.commentfoot');
+    if(!panel||!foot) return;
+    panel.style.setProperty('--comment-composer-overlay-height',(overlayHeight(foot)||64)+'px');
+    // Queued comment turns render inside the scrollable message stream today.
+    // Keep a separate variable so a future pinned queue can participate in the
+    // same spacing contract without changing composer/button positioning.
+    panel.style.setProperty('--comment-queue-overlay-height','0px');
+  }
+  function scheduleCommentOverlayOffsets(){
+    if(commentOverlayLayoutRaf) return;
+    commentOverlayLayoutRaf=requestAnimationFrame(syncCommentOverlayOffsets);
   }
   function showToast(text, kind){
     var host=byId('toastHost');
@@ -2512,6 +2711,18 @@ window.__E2EE__ = ${e2eeJson};
     });
     return defs;
   }
+  function tagSessionCounts(){
+    var counts={};
+    SESS.forEach(function(s){
+      var seen={};
+      sessionTagKeys(s).forEach(function(key){
+        if(seen[key]) return;
+        seen[key]=true;
+        counts[key]=(counts[key]||0)+1;
+      });
+    });
+    return counts;
+  }
   function tagTheme(def){
     if(def && def.kind==='vendor') return vendorTheme(def.value||def.label);
     if(def && def.kind==='cwd') return projectTheme(def.value||def.label);
@@ -2827,11 +3038,25 @@ window.__E2EE__ = ${e2eeJson};
     for(var i=0;i<filterTags.length;i++){ if(tags.indexOf(filterTags[i])>=0) return true; }
     return false;
   }
+  function tagDefMatchesSearch(def){
+    if(!tagSearchQ) return true;
+    var hay=[def&&def.label,def&&def.title,def&&def.value,def&&def.kind]
+      .filter(Boolean).join(' ').toLowerCase();
+    return hay.indexOf(tagSearchQ)>=0;
+  }
+  function sessionMatchesTagSearch(s){
+    if(!tagSearchQ) return true;
+    return allTagDefsForSession(s).some(tagDefMatchesSearch);
+  }
+  function sessionMatchesSidebarSearch(s){
+    if(!filterQ) return true;
+    return sidebarFieldSearchHit(s) || !!contentSearchHit(s);
+  }
   function sessionMatchesBulkArchiveScope(s){
     if(!s) return false;
     if(activeTagView==='unread') return false;
     if(activeTagView==='active' && !(s.generating || s.unread || s.seen)) return false;
-    return sessionMatchesPriorityFilter(s) && sessionMatchesTagFilter(s, currentFilterTags());
+    return sessionMatchesPriorityFilter(s) && sessionMatchesTagFilter(s, currentFilterTags()) && sessionMatchesTagSearch(s) && sessionMatchesSidebarSearch(s);
   }
   function bulkArchiveSeenTargets(){
     return SESS.filter(function(s){
@@ -3142,7 +3367,7 @@ window.__E2EE__ = ${e2eeJson};
             attachments: [],
             tools: []
           });
-        } else if(node.classList.contains('toolc') && out.length){
+        } else if((node.classList.contains('toolc') || node.classList.contains('toolrow')) && out.length){
           var sum=node.querySelector('summary');
           var label=sum ? String(sum.textContent||'').replace(/^\\s*[⚙▸▾?✓📋]+\\s*/, '').split(' — ')[0].trim() : 'tool';
           out[out.length-1].tools.push({ name:label||'tool', input:null });
@@ -3373,7 +3598,7 @@ window.__E2EE__ = ${e2eeJson};
   function renderPersistedAndPending(msgs, sessionId){
     var frag=document.createDocumentFragment();
     var prevTarget=renderTarget, prevSuppress=suppressScroll;
-    renderTarget=frag; suppressScroll=true; msgOrdinal=0;
+    renderTarget=frag; suppressScroll=true; msgOrdinal=0; toolOrdinal=0;
     var pending=transcriptPendingTail(sessionId, msgs).map(function(entry){
       return { text:entry.text, attachments:entry.attachments, afterMsgs:Math.min(entry.afterMsgs, msgs.length) };
     });
@@ -3419,26 +3644,93 @@ window.__E2EE__ = ${e2eeJson};
     saveVaultUiState({pins:VAULT_STATE.pins});
   }
   function currentPins(){ return loadPins(cur); }
-  function isPinnedKey(key){
+  function commentPinSession(){
+    return commentDrawerState.threadId ? {sessionId:'comment:'+commentDrawerState.threadId} : null;
+  }
+  function pinScopeForBlock(block){
+    return block&&block.closest&&block.closest('#commentMsgs') ? commentPinSession() : cur;
+  }
+  function isPinnedKey(key,block){
     if(!key) return false;
-    return currentPins().some(function(p){ return p.key===key; });
+    return loadPins(pinScopeForBlock(block)).some(function(p){ return p.key===key; });
+  }
+  function chatBlockControlsHost(block){
+    return block&&block.classList&&block.classList.contains('toolc')&&block.parentElement&&block.parentElement.classList.contains('toolrow') ? block.parentElement : block;
   }
   function syncMessagePinState(msgEl){
     if(!msgEl) return;
-    var btn=msgEl.querySelector('.msg-pin');
+    var host=chatBlockControlsHost(msgEl), btn=host&&host.querySelector('.msg-pin');
     if(!btn) return;
-    var on=isPinnedKey(msgEl.getAttribute('data-msg-key'));
+    var on=isPinnedKey(msgEl.getAttribute('data-msg-key'),msgEl);
     btn.classList.toggle('on', on);
-    btn.title=on ? 'Unpin this message' : 'Pin this message to the top';
+    var noun=msgEl.classList.contains('toolc')?'tool block':'message';
+    btn.title=on ? 'Unpin this '+noun : 'Pin this '+noun+' to the top';
     btn.setAttribute('aria-label', btn.title);
   }
   function syncAllMessagePinStates(){
     var msgs=byId('msgs'); if(!msgs) return;
-    Array.prototype.forEach.call(msgs.querySelectorAll('.msg'), syncMessagePinState);
+    Array.prototype.forEach.call(msgs.querySelectorAll('.msg, .toolc'), syncMessagePinState);
+  }
+  function normalizedCommentAnchor(text){ return String(text||'').replace(/\s+/g,' ').trim(); }
+  function commentThreadForAnchor(parentSessionId, anchorKey, anchorText){
+    var values=Object.keys(commentThreads).map(function(key){ return commentThreads[key]; });
+    for(var i=0;i<values.length;i++){
+      var thread=values[i];
+      if(thread && String(thread.parentSessionId||'')===String(parentSessionId||'') && String(thread.anchorKey||'')===String(anchorKey||'')) return thread;
+    }
+    var currentText=normalizedCommentAnchor(anchorText);
+    if(!currentText) return null;
+    for(var j=0;j<values.length;j++){
+      var fallback=values[j];
+      if(!fallback || String(fallback.parentSessionId||'')!==String(parentSessionId||'')) continue;
+      var savedText=normalizedCommentAnchor(fallback.anchorText);
+      if(savedText===currentText) return fallback;
+      if(fallback.createdWhileGenerating && savedText.length>=16 && currentText.indexOf(savedText)===0) return fallback;
+    }
+    return null;
+  }
+  function commentThreadBySession(sessionId, clientSessionId){
+    var values=Object.keys(commentThreads).map(function(key){ return commentThreads[key]; });
+    for(var i=0;i<values.length;i++){
+      var thread=values[i];
+      if(!thread) continue;
+      if(sessionId && String(thread.providerSessionId||'')===String(sessionId)) return thread;
+      if(clientSessionId && String(thread.id||'')===String(clientSessionId)) return thread;
+    }
+    return null;
+  }
+  function rememberCommentThread(thread){
+    if(!thread || !thread.id) return null;
+    commentThreads[thread.id]=Object.assign({},commentThreads[thread.id]||{},thread);
+    VAULT_STATE.commentThreads=commentThreads;
+    syncAllMessageCommentStates();
+    renderPinTray();
+    return commentThreads[thread.id];
+  }
+  function currentParentSessionId(){ return cur ? String(providerSessionId(cur)||cur.sessionId||'') : ''; }
+  function syncMessageCommentState(msgEl){
+    if(!msgEl) return;
+    var host=chatBlockControlsHost(msgEl), btn=host&&host.querySelector('.msg-comment'); if(!btn) return;
+    var thread=commentThreadForAnchor(currentParentSessionId(),msgEl.getAttribute('data-msg-key'),previewTextFromMsg(msgEl));
+    btn.classList.toggle('has-comments',!!thread);
+    var old=btn.querySelector('.msg-comment-count'); if(old) old.remove();
+    if(thread){
+      var count=Math.max(1,Number(thread.messageCount)||1);
+      btn.appendChild(el('span','msg-comment-count',String(count)));
+      btn.title=thread.status==='generating' ? 'Open comments · reply generating' : 'Open comments';
+      btn.setAttribute('aria-label',btn.title);
+    } else {
+      btn.title=msgEl.classList.contains('toolc')?'Comment on this tool block':'Comment on this response';
+      btn.setAttribute('aria-label',btn.title);
+    }
+  }
+  function syncAllMessageCommentStates(){
+    var msgs=byId('msgs'); if(!msgs) return;
+    Array.prototype.forEach.call(msgs.querySelectorAll('.msg.assistant, .toolc'),syncMessageCommentState);
   }
   function findMsgByKey(key){
     var msgs=byId('msgs'); if(!msgs || !key) return null;
-    var nodes=msgs.querySelectorAll('.msg');
+    var nodes=msgs.querySelectorAll('.msg, .toolc');
     for(var i=0;i<nodes.length;i++){
       if(nodes[i].getAttribute('data-msg-key')===key) return nodes[i];
     }
@@ -3447,8 +3739,9 @@ window.__E2EE__ = ${e2eeJson};
   function scrollToMsgKey(key){
     var m=byId('msgs'), target=findMsgByKey(key);
     if(!m || !target) return;
-    if(target.classList.contains('folded-away')){
-      target=findFoldSummaryByKey(key) || target;
+    var foldTarget=target.classList.contains('toolc')&&target.parentElement&&target.parentElement.classList.contains('toolrow') ? target.parentElement : target;
+    if(foldTarget.classList.contains('folded-away')){
+      target=findFoldSummaryByKey(foldTarget.getAttribute('data-folded-by')||key) || target;
     }
     var delta=target.getBoundingClientRect().top - m.getBoundingClientRect().top;
     m.scrollTop=Math.max(0, m.scrollTop + delta - 18);
@@ -3461,7 +3754,7 @@ window.__E2EE__ = ${e2eeJson};
   function msgDomOrder(){
     var order={};
     var msgs=byId('msgs'); if(!msgs) return order;
-    var nodes=msgs.querySelectorAll('.msg');
+    var nodes=msgs.querySelectorAll('.msg, .toolc');
     for(var i=0;i<nodes.length;i++){
       var key=nodes[i].getAttribute('data-msg-key');
       if(key) order[key]=i;
@@ -3479,6 +3772,7 @@ window.__E2EE__ = ${e2eeJson};
     });
   }
   function previewTextFromMsg(msgEl){
+    if(msgEl && msgEl.classList && msgEl.classList.contains('toolc')) return toolBlockSnapshot(msgEl);
     var bubble=msgEl && msgEl.querySelector('.bubble');
     return (bubble && (bubble.getAttribute('data-raw') || bubble.textContent) || '')
       .replace(/\s+/g, ' ')
@@ -3539,7 +3833,7 @@ window.__E2EE__ = ${e2eeJson};
     for(var i=1;i<nodes.length;i++){
       var n=nodes[i];
       if(!n || !n.classList) continue;
-      if(n.classList.contains('toolc')) tools++;
+      if(n.classList.contains('toolc') || n.classList.contains('toolrow')) tools++;
       if(n.classList.contains('msg') && (n.classList.contains('assistant') || n.classList.contains('thinking') || n.classList.contains('error'))) reply=true;
     }
     if(reply && tools) return 'reply + '+tools+' tool'+(tools===1?'':'s');
@@ -3610,6 +3904,15 @@ window.__E2EE__ = ${e2eeJson};
     if(role==='agent') return (cur&&cur.vendor)||'agent';
     return role || 'msg';
   }
+  function chatBlockRole(block){
+    if(block&&block.closest&&block.closest('#commentMsgs')){
+      if(block.classList.contains('user')) return 'you';
+      var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+      return String(thread&&thread.vendor||cur&&cur.vendor||'assistant');
+    }
+    if(block&&block.classList&&block.classList.contains('toolc')) return block.getAttribute('data-tool-name')||'tool';
+    return block&&block.classList&&block.classList.contains('user') ? 'you' : ((cur&&cur.vendor)||'agent');
+  }
   function renderPinTray(){
     var tray=byId('pinTray'); if(!tray) return;
     var pins=sortPinsInChatOrder(currentPins());
@@ -3618,9 +3921,17 @@ window.__E2EE__ = ${e2eeJson};
     tray.setAttribute('aria-hidden', pins.length ? 'false' : 'true');
     pins.forEach(function(pin){
       var item=el('div','pinitem');
-      item.title='Jump to pinned message';
+      item.title='Jump to pinned block';
       item.appendChild(el('span','pinrole',pinRoleLabel(pin)));
       item.appendChild(el('div','pintext',pin.text));
+      var thread=commentThreadForAnchor(currentParentSessionId(),pin.key,pin.text);
+      if(thread){
+        var label=thread.status==='generating' ? 'commenting…' : ('comments '+Math.max(1,Number(thread.messageCount)||1));
+        var cb=el('button','pincomment '+String(thread.status||''),label);
+        cb.type='button'; cb.title='Open comments'; cb.setAttribute('aria-label','Open comments');
+        cb.onclick=function(ev){ ev.stopPropagation(); openCommentThread(thread,null); };
+        item.appendChild(cb);
+      }
       var x=el('button','pinx','×');
       x.title='Unpin';
       x.onclick=function(ev){
@@ -3636,21 +3947,308 @@ window.__E2EE__ = ${e2eeJson};
     syncAllMessagePinStates();
     syncTopStack();
   }
+  function syncCommentTopStack(){
+    var stack=byId('commentTopStack'), latest=byId('commentLatestPin'), tray=byId('commentPinTray');
+    if(!stack) return;
+    var show=!!((latest&&latest.classList.contains('show'))||(tray&&tray.classList.contains('show')));
+    stack.classList.toggle('show',show); stack.setAttribute('aria-hidden',show?'false':'true');
+  }
+  function commentMsgDomOrder(){
+    var order={}, host=byId('commentMsgs'); if(!host) return order;
+    Array.prototype.forEach.call(host.querySelectorAll('.msg[data-msg-key]'),function(node,i){ order[node.getAttribute('data-msg-key')]=i; });
+    return order;
+  }
+  function sortCommentPins(pins){
+    var order=commentMsgDomOrder();
+    return (pins||[]).slice().sort(function(a,b){
+      var ai=Object.prototype.hasOwnProperty.call(order,a.key)?order[a.key]:msgKeyIndex(a.key);
+      var bi=Object.prototype.hasOwnProperty.call(order,b.key)?order[b.key]:msgKeyIndex(b.key);
+      return ai-bi||(a.pinnedAt||0)-(b.pinnedAt||0);
+    });
+  }
+  function findCommentMsgByKey(key){
+    var host=byId('commentMsgs'); if(!host||!key) return null;
+    var nodes=host.querySelectorAll('.msg[data-msg-key]');
+    for(var i=0;i<nodes.length;i++) if(nodes[i].getAttribute('data-msg-key')===key) return nodes[i];
+    return null;
+  }
+  function scrollToCommentMsgKey(key){
+    var host=byId('commentMsgs'), target=findCommentMsgByKey(key); if(!host||!target) return;
+    host.scrollTop=Math.max(0,host.scrollTop+target.getBoundingClientRect().top-host.getBoundingClientRect().top-18);
+  }
+  function renderCommentPinTray(){
+    var tray=byId('commentPinTray'), scope=commentPinSession(); if(!tray) return;
+    var pins=scope?sortCommentPins(loadPins(scope)):[];
+    tray.innerHTML=''; tray.classList.toggle('show',!!pins.length); tray.setAttribute('aria-hidden',pins.length?'false':'true');
+    pins.forEach(function(pin){
+      var item=el('div','pinitem'); item.title='Jump to pinned comment message';
+      item.appendChild(el('span','pinrole',pinRoleLabel(pin)));
+      item.appendChild(el('div','pintext',pin.text));
+      var close=el('button','pinx','×'); close.title='Unpin';
+      close.onclick=function(ev){ ev.stopPropagation(); savePins(scope,loadPins(scope).filter(function(value){return value.key!==pin.key;})); renderCommentPinTray(); };
+      item.onclick=function(){ scrollToCommentMsgKey(pin.key); };
+      item.appendChild(close); tray.appendChild(item);
+    });
+    var host=byId('commentMsgs'); if(host) Array.prototype.forEach.call(host.querySelectorAll('.msg'),syncMessagePinState);
+    syncCommentTopStack();
+  }
   function togglePinnedMessage(msgEl){
     if(!cur || !msgEl) return;
     var key=msgEl.getAttribute('data-msg-key');
     if(!key) return;
-    var pins=currentPins();
+    var scope=pinScopeForBlock(msgEl); if(!scope) return;
+    var pins=loadPins(scope);
     var i=pins.findIndex(function(p){ return p.key===key; });
     if(i>=0) pins.splice(i,1);
     else {
       var text=previewTextFromMsg(msgEl);
       if(!text) return;
-      pins.push({ key:key, role:msgEl.classList.contains('user') ? 'you' : ((cur&&cur.vendor)||'agent'), text:text.slice(0, 1200), pinnedAt:Date.now() });
+      pins.push({ key:key, role:chatBlockRole(msgEl), text:text.slice(0, 1200), pinnedAt:Date.now() });
     }
-    savePins(cur, sortPinsInChatOrder(pins));
-    renderPinTray();
+    var inComments=!!(msgEl.closest&&msgEl.closest('#commentMsgs'));
+    savePins(scope,inComments?sortCommentPins(pins):sortPinsInChatOrder(pins));
+    if(inComments) renderCommentPinTray(); else renderPinTray();
     syncMessagePinState(msgEl);
+  }
+  function ensureMessagePinned(msgEl){
+    if(!msgEl) return;
+    var key=msgEl.getAttribute('data-msg-key');
+    if(key && !isPinnedKey(key,msgEl)) togglePinnedMessage(msgEl);
+  }
+  function setCommentBusy(on){
+    commentDrawerState.busy=!!on;
+    syncCommentSendButton();
+    syncCommentPromoteButton();
+  }
+  function syncCommentSendButton(){
+    var send=byId('commentSend'); if(!send) return;
+    send.textContent=commentDrawerState.stopping?'Stopping…':commentDrawerState.generating?'■ stop':commentDrawerState.busy?'sending…':'send';
+    send.disabled=commentDrawerState.stopping||(!commentDrawerState.generating&&commentDrawerState.busy);
+    send.title=commentDrawerState.generating?'Stop the current generation (Esc)':'';
+    send.classList.toggle('stopping',commentDrawerState.generating);
+  }
+  function syncCommentPromoteButton(){
+    var button=byId('commentPromote'), thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+    if(!button) return;
+    button.disabled=!thread||commentDrawerState.busy||commentDrawerState.generating||commentDrawerState.promoting;
+    button.textContent=commentDrawerState.promoting?'promoting…':'promote to session';
+    button.title=!thread?'Send a comment before promoting':commentDrawerState.generating?'Wait for the current reply and queue to finish':'Make this comment thread a regular session';
+  }
+  function clearCommentGenerating(){
+    if(commentGenTimer){ clearInterval(commentGenTimer); commentGenTimer=null; }
+    var status=byId('commentGenerating'); if(status) status.remove();
+    commentGenStart=0;
+  }
+  function keepCommentGeneratingLast(){
+    var host=byId('commentMsgs'), status=byId('commentGenerating');
+    if(host&&status) host.appendChild(status);
+  }
+  function setCommentGenerating(on,startedAt){
+    commentDrawerState.generating=!!on;
+    if(on){
+      var host=byId('commentMsgs'), status=byId('commentGenerating');
+      if(host&&!status){
+        status=el('div','msg assistant thinking'); status.id='commentGenerating';
+        status.appendChild(el('div','bubble',''));
+        host.appendChild(status);
+        commentGenStart=startedAt||Date.now();
+        var tick=function(){
+          var bubble=status&&status.querySelector('.bubble');
+          if(bubble) bubble.textContent='Generating… '+Math.round((Date.now()-commentGenStart)/1000)+'s';
+        };
+        tick(); commentGenTimer=setInterval(tick,1000);
+      }
+      keepCommentGeneratingLast();
+    } else {
+      clearCommentGenerating();
+      commentDrawerState.stopping=false;
+    }
+    syncCommentSendButton();
+    syncCommentPromoteButton();
+    syncScrollBottomButton(byId('commentMsgs'),byId('commentScrollBottom'));
+  }
+  function appendCommentMessage(role,text){
+    var host=byId('commentMsgs'); if(!host) return null;
+    var node=el('div','msg '+role), bubble=el('div','bubble');
+    node.setAttribute('data-msg-key','comment:'+(commentMsgOrdinal++));
+    setBubbleText(bubble,text||'',role==='user'||role==='assistant');
+    if(role==='user'||role==='assistant'){
+      var pin=el('button','msg-pin');
+      setIconButton(pin,'pin','Pin this comment message to the top');
+      pin.onclick=function(ev){ ev.stopPropagation(); togglePinnedMessage(node); };
+      node.appendChild(pin);
+    }
+    node.appendChild(bubble); host.appendChild(node); syncMessagePinState(node); keepCommentGeneratingLast();
+    if(role==='user'||commentStick) host.scrollTop=host.scrollHeight;
+    syncScrollBottomButton(host,byId('commentScrollBottom'));
+    scheduleCommentLatestPin();
+    return node;
+  }
+  function cacheOpenCommentMessages(){
+    var id=commentDrawerState.threadId, host=byId('commentMsgs');
+    if(!id || !host) return;
+    commentMessageCache[id]=Array.prototype.map.call(host.querySelectorAll('.msg.user, .msg.assistant:not(.thinking)'),function(node){
+      var bubble=node.querySelector('.bubble');
+      return {role:node.classList.contains('user')?'user':'assistant',text:bubble&&(bubble.getAttribute('data-raw')||bubble.textContent)||''};
+    });
+  }
+  function renderCommentMessages(messages,remember){
+    var host=byId('commentMsgs'); if(!host) return;
+    clearCommentGenerating(); host.innerHTML=''; commentDrawerState.assistant=null; commentMsgOrdinal=0; commentLatestUserMsgEl=null;
+    (messages||[]).forEach(function(message){
+      if(!message || (message.role!=='user' && message.role!=='assistant')) return;
+      appendCommentMessage(message.role,message.text||'');
+    });
+    if(remember!==false) cacheOpenCommentMessages();
+    renderCommentPinTray(); scheduleCommentLatestPin();
+    syncScrollBottomButton(host,byId('commentScrollBottom'));
+  }
+  function closeCommentDrawer(){
+    var drawer=byId('commentDrawer'); if(!drawer) return;
+    cacheOpenCommentMessages();
+    clearCommentGenerating();
+    hideCommentLatestPin();
+    drawer.hidden=true; drawer.setAttribute('aria-hidden','true');
+    commentDrawerState.assistant=null;
+  }
+  function markCommentRead(thread){
+    if(!thread || thread.status==='generating') return;
+    rememberCommentThread(Object.assign({},thread,{status:'read'}));
+    fetch('/comments/read',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:thread.id})}).catch(function(){});
+  }
+  function commentAnchorDataFromBlock(block){
+    if(!block) return null;
+    if(block.classList&&block.classList.contains('toolc')){
+      var meta=block._attendTool||{}, tool={name:String(meta.name||block.getAttribute('data-tool-name')||'tool'),input:meta.input};
+      if(meta.resultReceived) tool.result=meta.result;
+      if(meta.isError) tool.isError=true;
+      return {kind:'tool',tool:tool};
+    }
+    var bubble=block.querySelector&&block.querySelector('.bubble');
+    if(!bubble) return null;
+    return {kind:'message',role:block.classList.contains('user')?'user':'assistant',text:String(bubble.getAttribute('data-raw')||bubble.textContent||'')};
+  }
+  function renderCommentAnchorBlock(text,key,data){
+    var card=byId('commentAnchor'), content=byId('commentAnchorContent'), label=byId('commentAnchorLabel'), toggle=byId('commentAnchorToggle');
+    if(!card||!content||!label||!toggle) return;
+    card.setAttribute('aria-expanded','true'); toggle.textContent='hide'; content.innerHTML='';
+    label.textContent=data&&data.kind==='tool'?'TOOL REFERENCE':'REFERENCE';
+    if(data&&data.kind==='tool'&&data.tool){ addTool(data.tool,{reference:true,target:content}); return; }
+    var role=data&&data.kind==='message'&&data.role==='user'?'user':'assistant';
+    var node=el('div','msg '+role), bubble=el('div','bubble');
+    setBubbleText(bubble,data&&data.kind==='message'?data.text:(text||'(response text unavailable)'),true);
+    node.appendChild(bubble); content.appendChild(node);
+  }
+  function toggleCommentAnchor(){
+    var card=byId('commentAnchor'), toggle=byId('commentAnchorToggle'); if(!card||!toggle) return;
+    var expanded=card.getAttribute('aria-expanded')==='true';
+    card.setAttribute('aria-expanded',expanded?'false':'true'); toggle.textContent=expanded?'show':'hide';
+  }
+  function openCommentThread(thread,msgEl){
+    var drawer=byId('commentDrawer'), input=byId('commentInput');
+    if(!drawer) return;
+    cacheOpenCommentMessages();
+    var parentId=currentParentSessionId();
+    var key=msgEl ? msgEl.getAttribute('data-msg-key') : (thread&&thread.anchorKey)||'';
+    var text=msgEl ? previewTextFromMsg(msgEl) : (thread&&thread.anchorText)||'';
+    var anchorData=commentAnchorDataFromBlock(msgEl)||(thread&&thread.anchorData)||null;
+    commentDrawerState={threadId:(thread&&thread.id)||'',parentSessionId:parentId,anchorKey:key,anchorText:text,anchorData:anchorData,anchorMsg:msgEl,busy:false,generating:false,stopping:false,promoting:false,assistant:null};
+    commentStick=true;
+    renderCommentAnchorBlock(text,key,anchorData);
+    drawer.hidden=false; drawer.setAttribute('aria-hidden','false');
+    scheduleCommentOverlayOffsets();
+    renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.status==='generating'));
+    if(input){ input.value=''; input.focus(); }
+    if(thread){
+      fetch('/comments/messages?id='+encodeURIComponent(thread.id)).then(function(r){return r.json();}).then(function(res){
+        if(commentDrawerState.threadId!==thread.id) return;
+        if(res&&res.thread) thread=rememberCommentThread(res.thread)||thread;
+        var fresh=res&&res.messages||[], cached=commentMessageCache[thread.id]||[];
+        var chars=function(messages){ return messages.reduce(function(total,message){ return total+String(message&&message.text||'').length; },0); };
+        renderCommentMessages(thread.status==='generating'&&chars(cached)>chars(fresh)?cached:fresh);
+        setCommentGenerating(thread.status==='generating');
+        if(thread.status!=='generating') markCommentRead(thread);
+      }).catch(function(){ appendCommentMessage('error','Could not load comments.'); });
+    }
+  }
+  function openCommentsForMessage(msgEl){
+    if(!cur || !msgEl) return;
+    var thread=commentThreadForAnchor(currentParentSessionId(),msgEl.getAttribute('data-msg-key'),previewTextFromMsg(msgEl));
+    openCommentThread(thread,msgEl);
+  }
+  function sendComment(){
+    if(commentDrawerState.busy || !cur) return;
+    var input=byId('commentInput'), question=String(input&&input.value||'').trim();
+    if(!question) return;
+    if(commentDrawerState.anchorMsg) ensureMessagePinned(commentDrawerState.anchorMsg);
+    var thread=commentDrawerState.threadId ? commentThreads[commentDrawerState.threadId] : null;
+    if(!thread){
+      var id='comment-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,9);
+      thread=rememberCommentThread({id:id,parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,providerSessionId:'',vendor:cur.vendor,cwd:cur.cwd,createdAt:Date.now(),status:'generating',messageCount:0});
+      commentDrawerState.threadId=id;
+      syncCommentPromoteButton();
+    }
+    appendCommentMessage('user',question); commentDrawerState.assistant=null;
+    cacheOpenCommentMessages();
+    if(input) input.value=''; setCommentBusy(true); setCommentGenerating(true);
+    var context=(cachedTranscriptFor(cur)||[]).map(function(message){ return {role:message.role,text:message.text||'',tools:message.tools||[]}; });
+    fetch('/comments/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+      threadId:thread.id,parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,
+      anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,question:question,contextMessages:context,
+      createdWhileGenerating:!!(turnActive&&commentDrawerState.anchorMsg&&(commentDrawerState.anchorMsg===assistantEl||commentDrawerState.anchorMsg.hasAttribute('data-tool-pending'))),model:cur.model||undefined,effort:cur.effort||undefined
+    })}).then(function(r){return r.json();}).then(function(res){
+      if(!res.ok){ appendCommentMessage('error',res.error||'comment failed'); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.providerSessionId&&thread.status==='generating')); return; }
+      var saved=rememberCommentThread(res.thread);
+      if(saved){ commentDrawerState.threadId=saved.id; drainCommentOrphanEvents(saved); }
+      syncCommentPromoteButton();
+      setCommentBusy(false);
+      if(commentDrawerState.stopping) stopCommentTurn();
+      else setCommentGenerating(!!(saved&&saved.status==='generating'));
+    }).catch(function(err){ appendCommentMessage('error',err&&err.message?err.message:'comment failed'); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.providerSessionId&&thread.status==='generating')); });
+  }
+  function stopCommentTurn(){
+    var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+    if(!thread||!commentDrawerState.generating) return;
+    commentDrawerState.stopping=true; syncCommentSendButton(); syncCommentPromoteButton();
+    var status=byId('commentGenerating'), bubble=status&&status.querySelector('.bubble');
+    if(bubble) bubble.textContent='Stopping…';
+    if(!thread.providerSessionId) return;
+    fetch('/chat/abort?session='+encodeURIComponent(thread.providerSessionId)+'&vendor='+encodeURIComponent(thread.vendor||'claude'),{method:'POST'})
+      .then(function(r){ return r.json().catch(function(){ return {}; }); })
+      .catch(function(){ return {}; })
+      .then(function(){
+        if(commentDrawerState.threadId!==thread.id) return;
+        thread=rememberCommentThread(Object.assign({},thread,{status:'read'}))||thread;
+        setCommentBusy(false); setCommentGenerating(false); markCommentRead(thread);
+      });
+  }
+  function commentPrimaryAction(){
+    if(commentDrawerState.generating) stopCommentTurn();
+    else sendComment();
+  }
+  function promoteCommentThread(){
+    var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+    if(!thread||commentDrawerState.busy||commentDrawerState.generating||commentDrawerState.promoting) return;
+    commentDrawerState.promoting=true; syncCommentPromoteButton();
+    fetch('/comments/promote',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:thread.id})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res.ok){ commentDrawerState.promoting=false; syncCommentPromoteButton(); showToast(res.error||'promotion failed','warn'); return; }
+        delete commentThreads[thread.id];
+        VAULT_STATE.commentThreads=commentThreads;
+        syncAllMessageCommentStates(); renderPinTray(); closeCommentDrawer();
+        delete commentMessageCache[thread.id];
+        var openView=function(view){
+          if(!view) return;
+          var existing=findSessionById(view.sessionId);
+          if(!existing){ SESS.unshift(view); sortSessions(); renderSidebar(); existing=view; }
+          select(existing);
+        };
+        if(res.view) openView(res.view);
+        else fetch('/session/view?session='+encodeURIComponent(res.session)).then(function(r){return r.json();}).then(function(next){ openView(next&&next.view); });
+      }).catch(function(err){
+        commentDrawerState.promoting=false; syncCommentPromoteButton();
+        showToast(err&&err.message?err.message:'promotion failed','warn');
+      });
   }
   function hideLatestPin(){
     var pin=byId('latestPin'), body=byId('latestPinBody');
@@ -3678,7 +4276,7 @@ window.__E2EE__ = ${e2eeJson};
     var bubble=msgEl.querySelector('.bubble');
     if(!bubble) return hideLatestPin();
     body.innerHTML='';
-    body.appendChild(el('span','latestpin-k','latest · you'));
+    body.appendChild(el('span','latestpin-k','YOU'));
     body.appendChild(el('span','latestpin-text',previewTextFromMsg(msgEl)));
     body.appendChild(el('span','latestpin-arrow','→'));
     pin.classList.add('show');
@@ -3707,6 +4305,35 @@ window.__E2EE__ = ${e2eeJson};
     m.scrollTop = Math.max(0, m.scrollTop + delta - 18);
     hideLatestPin();
     scheduleLatestPin();
+  }
+  function hideCommentLatestPin(){
+    var pin=byId('commentLatestPin'), body=byId('commentLatestPinBody'); if(!pin||!body) return;
+    pin.classList.remove('show'); pin.setAttribute('aria-hidden','true'); body.innerHTML=''; syncCommentTopStack();
+  }
+  function refreshCommentLatestUserMsg(){
+    var host=byId('commentMsgs'); if(!host) return null;
+    var frame=host.getBoundingClientRect(), nodes=host.querySelectorAll('.msg.user'); commentLatestUserMsgEl=null;
+    Array.prototype.forEach.call(nodes,function(node){ if(node.getBoundingClientRect().bottom<frame.top+10) commentLatestUserMsgEl=node; });
+    return commentLatestUserMsgEl;
+  }
+  function updateCommentLatestPin(){
+    commentLatestPinRaf=0;
+    if((byId('commentDrawer')||{}).hidden) return hideCommentLatestPin();
+    var msg=refreshCommentLatestUserMsg(), pin=byId('commentLatestPin'), body=byId('commentLatestPinBody');
+    if(!msg||!pin||!body) return hideCommentLatestPin();
+    body.innerHTML=''; body.appendChild(el('span','latestpin-k','YOU'));
+    body.appendChild(el('span','latestpin-text',previewTextFromMsg(msg)));
+    body.appendChild(el('span','latestpin-arrow','→'));
+    pin.classList.add('show'); pin.setAttribute('aria-hidden','false'); syncCommentTopStack();
+  }
+  function scheduleCommentLatestPin(){
+    if(commentLatestPinRaf) return;
+    commentLatestPinRaf=requestAnimationFrame(updateCommentLatestPin);
+  }
+  function jumpToCommentLatestPin(){
+    var host=byId('commentMsgs'), target=commentLatestUserMsgEl||refreshCommentLatestUserMsg(); if(!host||!target) return;
+    host.scrollTop=Math.max(0,host.scrollTop+target.getBoundingClientRect().top-host.getBoundingClientRect().top-18);
+    hideCommentLatestPin(); scheduleCommentLatestPin();
   }
   function escapeHtml(s){
     return String(s)
@@ -4145,7 +4772,9 @@ window.__E2EE__ = ${e2eeJson};
   function vendorTheme(vendor){
     return vendor==='claude'
       ? { fg:'#c2410c', bg:'#fff7ed', border:'#fdba74' }
-      : { fg:'#3730a3', bg:'#eef2ff', border:'#a5b4fc' };
+      : vendor==='cursor'
+        ? { fg:'var(--vendor-cursor-fg)', bg:'var(--vendor-cursor-bg)', border:'var(--vendor-cursor-border)' }
+        : { fg:'#3730a3', bg:'#eef2ff', border:'#a5b4fc' };
   }
   function customSelectTheme(sel, optValue){
     if(!sel) return null;
@@ -4210,7 +4839,10 @@ window.__E2EE__ = ${e2eeJson};
     if(s.cwd) project.title=s.cwd;
     row.appendChild(project);
     row.appendChild(el('span','ctx-sep','·'));
-    row.appendChild(el('span','ctx-prompts',(s.prompts||0)+'p'));
+    var count=Number(s.prompts)||0;
+    var prompts=el('span','ctx-prompts',count+'p');
+    prompts.setAttribute('data-hover-tip',count+' user message'+(count===1?'':'s')+' in this session');
+    row.appendChild(prompts);
     return row;
   }
   var STATE_OPTIONS=['continue_ready','needs_decision','needs_input','blocked','needs_review','followup_suggested','done'];
@@ -4455,7 +5087,8 @@ window.__E2EE__ = ${e2eeJson};
   }
   function populateSelect(id, options, current){
     var sel=byId(id); if(!sel) return;
-    var list=optionListWithCurrent(options, current);
+    var vendorOwned=id==='nmodel'||id==='rmodel'||id==='neffort'||id==='reffort';
+    var list=vendorOwned ? (options||[]).slice() : optionListWithCurrent(options, current);
     sel.innerHTML='';
     list.forEach(function(opt){
       var node=document.createElement('option');
@@ -4481,12 +5114,15 @@ window.__E2EE__ = ${e2eeJson};
   }
   function renderCustomSelectOptions(ctrl){
     var sel=ctrl.select;
+    var isModel=sel.id==='nmodel'||sel.id==='rmodel';
     ctrl.menu.innerHTML='';
     Array.prototype.forEach.call(sel.options || [], function(opt, idx){
-      var item=el('div','selectopt', opt.textContent || opt.value || '');
+      var fullText=opt.textContent || opt.value || '';
+      var item=el('div','selectopt', fullText);
       item.setAttribute('role','option');
       item.setAttribute('data-value', opt.value);
       item.setAttribute('aria-selected', opt.selected ? 'true' : 'false');
+      if(isModel && fullText) item.setAttribute('data-hover-tip',fullText);
       styleSelectTheme(item, customSelectTheme(sel, opt.value), opt.selected);
       item.onmousedown=function(ev){ ev.preventDefault(); ev.stopPropagation(); };
       item.onclick=function(ev){
@@ -4503,7 +5139,10 @@ window.__E2EE__ = ${e2eeJson};
   function syncCustomSelect(sel){
     var ctrl=sel && sel._customSelect;
     if(!ctrl) return;
-    ctrl.text.textContent=selectedOptionText(sel) || '';
+    var selectedText=selectedOptionText(sel) || '';
+    ctrl.text.textContent=selectedText;
+    if((sel.id==='nmodel'||sel.id==='rmodel') && selectedText) ctrl.button.setAttribute('data-hover-tip',selectedText);
+    else ctrl.button.removeAttribute('data-hover-tip');
     ctrl.button.disabled=sel.disabled;
     styleSelectTheme(ctrl.button, customSelectTheme(sel, sel.value), true);
     renderCustomSelectOptions(ctrl);
@@ -4582,10 +5221,11 @@ window.__E2EE__ = ${e2eeJson};
       var out={ value:value, label:label };
       if(Array.isArray(opt.efforts)){
         var efs=opt.efforts.filter(function(e){ return typeof e==='string' && e.trim(); })
-          .map(function(e){ return e.trim().toLowerCase(); });
+          .map(function(e){ return e.trim(); });
         if(efs.length) out.efforts=efs;
       }
-      if(typeof opt.defaultEffort==='string' && opt.defaultEffort.trim()) out.defaultEffort=opt.defaultEffort.trim().toLowerCase();
+      if(typeof opt.defaultEffort==='string' && opt.defaultEffort.trim()) out.defaultEffort=opt.defaultEffort.trim();
+      if(opt.effortLabels && typeof opt.effortLabels==='object') out.effortLabels=opt.effortLabels;
       return out;
     }) : [];
   }
@@ -4593,25 +5233,29 @@ window.__E2EE__ = ${e2eeJson};
   function modelMetaFor(vendor, model){
     var slug=String(model||'').trim();
     if(!slug) return null;
-    var src = vendor==='claude' ? CLAUDE_MODELS : (vendor==='codex' ? CODEX_MODELS : null);
+    var src = vendor==='claude' ? CLAUDE_MODELS : (vendor==='codex' ? CODEX_MODELS : (vendor==='cursor' ? CURSOR_MODELS : null));
     if(!src) return null;
     var list=normalizedModelOptions(src);
     for(var i=0;i<list.length;i++){ if(list[i].value===slug) return list[i]; }
     return null;
   }
-  // Effort choices for a vendor+model: the model's own levels when advertised,
-  // else the static per-vendor fallback (universally-safe set).
+  // Effort choices come only from the selected model's vendor-owned metadata.
   function effortOptionsFor(vendor, model){
     var meta=modelMetaFor(vendor, model);
     if(meta && meta.efforts && meta.efforts.length){
-      return meta.efforts.map(function(e){ return { value:e, label:e }; });
+      return optionsWithDefault(meta.efforts.map(function(e){
+        return { value:e, label:(meta.effortLabels && meta.effortLabels[e]) || e };
+      }), defaultEffortValue(vendor, model), 'default');
     }
-    return NEW_EFFORT_OPTIONS[vendor] || [];
+    return optionsWithDefault([], defaultEffortValue(vendor, model), 'default');
   }
   function defaultEffortFor(vendor, model){
     var meta=modelMetaFor(vendor, model);
     if(meta && meta.defaultEffort) return meta.defaultEffort;
-    return vendor==='codex' ? 'medium' : 'high';
+    return '';
+  }
+  function defaultEffortValue(vendor, model){
+    return defaultEffortFor(vendor, model) || cliDefault(vendor, 'effort');
   }
   function modelEffortKey(model){
     return String(model||'').trim() || '__current_cli_model__';
@@ -4619,37 +5263,44 @@ window.__E2EE__ = ${e2eeJson};
   function rememberedModelEffort(vendor, model){
     var byVendor=newPrefs.modelEfforts && newPrefs.modelEfforts[vendor];
     var key=modelEffortKey(model);
-    if(byVendor && Object.prototype.hasOwnProperty.call(byVendor, key)) return String(byVendor[key]||'').trim().toLowerCase();
+    if(byVendor && Object.prototype.hasOwnProperty.call(byVendor, key)) return String(byVendor[key]||'').trim();
     // Backward compatibility with v1 preferences, which only remembered the last
     // new-session model+effort pair for each vendor.
     var legacy=newPrefs[vendor];
-    if(legacy && String(legacy.model||'').trim()===String(model||'').trim()) return String(legacy.effort||'').trim().toLowerCase();
+    if(legacy && String(legacy.model||'').trim()===String(model||'').trim()) return String(legacy.effort||'').trim();
     return undefined;
   }
   function linkedEffortFor(vendor, model){
     var remembered=rememberedModelEffort(vendor, model);
     if(remembered!==undefined){
-      if(!remembered) return defaultEffortFor(vendor, model);
+      if(!remembered) return defaultEffortValue(vendor, model);
       var safe=safeEffort(vendor, model, remembered);
       if(safe) return safe;
     }
-    return defaultEffortFor(vendor, model);
+    return defaultEffortValue(vendor, model);
   }
   function rememberModelEffort(vendor, model, effort){
     vendor=String(vendor||'').trim().toLowerCase();
     if(!vendor) return;
+    // Keep the most recently used pair per vendor as well as the per-model
+    // effort history. Vendor pickers use this pair to cascade both controls.
+    newPrefs[vendor]={ model:String(model||'').trim(), effort:String(effort||'').trim() };
     if(!newPrefs.modelEfforts || typeof newPrefs.modelEfforts!=='object') newPrefs.modelEfforts={};
     if(!newPrefs.modelEfforts[vendor] || typeof newPrefs.modelEfforts[vendor]!=='object') newPrefs.modelEfforts[vendor]={};
-    newPrefs.modelEfforts[vendor][modelEffortKey(model)]=String(effort||'').trim().toLowerCase();
+    newPrefs.modelEfforts[vendor][modelEffortKey(model)]=String(effort||'').trim();
     saveNewPrefs();
   }
   function claudeModelOptions(){
     var dynamic = normalizedModelOptions(CLAUDE_MODELS);
-    return dynamic.length ? [{ value:'', label:'current CLI model' }].concat(dynamic) : NEW_MODEL_OPTIONS.claude;
+    return optionsWithDefault(dynamic, cliDefault('claude', 'model'), 'CLI default');
   }
   function codexModelOptions(){
     var dynamic = normalizedModelOptions(CODEX_MODELS);
-    return dynamic.length ? [{ value:'', label:'current CLI model' }].concat(dynamic) : NEW_MODEL_OPTIONS.codex;
+    return optionsWithDefault(dynamic, cliDefault('codex', 'model'), 'CLI default');
+  }
+  function cursorModelOptions(){
+    var dynamic = normalizedModelOptions(CURSOR_MODELS);
+    return optionsWithDefault(dynamic, cliDefault('cursor', 'model'), 'CLI default');
   }
   function applyClaudeModelSnapshot(models){
     var next=normalizedModelOptions(models);
@@ -4683,29 +5334,86 @@ window.__E2EE__ = ${e2eeJson};
     var rvendor=String((byId('rvendor')||{}).value||'').trim().toLowerCase();
       if(rvendor==='codex' && runPopOpen()) refreshRunConfigControls(false);
   }
+  function applyCursorModelSnapshot(models){
+    var next=normalizedModelOptions(models);
+    if(!next.length) return;
+    if(JSON.stringify(next)===JSON.stringify(normalizedModelOptions(CURSOR_MODELS))) return;
+    CURSOR_MODELS=next;
+    var nvendor=((byId('nvendor')||{}).value||'').trim().toLowerCase();
+    if(nvendor==='cursor'){
+      var nmodel=selectedNewModel();
+      populateSelect('nmodel', modelOptionsFor('cursor'), nmodel);
+      refreshNewEffortOptions(linkedEffortFor('cursor', nmodel));
+    }
+    var rvendor=String((byId('rvendor')||{}).value||'').trim().toLowerCase();
+    if(rvendor==='cursor' && runPopOpen()) refreshRunConfigControls(false);
+  }
+  function syncModelWarnings(){
+    var nvendor=String((byId('nvendor')||{}).value||'').toLowerCase();
+    var nmessage=String(MODEL_WARNINGS[nvendor]||'').trim();
+    var nwarning=byId('nmodelWarning');
+    if(nwarning){ nwarning.textContent=nmessage; nwarning.hidden=!nmessage; }
+    var rvendor=String((byId('rvendor')||{}).value||'').toLowerCase();
+    var rmessage=String(MODEL_WARNINGS[rvendor]||'').trim();
+    var rwarning=byId('rmodelWarning');
+    if(rwarning){ rwarning.textContent=rmessage; rwarning.hidden=!rmessage; }
+  }
+  function applyModelWarning(vendor, warning){
+    MODEL_WARNINGS[vendor]=typeof warning==='string' ? warning : '';
+    syncModelWarnings();
+  }
+  function applyModelDefaults(vendor, defaults){
+    if(!defaults || typeof defaults!=='object') return;
+    var before=JSON.stringify(MODEL_DEFAULTS[vendor]||{});
+    MODEL_DEFAULTS[vendor]=defaults;
+    if(before===JSON.stringify(defaults)) return;
+    var nvendor=String((byId('nvendor')||{}).value||'').trim().toLowerCase();
+    if(nvendor===vendor){
+      var nmodel=selectedNewModel();
+      populateSelect('nmodel', modelOptionsFor(vendor), nmodel);
+      refreshNewEffortOptions(selectedNewEffort());
+    }
+    var rvendor=String((byId('rvendor')||{}).value||'').trim().toLowerCase();
+    if(rvendor===vendor && runPopOpen()) refreshRunConfigControls(false);
+    refreshRunConfigButton();
+  }
   function refreshClaudeModels(){
     fetch('/models/claude', { cache:'no-store' }).then(function(r){ return r.json(); }).then(function(res){
+      applyModelWarning('claude', res && res.warning);
+      applyModelDefaults('claude', res && res.defaults);
       applyClaudeModelSnapshot(res && res.models);
     }).catch(function(){});
   }
   function refreshCodexModels(){
     fetch('/models/codex', { cache:'no-store' }).then(function(r){ return r.json(); }).then(function(res){
+      applyModelWarning('codex', res && res.warning);
+      applyModelDefaults('codex', res && res.defaults);
       applyCodexModelSnapshot(res && res.models);
+    }).catch(function(){});
+  }
+  function refreshCursorModels(){
+    fetch('/models/cursor', { cache:'no-store' }).then(function(r){ return r.json(); }).then(function(res){
+      applyModelWarning('cursor', res && res.warning);
+      applyModelDefaults('cursor', res && res.defaults);
+      applyCursorModelSnapshot(res && res.models);
     }).catch(function(){});
   }
   function modelOptionsFor(vendor){
     if(vendor==='claude') return claudeModelOptions();
     if(vendor==='codex') return codexModelOptions();
-    return NEW_MODEL_OPTIONS[vendor] || [{ value:'', label:'current CLI model' }];
+    if(vendor==='cursor') return cursorModelOptions();
+    return optionsWithDefault([], cliDefault(vendor, 'model'), 'CLI default');
   }
   function applyNewSessionPrefs(force){
     var vendor=((byId('nvendor')||{}).value||'').trim().toLowerCase();
     if(!vendorInfo(vendor)) return;
     if(!force && appliedNewVendor===vendor) return;
     var remembered=newPrefs[vendor] || {};
-    populateSelect('nmodel', modelOptionsFor(vendor), remembered.model || '');
-    refreshNewEffortOptions(linkedEffortFor(vendor, remembered.model || ''));
+    var rememberedModel=String(remembered.model||'').trim() || cliDefault(vendor, 'model');
+    populateSelect('nmodel', modelOptionsFor(vendor), rememberedModel);
+    refreshNewEffortOptions(linkedEffortFor(vendor, rememberedModel));
     appliedNewVendor=vendor;
+    syncModelWarnings();
   }
   // Repopulate the new-session effort dropdown for the currently-picked model.
   function refreshNewEffortOptions(preferred){
@@ -4713,7 +5421,7 @@ window.__E2EE__ = ${e2eeJson};
     var model=selectedNewModel();
     var want = preferred!==undefined ? preferred : selectedNewEffort();
     var safe = safeEffort(vendor, model, want);
-    populateSelect('neffort', effortOptionsFor(vendor, model), safe || defaultEffortFor(vendor, model));
+    populateSelect('neffort', effortOptionsFor(vendor, model), safe || defaultEffortValue(vendor, model));
   }
   function syncNewEffortToModel(){
     var vendor=((byId('nvendor')||{}).value||'').trim().toLowerCase();
@@ -4732,7 +5440,7 @@ window.__E2EE__ = ${e2eeJson};
   }
   function selectedNewEffort(){
     var sel=byId('neffort');
-    return sel && sel.value ? sel.value.trim().toLowerCase() : '';
+    return sel && sel.value ? sel.value.trim() : '';
   }
   function forkVendorChoices(){
     var seen={}, out=[];
@@ -4757,14 +5465,14 @@ window.__E2EE__ = ${e2eeJson};
     syncCustomSelect(sel);
   }
   function safeEffort(vendor, model, effort){
-    var want=String(effort||'').trim().toLowerCase();
+    var want=String(effort||'').trim();
     if(!want) return '';
     var opts=effortOptionsFor(vendor, model);
     return opts.some(function(opt){ return opt.value===want; }) ? want : '';
   }
   function currentForkDefaults(){
     var vendor=(cur&&(cur.runVendor||cur.vendor))||'claude';
-    var model=(cur&&(cur.runModel!==undefined ? cur.runModel : cur.model))||'';
+    var model=String((cur&&(cur.runModel!==undefined ? cur.runModel : cur.model))||'').trim();
     return {
       vendor:vendor,
       model:model,
@@ -4774,7 +5482,8 @@ window.__E2EE__ = ${e2eeJson};
   function runConfigLabel(s){
     if(!s) return 'model · effort';
     var config=currentForkDefaults();
-    return (config.model || 'current model')+' · '+config.effort;
+    return (config.model || cliDefault(config.vendor, 'model') || 'CLI default')+' · '+
+      (config.effort || defaultEffortFor(config.vendor, config.model) || cliDefault(config.vendor, 'effort') || 'CLI default');
   }
   function canConfigureRun(){
     var info=cur&&vendorInfo(cur.vendor);
@@ -4797,13 +5506,14 @@ window.__E2EE__ = ${e2eeJson};
   function refreshRunConfigControls(changedVendor){
     var defaults=currentForkDefaults();
     var vendor=String((byId('rvendor')||{}).value || defaults.vendor || '').trim().toLowerCase();
-    var returning=!!(changedVendor && cur && vendor===cur.vendor);
     var keep=!changedVendor && vendor===defaults.vendor;
-    var model=returning ? (cur.model||'') : (keep ? defaults.model : '');
-    var effort=returning ? (cur.effort||linkedEffortFor(vendor, model)) : (keep ? defaults.effort : linkedEffortFor(vendor, model));
+    var recent=newPrefs[vendor] || {};
+    var model=(keep ? defaults.model : String(recent.model||'').trim()) || cliDefault(vendor, 'model');
+    var effort=keep ? defaults.effort : linkedEffortFor(vendor, model);
     populateSelect('rmodel', modelOptionsFor(vendor), model);
     refreshRunEffortOptions(effort);
     syncCustomSelect(byId('rvendor'));
+    syncModelWarnings();
     setRunMsg(vendor===cur.vendor ? 'Send continues this session; Fork creates a new branch.' : 'Vendor changed: Send is unavailable. Use Fork to create a '+vendor+' branch.', false);
   }
   // Repopulate the run-config effort dropdown for the currently-picked session model.
@@ -4811,7 +5521,7 @@ window.__E2EE__ = ${e2eeJson};
     var vendor=String((byId('rvendor')||{}).value || (cur&&cur.vendor) || 'claude').trim().toLowerCase();
     var model=String((byId('rmodel')||{}).value || '').trim();
     var want = preferred!==undefined ? preferred : String((byId('reffort')||{}).value || '');
-    populateSelect('reffort', effortOptionsFor(vendor, model), safeEffort(vendor, model, want) || defaultEffortFor(vendor, model));
+    populateSelect('reffort', effortOptionsFor(vendor, model), safeEffort(vendor, model, want) || defaultEffortValue(vendor, model));
   }
   function syncRunEffortToModel(){
     var vendor=String((byId('rvendor')||{}).value || (cur&&cur.vendor) || 'claude').trim().toLowerCase();
@@ -4823,7 +5533,7 @@ window.__E2EE__ = ${e2eeJson};
     return {
       vendor:String((byId('rvendor')||{}).value || '').trim().toLowerCase(),
       model:String((byId('rmodel')||{}).value || '').trim(),
-      effort:String((byId('reffort')||{}).value || '').trim().toLowerCase()
+      effort:String((byId('reffort')||{}).value || '').trim()
     };
   }
   function setRunMsg(msg, isErr){
@@ -5160,14 +5870,15 @@ window.__E2EE__ = ${e2eeJson};
     var btn=byId('newToggle'); if(btn) btn.setAttribute('aria-expanded','true');
   }
   function toggleNewBox(){ if(newBoxOpen()) closeNewBox(); else openNewBox(); }
-  function closeGlobalTagEditor(){ globalTagEditing = false; renderTagFilters(); }
-  function openGlobalTagEditor(){ globalTagEditing = true; renderTagFilters(); }
+  function closeGlobalTagEditor(){ globalTagEditing = false; globalTagDraft=''; renderTagFilters(); }
+  function openGlobalTagEditor(){ globalTagEditing = true; globalTagDraft=''; renderTagFilters(); }
   function buildGlobalTagEditor(){
     var wrap=el('div','tagcreate-inline');
     var row=el('div','tagedit-row');
     var input=document.createElement('input');
     input.className='tagedit-input';
     input.id='tagInput';
+    input.value=globalTagDraft;
     input.placeholder='tag name · Enter';
     var cancel=el('button','tagedit-cancel','✕');
     cancel.id='tagAddCancel';
@@ -5176,12 +5887,13 @@ window.__E2EE__ = ${e2eeJson};
     row.appendChild(cancel);
     wrap.appendChild(row);
     cancel.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); closeGlobalTagEditor(); };
+    input.addEventListener('input', function(){ globalTagDraft=input.value; });
     input.addEventListener('keydown', function(ev){
       if(isImeConfirming(ev)) return;
       if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); addGlobalTag(); }
-      else if(ev.key==='Escape'){ ev.preventDefault(); closeGlobalTagEditor(); }
+      else if(ev.key==='Escape'){ ev.preventDefault(); ev.stopImmediatePropagation(); closeGlobalTagEditor(); }
     });
-    setTimeout(function(){ try{ input.focus(); }catch(e){} }, 0);
+    setTimeout(function(){ try{ input.focus(); input.setSelectionRange(input.value.length,input.value.length); }catch(e){} }, 0);
     return wrap;
   }
   function orderedTagsEqual(a,b){
@@ -5356,12 +6068,16 @@ window.__E2EE__ = ${e2eeJson};
       priorityChip.appendChild(priorityMenu);
     }
     wrap.appendChild(priorityChip);
-    var defs=filterTagDefs();
+    var defs=filterTagDefs().filter(tagDefMatchesSearch);
     var filterTags=currentFilterTags();
+    var tagCounts=tagSessionCounts();
     defs.forEach(function(def){
       var active=filterTags.indexOf(def.key)>=0;
-      var chip=el('span','gtag'+(active?' on':'')+(def.kind!=='user'?' auto':''));
+      var chip=el('span','gtag'+(active?' on':'')+(def.kind!=='user'?' auto':'')+(def.deletable?' deletable':''));
       var btn=el('button','gtagbtn',def.label);
+      var count=tagCounts[def.key]||0;
+      btn.appendChild(el('span','gtagcount',String(count)));
+      btn.setAttribute('aria-label',def.label+' · '+count+' session'+(count===1?'':'s'));
       btn.draggable=false;
       btn.title=def.title || 'Toggle filter';
       btn.onclick=function(ev){
@@ -5428,7 +6144,7 @@ window.__E2EE__ = ${e2eeJson};
     var name=normalizeTag(inp.value);
     if(!name) return;
     fetch('/tags',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:name})})
-      .then(function(r){return r.json();}).then(function(res){ if(!res.ok) return; inp.value=''; globalTagEditing = false; setGlobalTags(res.tags||[]); })
+      .then(function(r){return r.json();}).then(function(res){ if(!res.ok) return; inp.value=''; globalTagDraft=''; globalTagEditing = false; setGlobalTags(res.tags||[]); })
       .catch(function(){});
   }
   function restoreTagState(tags, sessionTags, focusSnapshot){
@@ -5535,6 +6251,7 @@ window.__E2EE__ = ${e2eeJson};
     if(next.indexOf(tag)<0) next.push(tag);
     var prev=(s.tags||[]).slice();
     var prevTags=TAGS.slice();
+    delete sessionTagEditorState[String(s.sessionId||'')];
     editingTagSession = null;
     headerTagEditing = false;
     if(TAGS.indexOf(tag)<0) TAGS.push(tag);
@@ -5544,7 +6261,22 @@ window.__E2EE__ = ${e2eeJson};
   // Per-tab tag editor with a custom (non-native) suggestion dropdown: filters the
   // existing global tags as you type, offers to create the typed one, and supports
   // ↑/↓ + Enter. Replaces the old <datalist>, whose popup couldn't be styled.
+  function closeSessionTagEditor(s){
+    if(s) delete sessionTagEditorState[String(s.sessionId||'')];
+    editingTagSession=null;
+    headerTagEditing=false;
+    if(cur===s) syncOpenHeader();
+    renderSidebar();
+  }
+  function tagSuggestionMatches(tag, query){
+    var hay=normalizeTag(tag).toLowerCase();
+    var terms=normalizeTag(query).toLowerCase().split(' ').filter(Boolean);
+    return !terms.length || terms.every(function(term){ return hay.indexOf(term)>=0; });
+  }
   function buildTagEditor(s){
+    var stateKey=String(s&&s.sessionId||'');
+    var state=sessionTagEditorState[stateKey] || { value:'', start:0, end:0, scrollTop:0 };
+    sessionTagEditorState[stateKey]=state;
     var assigned={};
     (s.tags||[]).forEach(function(t){ assigned[normalizeTag(t).toLowerCase()]=true; });
     var editor=el('div','tagedit');
@@ -5552,6 +6284,7 @@ window.__E2EE__ = ${e2eeJson};
     var row=el('div','tagedit-row');
     var input=document.createElement('input');
     input.className='tagedit-input';
+    input.value=state.value;
     input.placeholder='tag name (pick below or type to create · Enter)';
     var cancel=el('button','tagedit-cancel');
     cancel.innerHTML='<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"></path></svg>';
@@ -5579,8 +6312,9 @@ window.__E2EE__ = ${e2eeJson};
       var q=normalizeTag(input.value).toLowerCase();
       var hits=TAGS.filter(function(t){
         var k=normalizeTag(t).toLowerCase();
-        return !assigned[k] && (!q || k.indexOf(q)>=0);
+        return !assigned[k] && tagSuggestionMatches(k, q);
       });
+      var restoreScroll=state.scrollTop;
       sug.innerHTML='';
       hits.forEach(function(t){
         var opt=el('div','tagsug-opt',t);
@@ -5601,6 +6335,7 @@ window.__E2EE__ = ${e2eeJson};
       sug.hidden = n===0;
       if(active>=n) active=n-1;
       highlight();
+      sug.scrollTop=restoreScroll;
     }
     function commit(){
       var els=optEls();
@@ -5609,7 +6344,19 @@ window.__E2EE__ = ${e2eeJson};
       if(typed) submitChoice(typed);
     }
     input.onclick=function(ev){ ev.stopPropagation(); };
-    input.oninput=function(){ active=-1; renderSug(); };
+    input.oninput=function(){
+      state.value=input.value;
+      state.start=input.selectionStart==null ? input.value.length : input.selectionStart;
+      state.end=input.selectionEnd==null ? state.start : input.selectionEnd;
+      state.scrollTop=0;
+      active=-1;
+      renderSug();
+    };
+    input.onselect=function(){
+      state.start=input.selectionStart==null ? input.value.length : input.selectionStart;
+      state.end=input.selectionEnd==null ? state.start : input.selectionEnd;
+    };
+    sug.onscroll=function(){ state.scrollTop=sug.scrollTop; };
     input.onkeydown=function(ev){
       ev.stopPropagation();
       if(isImeConfirming(ev)) return;
@@ -5617,19 +6364,32 @@ window.__E2EE__ = ${e2eeJson};
       if(ev.key==='ArrowDown'){ ev.preventDefault(); if(n){ active=(active+1)%n; highlight(); } }
       else if(ev.key==='ArrowUp'){ ev.preventDefault(); if(n){ active=(active-1+n)%n; highlight(); } }
       else if(ev.key==='Enter'){ ev.preventDefault(); commit(); }
-      else if(ev.key==='Escape'){ ev.preventDefault(); editingTagSession=null; headerTagEditing=false; if(cur===s) syncOpenHeader(); renderSidebar(); }
+      else if(ev.key==='Escape'){ ev.preventDefault(); ev.stopImmediatePropagation(); closeSessionTagEditor(s); }
     };
-    cancel.onclick=function(ev){ ev.stopPropagation(); editingTagSession=null; headerTagEditing=false; if(cur===s) syncOpenHeader(); renderSidebar(); };
-    setTimeout(renderSug, 0);
+    cancel.onclick=function(ev){ ev.stopPropagation(); closeSessionTagEditor(s); };
+    setTimeout(function(){
+      renderSug();
+      try{ input.focus(); input.setSelectionRange(state.start,state.end); }catch(e){}
+    }, 0);
     return editor;
   }
   // Auto-scroll is "sticky": we only pull to the bottom while the user is already
   // there. If they scroll up to read mid-turn, streamed chunks must NOT yank them
   // back down — scroll(force=true) is reserved for the user's own actions (sending).
   var stick = true;
-  function nearBottom(){ var m=byId('msgs'); if(!m) return true; return (m.scrollHeight - m.scrollTop - m.clientHeight) < 80; }
-  function scroll(force){ var m=byId('msgs'); if(!m) return; if(force||stick){ m.scrollTop=m.scrollHeight; } }
-  (function(){ var m=byId('msgs'); if(m) m.addEventListener('scroll', function(ev){ stick = nearBottom(); trackVisitScroll(ev); scheduleLatestPin(); }); })();
+  function nearScrollBottom(node){ return !node || (node.scrollHeight-node.scrollTop-node.clientHeight)<80; }
+  function syncScrollBottomButton(node,button){ if(button) button.hidden=nearScrollBottom(node); }
+  function nearBottom(){ return nearScrollBottom(byId('msgs')); }
+  function scroll(force){ var m=byId('msgs'); if(!m) return; if(force||stick){ m.scrollTop=m.scrollHeight; } syncScrollBottomButton(m,byId('chatScrollBottom')); }
+  function scrollChatToBottom(){
+    var m=byId('msgs'); if(!m) return;
+    stick=true; m.scrollTo({top:m.scrollHeight,behavior:'smooth'});
+  }
+  function scrollCommentsToBottom(){
+    var m=byId('commentMsgs'); if(!m) return;
+    commentStick=true; m.scrollTo({top:m.scrollHeight,behavior:'smooth'});
+  }
+  (function(){ var m=byId('msgs'); if(m) m.addEventListener('scroll', function(ev){ stick = nearBottom(); syncScrollBottomButton(m,byId('chatScrollBottom')); trackVisitScroll(ev); scheduleLatestPin(); }); })();
   function clearPh(){ var p=byId('ph'); if(p) p.remove(); }
 
   // A persistent "生成中…" indicator pinned to the BOTTOM of the chat (the append
@@ -5650,11 +6410,11 @@ window.__E2EE__ = ${e2eeJson};
   function keepGenLast(){ if(genEl) byId('msgs').appendChild(genEl); }
   function clearGen(){ if(genTimer){ clearInterval(genTimer); genTimer=null; } if(genEl){ genEl.remove(); genEl=null; } }
   // The input stays typeable even mid-turn now — drafts queue instead of being
-  // blocked — so this only swaps the placeholder hint and (optionally) refocuses.
+  // blocked — so this only swaps the placeholder hint. An async turn ending
+  // must never steal focus from New Session, search, tag editing, or another field.
   function setInputEnabled(on){ var i=byId('input'); if(!i) return; i.disabled=false;
     i.placeholder = on ? 'message'
-                       : 'Generating… Enter queues your message';
-    if(on){ try{ i.focus(); }catch(e){} } }
+                       : 'Generating… Enter queues your message'; }
   function draftKey(s){ return s && s.sessionId ? String(s.sessionId) : ''; }
   function setDraftForSession(s, text){
     var key=draftKey(s);
@@ -5662,6 +6422,36 @@ window.__E2EE__ = ${e2eeJson};
     var val=String(text||'');
     if(val) sessionDrafts[key]=val;
     else delete sessionDrafts[key];
+  }
+  function draftTextForSession(s){
+    var key=draftKey(s);
+    return key && sessionDrafts[key] ? String(sessionDrafts[key]).trim() : '';
+  }
+  function composerOwnsDraftForSession(s){
+    var input=byId('input');
+    return !!(input && document.activeElement===input && draftKey(cur)===draftKey(s));
+  }
+  function appendLatestPrompt(host, s, cls){
+    // Keep the navigation context stable while the user is actively composing.
+    // The text is still saved continuously, but only becomes a projected Draft
+    // after the composer loses focus.
+    var draft=composerOwnsDraftForSession(s) ? '' : draftTextForSession(s);
+    var latest=draft || String((s&&s.lastPrompt)||'');
+    if(!latest || (!draft && latest===String((s&&s.title)||''))) return;
+    var edit=null;
+    if(draft){
+      edit=el('button','draft-edit');
+      setIconButton(edit,'edit','Edit draft');
+      edit.onclick=function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        if(cur!==s) select(s);
+        setTimeout(function(){
+          var input=byId('input'); if(!input) return;
+          try{ input.focus(); input.setSelectionRange(input.value.length,input.value.length); }catch(e){}
+        },0);
+      };
+    }
+    host.appendChild(sessionPromptLine(cls||'it-firstline',draft?'Draft':'Latest',latest,edit));
   }
   function clearDraftForSession(s){
     var key=draftKey(s);
@@ -5738,7 +6528,10 @@ window.__E2EE__ = ${e2eeJson};
     actions.appendChild(go); actions.appendChild(cancel); actions.appendChild(del);
     head.appendChild(actions);
     var ta=el('textarea','qeditta'); ta.value=String(text||'');
-    ta.rows=Math.min(8, Math.max(2, String(text||'').split('\\n').length));
+    function syncQueuedEditShape(){
+      ta.rows=Math.min(8, Math.max(2, String(ta.value||'').split('\\n').length));
+    }
+    syncQueuedEditShape();
     box.appendChild(head); box.appendChild(ta);
     function closeEditor(){ editingQueueIdx=-1; syncQueueState(); renderQueue(); }
     function commit(sendNow){
@@ -5751,7 +6544,7 @@ window.__E2EE__ = ${e2eeJson};
     cancel.onclick=function(ev){ ev.stopPropagation(); closeEditor(); };
     del.onclick=function(ev){ ev.stopPropagation(); delQueued(i); };
     box.onclick=function(ev){ ev.stopPropagation(); };
-    ta.oninput=syncInlineEditShape;
+    ta.oninput=syncQueuedEditShape;
     ta.onkeydown=function(ev){ ev.stopPropagation();
       if(isImeConfirming(ev)) return;
       if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); commit(true); }
@@ -5774,6 +6567,7 @@ window.__E2EE__ = ${e2eeJson};
     turnActive=true;
     if(cur) cur.lastGenerationDurationMs=null;
     if(cur) cur.lastGenerationOutcome=null;
+    if(cur) cur.lastGenerationStoppedByUser=false;
     if(cur) cur.analysisPending=false;
     clearTurnScopedSignals(cur);
     if(cur && !startedAt) cur.lastAssistantOutputAt=null;
@@ -5797,9 +6591,11 @@ window.__E2EE__ = ${e2eeJson};
   // Queue advancement is server-owned. A terminal event only updates this tab;
   // the server starts the next queued turn even when this session is in the background.
   function turnEnded(outcome){
-    var terminal=outcome||(stopRequested?'stopped':'generated');
+    var stoppedByUser=stopRequested;
+    var terminal=outcome||(stoppedByUser?'stopped':'generated');
     stopRequested=false;
     endTurn(terminal);
+    if(cur && stoppedByUser) cur.lastGenerationStoppedByUser=true;
     renderQueue();
     if(cur){ refreshServerQueue(cur); refreshAnalysis(cur); }
   }
@@ -5954,7 +6750,14 @@ window.__E2EE__ = ${e2eeJson};
     if(s.sessionId && !s.pendingFork){
       var add=el('button','it-tagadd','+ tag');
       add.type='button';
-      add.onclick=function(ev){ ev.stopPropagation(); headerTagEditing = !headerTagEditing; editingTagSession=null; renderHeaderTags(s); renderSidebar(); };
+      add.onclick=function(ev){
+        ev.stopPropagation();
+        delete sessionTagEditorState[String(s.sessionId||'')];
+        headerTagEditing = !headerTagEditing;
+        editingTagSession=null;
+        renderHeaderTags(s);
+        renderSidebar();
+      };
       tags.appendChild(add);
     }
     row.appendChild(tags);
@@ -6018,7 +6821,7 @@ window.__E2EE__ = ${e2eeJson};
   }
   function refreshAnalysis(s){
     var id=providerSessionId(s);
-    if(!s||!id) return; // both Claude and Codex sessions get a daemon verdict
+    if(!s||!id) return; // supported vendor sessions can receive a daemon verdict
     var tries=0;
     var poll=function(){
       tries++;
@@ -6037,7 +6840,7 @@ window.__E2EE__ = ${e2eeJson};
     syncHeaderStatus(cur);
     var sub=byId('h-sub'); sub.innerHTML=''; sub.className='s';
     if(cur.title) sub.appendChild(sessionPromptLine('sub-line it-firstline','First',cur.title));
-    if(cur.lastPrompt && cur.lastPrompt!==cur.title) sub.appendChild(sessionPromptLine('sub-line it-firstline','Latest',cur.lastPrompt));
+    appendLatestPrompt(sub, cur, 'sub-line it-firstline');
     if(!sub.childNodes.length) sub.appendChild(el('div','sub-line', cur.vendor+' · '+(cur.cwd||'')));
     var age=byId('h-age'); if(age){ age.textContent=ageLabel(cur); age.hidden=!age.textContent; }
     headerSig(cur);
@@ -6076,7 +6879,7 @@ window.__E2EE__ = ${e2eeJson};
     syncPageTitle(null);
     var ht=byId('h-title'); if(ht){ ht.className='t it-title'; ht.textContent = 'Attend'; ht.removeAttribute('data-hover-tip'); }
     var sub=byId('h-sub');
-    if(sub){ sub.className='s'; sub.textContent='Select a session, or + new'; }
+    if(sub){ sub.className='s'; sub.textContent='Recent changes'; }
     var sig=byId('h-sig'); if(sig) sig.innerHTML='';
     var age=byId('h-age'); if(age){ age.textContent=''; age.hidden=true; }
     var tags=byId('h-tags'); if(tags) tags.innerHTML='';
@@ -6089,6 +6892,7 @@ window.__E2EE__ = ${e2eeJson};
     editingQueueIdx = -1;
     hideLatestPin();
     var ap=byId('avoidPanel'); if(ap){ ap.innerHTML=''; ap.hidden=true; }
+    if(noSessionChangelog) replaceMessages(noSessionChangelog.cloneNode(true));
     renderQueue();
     clearAttachments();
     setComposerDrop(false);
@@ -6112,6 +6916,7 @@ window.__E2EE__ = ${e2eeJson};
   function hydrateSessionSource(s, opts){
     opts = opts || {};
     var force = !!opts.force;
+    var preserveSort = !!opts.preserveSort;
     var id=providerSessionId(s);
     if(!s || !id || s.pendingFork || s._resolvingSource) return Promise.resolve(s);
     if(s.file && !force) return Promise.resolve(s);
@@ -6130,8 +6935,7 @@ window.__E2EE__ = ${e2eeJson};
           if(found.lastPrompt && !pendingLatest) s.lastPrompt = found.lastPrompt;
           if(found.lastTs!=null && !pendingLatest) {
             syncActivityLastTs(s, found.lastTs);
-            syncActivitySortTs(s, found.lastTs);
-            sortSessions();
+            if(!preserveSort){ syncActivitySortTs(s, found.lastTs); sortSessions(); }
           }
           if(Array.isArray(found.userPromptTs)){
             var seenTs={};
@@ -6189,6 +6993,7 @@ window.__E2EE__ = ${e2eeJson};
   var statusEls={}; // sessionId -> .it-status dot, so live generating state can patch in place
   var liveTimingEls={}; // sessionId -> compact generating + output-silence telemetry
   var filterQ=''; // sidebar search query (matches custom title / brief / 首 / 新 / project / vendor / reason)
+  var tagSearchQ=''; // tag-chip search; also narrows sessions inside the current view
   var contentSearchQ='';
   var contentSearchTimer=null;
   var contentSearchSeq=0;
@@ -6256,8 +7061,8 @@ window.__E2EE__ = ${e2eeJson};
     if(activeTagView==='active' && !isCur && !(s && (s.generating || s.unread || s.seen))) return false;
     if(!sessionMatchesPriorityFilter(s)) return false;
     if(!sessionMatchesTagFilter(s, currentFilterTags())) return false;
-    if(!filterQ) return true;
-    return sidebarFieldSearchHit(s) || !!contentSearchHit(s);
+    if(!sessionMatchesTagSearch(s)) return false;
+    return sessionMatchesSidebarSearch(s);
   }
   function reconcileCurrentSessionToFilter(){
     if(cur && matchesFilter(cur)){
@@ -6307,8 +7112,9 @@ window.__E2EE__ = ${e2eeJson};
   function stripForkPrefix(text){
     return String(text||'').replace(/^\\s*(?:\\(fork\\)\\s*)+/i, '').trim();
   }
-  function forkTitleFromSession(s){
-    var base=stripForkPrefix((s && s.brief) || (s && s.title) || (s && s.lastPrompt) || '');
+  function forkTitleFromSession(s, userMsg){
+    var message=String(userMsg||'').trim();
+    var base=stripForkPrefix(message || (s && s.brief) || (s && s.title) || (s && s.lastPrompt) || '');
     return base ? '(fork) '+base : '(fork)';
   }
   // Fine-grained "time since last activity": same-day sessions get just now/Xm ago/Xh ago
@@ -6395,17 +7201,18 @@ window.__E2EE__ = ${e2eeJson};
     });
     var roots=ids.filter(function(id){ return !parents[id] || !inTree[parents[id]]; });
     if(!roots.length && ids.length) roots=[ids[0]];
+    var nodeW=300,nodeH=112,columnStep=364,rowStep=134;
     var positions={}, visiting={}, visited={}, leaf=0;
     function place(id, depth){
       if(positions[id]) return positions[id].y;
-      if(visiting[id]) return leaf++*82;
+      if(visiting[id]) return leaf++*rowStep;
       visiting[id]=true;
       var ys=[];
       (children[id]||[]).forEach(function(child){
         if(!visiting[child]) ys.push(place(child,depth+1));
       });
-      var y=ys.length ? ys.reduce(function(sum,n){ return sum+n; },0)/ys.length : leaf++*82;
-      positions[id]={id:id,x:40+depth*226,y:36+y,depth:depth};
+      var y=ys.length ? ys.reduce(function(sum,n){ return sum+n; },0)/ys.length : leaf++*rowStep;
+      positions[id]={id:id,x:40+depth*columnStep,y:36+y,depth:depth};
       visiting[id]=false; visited[id]=true;
       return y;
     }
@@ -6419,7 +7226,7 @@ window.__E2EE__ = ${e2eeJson};
     });
     var maxX=0,maxY=0;
     nodes.forEach(function(node){ maxX=Math.max(maxX,node.x); maxY=Math.max(maxY,node.y); });
-    return { ids:ids, nodes:nodes, edges:edges, width:Math.max(280,maxX+216), height:Math.max(180,maxY+98) };
+    return { ids:ids, nodes:nodes, edges:edges, nodeW:nodeW, nodeH:nodeH, width:Math.max(404,maxX+nodeW+40), height:Math.max(264,maxY+nodeH+40) };
   }
   function forkTreeMini(s){
     var layout=forkTreeLayout(s), ns='http://www.w3.org/2000/svg';
@@ -6458,12 +7265,16 @@ window.__E2EE__ = ${e2eeJson};
   }
   function syncHeaderForkTree(){ configureForkTreeTrigger(byId('forkTreeBtn'),cur); }
   function applyForkTreeTransform(){
-    var stage=byId('forkTreeStage'); if(!stage) return;
+    var pan=byId('forkTreePan'),stage=byId('forkTreeStage'); if(!pan||!stage) return;
     var scale=Number(forkTreeView.scale)||1;
-    var textScale=scale>1 ? 1/scale : 1;
-    stage.style.transform='translate('+forkTreeView.x+'px,'+forkTreeView.y+'px) scale('+scale+')';
-    stage.style.setProperty('--forktree-text-scale',String(textScale));
-    stage.style.setProperty('--forktree-text-width',String(scale>1 ? scale*100 : 100)+'%');
+    // Scale tree geometry, then counter-scale each node's content. The cards get
+    // physically larger/smaller while text stays readable; zooming in therefore
+    // exposes more of long titles, prompts, tags, and context instead of merely
+    // magnifying the same clipped text.
+    pan.style.transform='translate('+Math.round(forkTreeView.x)+'px,'+Math.round(forkTreeView.y)+'px)';
+    stage.style.transform='scale('+scale+')';
+    stage.style.setProperty('--forktree-content-scale',String(1/scale));
+    stage.style.setProperty('--forktree-content-size',String(scale*100)+'%');
   }
   function fitForkTree(){
     var viewport=byId('forkTreeViewport'); if(!viewport || !forkTreeView.width || !forkTreeView.height) return;
@@ -6509,7 +7320,7 @@ window.__E2EE__ = ${e2eeJson};
     svg.setAttribute('class','forktree-edges'); svg.setAttribute('width',String(layout.width)); svg.setAttribute('height',String(layout.height));
     layout.edges.forEach(function(edge){
       var path=document.createElementNS(ns,'path');
-      var x1=edge.from.x+176,y1=edge.from.y+29,x2=edge.to.x,y2=edge.to.y+29,mid=(x1+x2)/2;
+      var x1=edge.from.x+layout.nodeW,y1=edge.from.y+layout.nodeH/2,x2=edge.to.x,y2=edge.to.y+layout.nodeH/2,mid=(x1+x2)/2;
       path.setAttribute('class','forktree-edge');
       path.setAttribute('d','M '+x1+' '+y1+' C '+mid+' '+y1+', '+mid+' '+y2+', '+x2+' '+y2);
       svg.appendChild(path);
@@ -6522,12 +7333,33 @@ window.__E2EE__ = ${e2eeJson};
       var button=el('button','forktree-node'+(node.id===current?' current':'')+(!session?' missing':''));
       button.type='button'; button.style.left=node.x+'px'; button.style.top=node.y+'px'; button.disabled=!session;
       button.setAttribute('data-forktree-node-id',node.id);
+      var content=el('div','forktree-node-content');
+      var head=el('div','forktree-node-head');
       var dot=el('span','forktree-node-dot it-status '+st);
       dot.title=session ? statusLabel(st) : 'session unavailable';
-      button.appendChild(dot);
+      head.appendChild(dot);
       var title=session ? sessionTitleText(session) : node.id;
-      button.appendChild(el('span','forktree-node-title',title));
-      button.appendChild(el('span','forktree-node-meta',session ? [session.vendor,ageLabel(session)].filter(Boolean).join(' · ') : 'session unavailable'));
+      var titleNode=el('span','forktree-node-title');
+      if(session) renderSessionTitle(titleNode,session,'forktree-node-title');
+      else titleNode.textContent=title;
+      head.appendChild(titleNode);
+      if(session && ageLabel(session)) head.appendChild(el('span','forktree-node-age',ageLabel(session)));
+      content.appendChild(head);
+      if(session){
+        var signals=el('div','forktree-node-signals it-meta');
+        renderSessionSignals(signals,session);
+        if(signals.childNodes.length) content.appendChild(signals);
+        if(session.title) content.appendChild(sessionPromptLine('it-firstline','First',session.title));
+        appendLatestPrompt(content, session, 'it-firstline');
+        var foot=el('div','forktree-node-foot it-footrow');
+        var tags=el('div','it-tags');
+        (session.tags||[]).slice(0,3).forEach(function(tag){ var def=userTagDef(tag); if(def) tags.appendChild(tagChip(def,false)); });
+        if((session.tags||[]).length>3) tags.appendChild(el('span','it-tag','+'+((session.tags||[]).length-3)));
+        foot.appendChild(tags);
+        foot.appendChild(sessionContextRow(session));
+        content.appendChild(foot);
+      } else content.appendChild(el('span','forktree-node-missing','session unavailable'));
+      button.appendChild(content);
       button.setAttribute('data-hover-tip',title);
       if(session) button.onclick=function(ev){ ev.stopPropagation(); selectForkTreeSession(node.id); };
       stage.appendChild(button);
@@ -6568,7 +7400,7 @@ window.__E2EE__ = ${e2eeJson};
   function makeLiveTimingEntry(s){
     var row=el('div','it-live');
     row.hidden=!s.generating && s.lastGenerationDurationMs==null;
-    row.setAttribute('data-hover-tip','Live turn duration · time since the latest assistant text in this turn');
+    row.setAttribute('data-hover-tip','Live turn duration · time since the latest assistant or tool activity');
     var total=el('span','it-live-total');
     var totalLabel=el('span','it-live-label');
     var totalTime=el('span','it-live-time');
@@ -6764,6 +7596,14 @@ window.__E2EE__ = ${e2eeJson};
     if(s.unread) setAttentionState(s, 'seen');
     else setAttentionState(s, attentionState(s)==='read' ? 'seen' : 'unread');
   }
+  function isSessionRowControl(target, row){
+    var node=target;
+    while(node && node!==row){
+      if((node.matches && node.matches('button,input,textarea,select,a,label')) || typeof node.onclick==='function') return true;
+      node=node.parentElement;
+    }
+    return false;
+  }
   function renderSidebar(){
     clearTagHeatCache();
     var list=byId('list'), headerSignals=byId('h-sig'), retainedLive={};
@@ -6812,7 +7652,7 @@ window.__E2EE__ = ${e2eeJson};
       if(meta.childNodes.length) item.appendChild(meta);
       // two subtitles: my first message, then my latest message
       if(s.title) item.appendChild(sessionPromptLine('it-firstline','First',s.title));
-      if(s.lastPrompt && s.lastPrompt!==s.title) item.appendChild(sessionPromptLine('it-firstline','Latest',s.lastPrompt));
+      appendLatestPrompt(item, s, 'it-firstline');
       var contentHit=contentSearchHit(s);
       if(contentHit && contentHit.hits && contentHit.hits.length){
         var firstHit=contentHit.hits[0];
@@ -6840,7 +7680,14 @@ window.__E2EE__ = ${e2eeJson};
         });
         if(taggable){
           var add=el('button','it-tagadd','+ tag');
-          add.onclick=function(ev){ ev.stopPropagation(); headerTagEditing=false; editingTagSession = editingTagSession===s.sessionId ? null : s.sessionId; if(cur===s) syncOpenHeader(); renderSidebar(); };
+          add.onclick=function(ev){
+            ev.stopPropagation();
+            delete sessionTagEditorState[String(s.sessionId||'')];
+            headerTagEditing=false;
+            editingTagSession = editingTagSession===s.sessionId ? null : s.sessionId;
+            if(cur===s) syncOpenHeader();
+            renderSidebar();
+          };
           tagrow.appendChild(add);
         }
       }
@@ -6850,14 +7697,23 @@ window.__E2EE__ = ${e2eeJson};
       if(taggable && editingTagSession===s.sessionId){
         item.appendChild(buildTagEditor(s));
       }
-      item.onclick=function(){ select(s); };
+      // Live status/analysis updates rebuild the sidebar. If that happens after
+      // mousedown but before click, the original row is detached and the browser
+      // drops the click — most visibly for a just-finished unread session. Switch
+      // mouse navigation on pointerdown so a concurrent rerender cannot eat it.
+      // Touch/pen stay click-based so scrolling the sidebar never navigates.
+      item.onpointerdown=function(ev){
+        if((ev.pointerType && ev.pointerType!=='mouse') || ev.button!==0 || isSessionRowControl(ev.target,item)) return;
+        select(s);
+      };
+      item.onclick=function(ev){ if(!isSessionRowControl(ev.target,item) && cur!==s) select(s); };
       list.appendChild(item);
     });
     if(shown===0){
       var filterTags=currentFilterTags();
       var empty=el('div','empty');
-      empty.textContent=(filterQ||activeTagView!=='all'||filterTags.length||priorityFilter.length<5)
-        ? ('No matches'+(filterQ?(' for “'+filterQ+'”'):'')+(priorityFilter.length<5?(' · priority: '+priorityFilterLabel(priorityFilter)):'')+(filterTags.length?(' · tags: '+activeTagLabels().join(', ')):'')+(activeTagView==='unread'?' · Unread':'')+(activeTagView==='active'?' · Active':'')+(activeTagView==='focus'?' · Focus':''))
+      empty.textContent=(filterQ||tagSearchQ||activeTagView!=='all'||filterTags.length||priorityFilter.length<5)
+        ? ('No matches'+(filterQ?(' for “'+filterQ+'”'):'')+(tagSearchQ?(' · tag search: “'+tagSearchQ+'”'):'')+(priorityFilter.length<5?(' · priority: '+priorityFilterLabel(priorityFilter)):'')+(filterTags.length?(' · tags: '+activeTagLabels().join(', ')):'')+(activeTagView==='unread'?' · Unread':'')+(activeTagView==='active'?' · Active':'')+(activeTagView==='focus'?' · Focus':''))
         : 'No sessions yet';
       list.appendChild(empty);
     }
@@ -6917,9 +7773,11 @@ window.__E2EE__ = ${e2eeJson};
     var nodes=msgs.querySelectorAll('.msg.user:not(.folded-away)');
     return !!nodes.length && nodes[nodes.length-1]===msgEl;
   }
-  function editLatestAndResend(msgEl, bubble){
+  function canResendStoppedLatest(msgEl){
+    return !!(cur && cur.lastGenerationStoppedByUser && !turnActive && isLatestUserMessage(msgEl));
+  }
+  function editStoppedLatestAndResend(msgEl, bubble){
     if(!cur || !cur.sessionId || cur.pendingFork) return;
-    if(turnActive){ showToast('Stop this turn before editing the latest message.', 'warn'); return; }
     if(msgEl.classList.contains('editing')) return;
     var raw=bubble.getAttribute('data-raw') || bubble.textContent || '';
     msgEl.classList.add('editing');
@@ -6938,7 +7796,7 @@ window.__E2EE__ = ${e2eeJson};
     }, function(){
       msgEl.classList.remove('editing');
       editor.replaceWith(bubble);
-    }, 'send ▸');
+    }, 'resend ▸');
     bubble.replaceWith(editor);
   }
   function editAndForkFromMessage(msgEl, bubble){
@@ -6960,7 +7818,7 @@ window.__E2EE__ = ${e2eeJson};
     bubble.replaceWith(editor);
   }
   function editUserMessage(msgEl, bubble){
-    if(isLatestUserMessage(msgEl) && !turnActive) editLatestAndResend(msgEl, bubble);
+    if(canResendStoppedLatest(msgEl)) editStoppedLatestAndResend(msgEl, bubble);
     else editAndForkFromMessage(msgEl, bubble);
   }
   function addMsg(role, text, markdown, attachments){
@@ -6989,9 +7847,16 @@ window.__E2EE__ = ${e2eeJson};
       m.appendChild(pb);
       syncMessagePinState(m);
     }
+    if(role==='assistant'){
+      var cb=el('button','msg-comment');
+      setIconButton(cb,'comment','Comment on this response');
+      cb.onclick=function(ev){ ev.stopPropagation(); openCommentsForMessage(m); };
+      m.appendChild(cb);
+    }
     m.appendChild(b);
     var target=renderTarget || byId('msgs');
     target.appendChild(m);
+    if(role==='assistant') syncMessageCommentState(m);
     if(!renderTarget) applyCollapsedTurns();
     if(role==='user' && !renderTarget) latestUserMsgEl = m;
     if(!suppressScroll){
@@ -7076,6 +7941,25 @@ window.__E2EE__ = ${e2eeJson};
       ensureCur().rows.push({t:'@',s:line});
     }
     pushCur();
+    return files.length ? files : null;
+  }
+  function parseCodexFileChanges(name, input){
+    if(name!=='edit' || !input || !Array.isArray(input.changes)) return null;
+    var files=[];
+    input.changes.forEach(function(change){
+      if(!change || typeof change!=='object') return;
+      var rows=[];
+      String(change.diff||'').replace(/\\r/g,'').split('\\n').forEach(function(line){
+        if(!line) return;
+        var sign=line.charAt(0);
+        if(line.indexOf('@@')===0 || line.indexOf('diff --git ')===0 || line.indexOf('index ')===0 || line.indexOf('--- ')===0 || line.indexOf('+++ ')===0)
+          rows.push({t:'@',s:line});
+        else if(sign==='+' || sign==='-' || sign===' ')
+          rows.push({t:sign,s:line.slice(1)});
+        else rows.push({t:'@',s:line});
+      });
+      files.push({title:change.path||'File change', meta:[change.kind||'update'], rows:rows});
+    });
     return files.length ? files : null;
   }
   // Line-level diff (LCS) → [{t:' '|'-'|'+', s:line}], git style. A new file
@@ -7303,10 +8187,53 @@ window.__E2EE__ = ${e2eeJson};
   function hasQuestionAnswerResult(result, isError){
     return !isError && typeof result==='string' && !!result.trim();
   }
+  function toolBlockKey(tc){
+    var ordinal=toolOrdinal++;
+    if(tc&&tc.id) return 'tool:id:'+hashText(String(tc.id)).toString(36);
+    return 'tool:auto:'+ordinal+':'+hashText(String(tc&&tc.name||'tool')+'\\n'+fmt(tc&&tc.input)).toString(36);
+  }
+  function toolBlockSnapshot(block){
+    var meta=block&&block._attendTool||{};
+    var parts=['Tool: '+String(meta.name||block&&block.getAttribute('data-tool-name')||'tool')];
+    if(meta.input!=null && !(typeof meta.input==='object' && Object.keys(meta.input).length===0)) parts.push('Input:\\n'+fmt(meta.input));
+    if(meta.resultReceived) parts.push((meta.isError?'Error':'Result')+':\\n'+String(meta.result||''));
+    return parts.join('\\n\\n').slice(0,20000);
+  }
+  function refreshPinnedToolSnapshot(block){
+    if(!cur||!block) return;
+    var key=block.getAttribute('data-msg-key'), pins=currentPins();
+    var pin=pins.find(function(item){ return item.key===key; });
+    if(!pin) return;
+    pin.text=toolBlockSnapshot(block).slice(0,1200);
+    pin.role=chatBlockRole(block);
+    savePins(cur,sortPinsInChatOrder(pins)); renderPinTray();
+  }
+  function updateToolBlockResult(block,result,isError){
+    if(!block) return;
+    var meta=block._attendTool||{};
+    meta.result=String(result||''); meta.resultReceived=true; meta.isError=!!isError;
+    block._attendTool=meta; block.removeAttribute('data-tool-pending');
+    refreshPinnedToolSnapshot(block); syncMessageCommentState(block);
+  }
+  function decorateToolBlock(block,row,tc){
+    block._attendTool={name:String(tc.name||'tool'),input:tc.input,result:tc.result,resultReceived:tc.result!=null,isError:tc.isError===true};
+    block.setAttribute('data-msg-key',toolBlockKey(tc));
+    block.setAttribute('data-tool-name',String(tc.name||'tool'));
+    if(tc.result==null) block.setAttribute('data-tool-pending','true');
+    var pin=el('button','msg-pin');
+    setIconButton(pin,'pin','Pin this tool block to the top');
+    pin.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); togglePinnedMessage(block); };
+    row.appendChild(pin); syncMessagePinState(block);
+    var comment=el('button','msg-comment');
+    setIconButton(comment,'comment','Comment on this tool block');
+    comment.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); openCommentsForMessage(block); };
+    row.appendChild(comment); syncMessageCommentState(block);
+  }
   // tc = { id?, name, input, result?, isError? }
-  function addTool(tc){
-    if(tc.id && toolEls[tc.id]) return toolEls[tc.id];
-    clearPh();
+  function addTool(tc,opts){
+    opts=opts||{};
+    if(!opts.reference&&tc.id&&toolEls[tc.id]) return toolEls[tc.id];
+    if(!opts.reference) clearPh();
     var d=el('details','toolc');
     if(tc.id) d.setAttribute('data-tool-id', tc.id);
     var autoExpandPatch = tc.name==='apply_patch' && typeof tc.input==='string' && !!tc.input.trim();
@@ -7321,9 +8248,13 @@ window.__E2EE__ = ${e2eeJson};
       var prev=toolPreview(tc.name, tc.input);
       d.appendChild(el('summary',null,'⚙ '+tc.name+(prev?(' — '+prev):'')));
       var diff=editsFromInput(tc.name, tc.input);
+      var codexPatch=parseCodexFileChanges(tc.name, tc.input);
       if(diff){
         d.open=true;
         d.appendChild(renderDiff(diff));
+      } else if(codexPatch){
+        d.open=true;
+        d.appendChild(renderApplyPatch(codexPatch));
       } else if(parsedPatch){
         d.open=true;
         d.appendChild(renderApplyPatch(parsedPatch));
@@ -7336,8 +8267,14 @@ window.__E2EE__ = ${e2eeJson};
     if(tc.result!=null && tc.result!==''){ out.textContent=String(tc.result).slice(0,8000); } else { out.style.display='none'; }
     d.appendChild(out);
     if(isQuestionTool(tc.name, tc.input) && hasQuestionAnswerResult(tc.result, tc.isError)) lockQuestionTool(d);
+    if(opts.reference){
+      d.classList.add('commentanchor-tool');
+      (opts.target||byId('commentAnchorContent')).appendChild(d);
+      return d;
+    }
+    var row=el('div','toolrow'); row.appendChild(d); decorateToolBlock(d,row,tc);
     var target=renderTarget || byId('msgs');
-    target.appendChild(d);
+    target.appendChild(row);
     if(tc.id) toolEls[tc.id]=d;
     if(!renderTarget) applyCollapsedTurns();
     if(!suppressScroll){ keepGenLast(); scroll(); scheduleLatestPin(); }
@@ -7352,8 +8289,11 @@ window.__E2EE__ = ${e2eeJson};
     stashComposerDraft(cur);
     stashAttachmentState(cur);
     stashQueueState(cur);
+    // Opening a session is navigation, not activity. Anchor its current ordering
+    // before source hydration so a click alone cannot move the row.
+    if(s && s.sortTs==null && s.lastTs!=null) s.sortTs=s.lastTs;
     cur=s; editingTagSession=null; headerTagEditing=false;
-    clearGen(); turnActive=false; msgOrdinal=0; setInputEnabled(true); updateSendLabel();
+    clearGen(); turnActive=false; msgOrdinal=0; toolOrdinal=0; setInputEnabled(true); updateSendLabel();
     markSeen(s); renderSidebar();
     document.body.classList.remove('no-session');
     document.body.classList.add('show-chat'); // mobile: slide to the chat page (no-op on desktop)
@@ -7438,7 +8378,7 @@ window.__E2EE__ = ${e2eeJson};
       fetch('/chat/messages?file='+encodeURIComponent(boundFile)+'&vendor='+encodeURIComponent(boundVendor)).then(function(r){return r.json();}).then(function(msgs){
         if(cur!==s) return;
         if((!Array.isArray(msgs) || !msgs.length) && !sourceRetried && s.sessionId){
-          return hydrateSessionSource(s, {force:true}).then(function(found){
+          return hydrateSessionSource(s, {force:true,preserveSort:!isRefresh}).then(function(found){
             if(cur!==s) return;
             var nextFile=found&&found.file||'';
             var nextVendor=found&&found.vendor||s.vendor||'';
@@ -7470,7 +8410,7 @@ window.__E2EE__ = ${e2eeJson};
         finishHistoryLoad();
       });
     };
-    hydrateSessionSource(s, {force:isRefresh}).then(function(){
+    hydrateSessionSource(s, {force:isRefresh,preserveSort:!isRefresh}).then(function(){
       if(cur!==s) return;
       fetchHistory();
       if(cur===s) syncOpenHeader();
@@ -7653,8 +8593,8 @@ window.__E2EE__ = ${e2eeJson};
     if(!sessionId || !ev || !latestLiveSnapshot) return;
     var starts=ev.kind==='user_turn_started' || ev.kind==='queued_turn_started';
     var ends=ev.kind==='result' || ev.kind==='error';
-    var outputs=ev.kind==='assistant_text' && !!ev.text;
-    if(!starts && !ends && !outputs) return;
+    var activity=(ev.kind==='assistant_text' && !!ev.text) || ev.kind==='tool_use' || ev.kind==='tool_result';
+    if(!starts && !ends && !activity) return;
     var active=Array.isArray(latestLiveSnapshot.active) ? latestLiveSnapshot.active.slice() : [];
     var startedAt=Object.assign({}, latestLiveSnapshot.startedAt||{});
     var lastAssistantAt=Object.assign({},latestLiveSnapshot.lastAssistantAt||{});
@@ -7668,8 +8608,11 @@ window.__E2EE__ = ${e2eeJson};
       if(idx>=0) active.splice(idx,1);
       delete startedAt[sessionId];
     }
-    if(outputs) lastAssistantAt[sessionId]=Number(emittedAt)||Date.now();
+    if(activity) lastAssistantAt[sessionId]=Number(emittedAt)||Date.now();
     latestLiveSnapshot=Object.assign({}, latestLiveSnapshot, {active:active,startedAt:startedAt,lastAssistantAt:lastAssistantAt,clientSessionIds:clientSessionIds});
+  }
+  function sessionEventNeedsSidebarRebuild(ev){
+    return !!(ev && (ev.kind==='user_turn_started' || ev.kind==='queued_turn_started' || ev.kind==='result' || ev.kind==='error'));
   }
   function onBusSessionEvent(message){
     var sessionId=String(message&&message.sessionId||'');
@@ -7677,6 +8620,7 @@ window.__E2EE__ = ${e2eeJson};
     var ev=message&&message.event;
     var emittedAt=Number(message&&message.emittedAt)||Date.now();
     if(!sessionId || !ev) return;
+    if(onCommentBusEvent(message)) return;
     // Keep the cached SSE snapshot current with deltas between periodic snapshots.
     // In particular, result/error must remove the session immediately so opening
     // it cannot re-project an older "active" snapshot after the turn has ended.
@@ -7699,7 +8643,7 @@ window.__E2EE__ = ${e2eeJson};
       s.lastGenerationOutcome=null;
       s.analysisPending=false;
       clearTurnScopedSignals(s);
-    } else if(ev.kind==='assistant_text' && ev.text) s.lastAssistantOutputAt=emittedAt;
+    } else if((ev.kind==='assistant_text' && ev.text) || ev.kind==='tool_use' || ev.kind==='tool_result') s.lastAssistantOutputAt=emittedAt;
     else if(ev.kind==='result' || ev.kind==='error') finishGenerationTiming(s,emittedAt,generationOutcome(ev));
     syncLiveTiming(s);
     if(cur===s){ onEvent(ev, String(s.sessionId||''), emittedAt); return; }
@@ -7732,7 +8676,56 @@ window.__E2EE__ = ${e2eeJson};
       refreshAnalysis(s);
     }
     applyGenerating(s);
-    renderSidebar();
+    // Text/tool deltas only affect nodes already registered for this session:
+    // applyGenerating + syncLiveTiming patch those in place. Rebuilding every
+    // row for each streamed chunk is both wasteful and capable of detaching a
+    // row during a click. Lifecycle edges can change ordering or filter
+    // membership, so those still get one structural render.
+    if(sessionEventNeedsSidebarRebuild(ev)){
+      if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started') sortSessions();
+      renderSidebar();
+    }
+  }
+  function onCommentBusEvent(message){
+    var sessionId=String(message&&message.sessionId||'');
+    var clientSessionId=String(message&&message.clientSessionId||'');
+    var ev=message&&message.event;
+    var thread=commentThreadBySession(sessionId,clientSessionId);
+    if(!thread) return false;
+    if(sessionId && !thread.providerSessionId) thread=rememberCommentThread(Object.assign({},thread,{providerSessionId:sessionId}))||thread;
+    var open=commentDrawerState.threadId===thread.id && !(byId('commentDrawer')||{}).hidden;
+    if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started'){
+      thread=rememberCommentThread(Object.assign({},thread,{status:'generating'}))||thread;
+      if(open) setCommentGenerating(true,ev.startedAt);
+    } else if(ev.kind==='assistant_text'){
+      if(open){
+        if(!commentDrawerState.assistant) commentDrawerState.assistant=appendCommentMessage('assistant','');
+        var bubble=commentDrawerState.assistant.querySelector('.bubble');
+        setBubbleText(bubble,(bubble&&bubble.getAttribute('data-raw')||'')+String(ev.text||''),true);
+        keepCommentGeneratingLast();
+        var host=byId('commentMsgs');
+        if(host&&commentStick) host.scrollTop=host.scrollHeight;
+        syncScrollBottomButton(host,byId('commentScrollBottom'));
+        cacheOpenCommentMessages();
+      }
+    } else if(ev.kind==='result' || ev.kind==='error'){
+      var status=ev.kind==='error'||ev.ok===false ? 'failed' : (message.hasQueuedTurns?'generating':(open?'read':'unread'));
+      thread=rememberCommentThread(Object.assign({},thread,{status:status}))||thread;
+      if(open){
+        if(ev.kind==='error') appendCommentMessage('error',ev.message||'comment failed');
+        setCommentBusy(false); setCommentGenerating(status==='generating');
+        if(status==='read') markCommentRead(thread);
+      }
+      commentDrawerState.assistant=null;
+    }
+    return true;
+  }
+  function drainCommentOrphanEvents(thread){
+    if(!thread) return;
+    [thread.providerSessionId,thread.id].filter(Boolean).forEach(function(id){
+      var pending=orphanBusEvents[id]; if(!pending) return;
+      delete orphanBusEvents[id]; pending.forEach(onBusSessionEvent);
+    });
   }
   function drainOrphanBusEvents(s){
     if(!s) return;
@@ -7788,7 +8781,7 @@ window.__E2EE__ = ${e2eeJson};
     }
     else if(ev.kind==='tool_result'){ assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
       cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
-      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t); }
+      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; updateToolBlockResult(t,ev.text,ev.isError); if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t); }
       else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
       keepGenLast(); scroll(); scheduleLatestPin(); }
     else if(ev.kind==='result'){ assistantEl=null; turnEnded(generationOutcome(ev)); }
@@ -7931,7 +8924,7 @@ window.__E2EE__ = ${e2eeJson};
         effort:config.effort||'',
         prefixHistory:cloneTranscriptMsgs(prefixHistory)
       },
-      title:forkTitleFromSession(cur),
+      title:forkTitleFromSession(cur, firstTurn.text),
       lastPrompt:null,
       cwd:cur.cwd,
       project:cur.project,
@@ -7958,8 +8951,9 @@ window.__E2EE__ = ${e2eeJson};
     // Forking a still-generating session is fine: the fork snapshots the parent's
     // transcript as it stands now (history up to the latest generated token) and
     // diverges from there — the parent keeps running untouched.
-    // Open the branch immediately, empty and ready. The real fork is materialized
-    // lazily on the first message: both backends need a turn to diverge on (Claude
+    // Add the branch immediately, but keep the chat focused on the parent. The
+    // real fork is materialized lazily on the first message: every backend needs
+    // a turn to diverge on (Claude
     // mints the new id on first input; Codex copies the parent's rollout then
     // resumes it), so we defer the actual /chat/fork until send().
     // A just-created fork is in-progress, not parked → seed it 'seen' (hollow green
@@ -7968,9 +8962,10 @@ window.__E2EE__ = ${e2eeJson};
     // "I typed this, but it's better off as a split" — and we materialize now.
     var inp=byId('input'); var firstTurn=currentComposerTurn();
     var clientBranchId=makeClientBranchId();
-    var ns={vendor:config.vendor,model:config.model||'',effort:config.effort||'',sessionId:clientBranchId,clientBranchId:clientBranchId,providerSessionId:null,forkParentId:providerSessionId(cur),pendingFork:{parent:providerSessionId(cur),parentVendor:cur.vendor,cwd:cur.cwd||'',consumeParentDraft:!!(firstTurn.text || firstTurn.attachments.length),opener:!!(firstTurn.text || firstTurn.attachments.length),model:config.model||'',effort:config.effort||''},title:forkTitleFromSession(cur),lastPrompt:null,cwd:cur.cwd,project:cur.project,file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:(cur.tags||[]).slice()};
-    SESS.unshift(ns); select(ns);
-    if(firstTurn.text || firstTurn.attachments.length){ materializeFork(ns, firstTurn); } else { inp.focus(); }
+    var ns={vendor:config.vendor,model:config.model||'',effort:config.effort||'',sessionId:clientBranchId,clientBranchId:clientBranchId,providerSessionId:null,forkParentId:providerSessionId(cur),pendingFork:{parent:providerSessionId(cur),parentVendor:cur.vendor,cwd:cur.cwd||'',consumeParentDraft:!!(firstTurn.text || firstTurn.attachments.length),opener:!!(firstTurn.text || firstTurn.attachments.length),model:config.model||'',effort:config.effort||''},title:forkTitleFromSession(cur, firstTurn.text),lastPrompt:null,cwd:cur.cwd,project:cur.project,file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:(cur.tags||[]).slice()};
+    SESS.unshift(ns); renderSidebar();
+    if(firstTurn.text || firstTurn.attachments.length){ materializeFork(ns, firstTurn, {background:true}); }
+    else { inp.focus(); }
   }
   function fork(){
     if(!cur||!cur.sessionId){ alert('Pick a session on the left before splitting.'); return; }
@@ -7981,7 +8976,8 @@ window.__E2EE__ = ${e2eeJson};
   // renders the parent transcript as its base, except when the opener repeats the
   // parent's latest user turn: then it drops that stale turn + answer so the new
   // opener appears before the branch's fresh response.
-  function materializeFork(branch,turn){
+  function materializeFork(branch,turn,opts){
+    var background=!!(opts&&opts.background&&cur!==branch);
     // Opener forks skip select()'s async placeholder synchronously (pendingFork
     // .opener), so this flag only matters for the empty-fork path: if the user
     // typed + sent before select()'s in-flight placeholder render resolved,
@@ -7990,30 +8986,53 @@ window.__E2EE__ = ${e2eeJson};
     if(branch.pendingFork) branch.pendingFork.materializing = true;
     var shown=shownTurnText(turn);
     var parent=findSessionById(branch.pendingFork.parent);
+    if(String(turn&&turn.text||'').trim()) branch.title=forkTitleFromSession(parent, turn.text);
     var hasPrefix=!!(branch.pendingFork && Object.prototype.hasOwnProperty.call(branch.pendingFork, 'prefixHistory'));
     var parentHistory=hasPrefix
       ? cloneTranscriptMsgs(branch.pendingFork.prefixHistory || [])
       : forkBaseHistory((parent && cachedTranscriptFor(parent)) || [], shown);
     var inp=byId('input');
-    if(parentHistory.length) renderPersistedAndPending(parentHistory, null);
-    else byId('msgs').innerHTML='';
-    noteUserTurn(branch, shown); addMsg('user', shown, true, turn.attachments);
+    if(!background){
+      if(parentHistory.length) renderPersistedAndPending(parentHistory, null);
+      else byId('msgs').innerHTML='';
+    }
+    noteUserTurn(branch, shown);
+    if(!background) addMsg('user', shown, true, turn.attachments);
     // The branch cache is keyed by its stable client identity from the start.
     // Provider events can now append safely even before /chat/fork returns.
     cacheTranscript(branch, parentHistory);
     rememberPendingUserMsg(branch.sessionId, shown, turn.attachments);
     cacheTranscriptUserMsg(branch, shown, turn.attachments);
-    if(inp){ inp.value=''; syncComposerHeight(); } setDraftForSession(branch, ''); draftAttachments=[]; stashAttachmentState(branch); renderAttachments(); assistantEl=null;
-    beginTurn();
+    if(inp){ inp.value=''; syncComposerHeight(); }
+    setDraftForSession(background ? parent : branch, '');
+    if(background && parent && cur===parent) syncOpenHeader();
+    draftAttachments=[];
+    if(background && parent) stashAttachmentState(parent); else stashAttachmentState(branch);
+    renderAttachments();
+    if(background){
+      branch.generating=true;
+      branch.generatingStartedAt=Date.now();
+      branch.lastAssistantOutputAt=null;
+      reviveAttention(branch);
+      applyGenerating(branch);
+      renderSidebar();
+    } else {
+      assistantEl=null;
+      beginTurn();
+    }
     var vendor=branch.vendor||'claude';
     var model=(branch.pendingFork&&branch.pendingFork.model)||branch.model||'';
     var effort=(branch.pendingFork&&branch.pendingFork.effort)||branch.effort||'';
     rememberModelEffort(vendor, model, effort);
-    var body={text:shown, attachments:turn.attachments || [], model:model||undefined, effort:effort||undefined, clientSessionId:branch.clientBranchId};
+    var body={text:shown, attachments:turn.attachments || [], model:model||undefined, effort:effort||undefined, clientSessionId:branch.clientBranchId, parentVendor:(branch.pendingFork&&branch.pendingFork.parentVendor)||undefined};
     if(hasPrefix) body.contextMessages=parentHistory;
     fetch('/chat/fork?session='+encodeURIComponent(branch.pendingFork.parent)+'&cwd='+encodeURIComponent(branch.pendingFork.cwd)+'&vendor='+encodeURIComponent(vendor),
       {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})
-       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ addMsg('error','⚠ '+(res.error||'fork failed')); endTurn('failed'); return; }
+       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){
+        if(background){ branch.generating=false; branch.generatingStartedAt=null; applyGenerating(branch); renderSidebar(); showToast(res.error||'fork failed','warn'); }
+        else { addMsg('error','⚠ '+(res.error||'fork failed')); endTurn('failed'); }
+        return;
+       }
         if(branch.pendingFork.consumeParentDraft) clearDraftForSession(parent);
         branch.providerSessionId=res.session;
         branch.forkParentId=res.parentSessionId||branch.forkParentId||branch.pendingFork.parent;
@@ -8029,12 +9048,17 @@ window.__E2EE__ = ${e2eeJson};
         // The active snapshot may have arrived while this object still had its
         // pending id. Re-project the already-received SSE state after the id bind;
         // this is local event-store reduction, not an extra live-status request.
-        if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);
+        var snapshotActive=latestLiveSnapshot&&Array.isArray(latestLiveSnapshot.active) ? latestLiveSnapshot.active : [];
+        if(latestLiveSnapshot && (!background || snapshotActive.indexOf(res.session)>=0)) applyLiveSnapshot(latestLiveSnapshot);
         if(cur===branch){ syncOpenHeader(); renderSidebar(); refreshForkButton(); }
+        else renderSidebar();
         // Best-effort: resolve the fork's own JSONL so a full page reload (which
         // drops the in-memory cache) can reload its complete history from disk.
         warmTranscriptCache(branch); })
-       .catch(function(e){ addMsg('error','⚠ fork failed: '+(e&&e.message?e.message:e)); endTurn('failed'); });
+       .catch(function(e){
+        if(background){ branch.generating=false; branch.generatingStartedAt=null; applyGenerating(branch); renderSidebar(); showToast('fork failed: '+(e&&e.message?e.message:e),'warn'); }
+        else { addMsg('error','⚠ fork failed: '+(e&&e.message?e.message:e)); endTurn('failed'); }
+       });
   }
   function vendorInfo(id){
     var want=String(id||'').trim().toLowerCase();
@@ -8070,17 +9094,25 @@ window.__E2EE__ = ${e2eeJson};
       return;
     }
     setNewPending(true,'Starting session…');
-    // In-browser chat. Claude can open empty (first message optional); Codex only
-    // mints a thread id once a turn runs, so default its opening message to a greeting.
-    if(vendor==='codex' && !text && !attachments.length){ text='hello'; }
+    // In-browser chat. Claude can open empty; process-per-turn CLIs mint an id
+    // only after the first turn, so give those an opening message when omitted.
+    if(vendor!=='claude' && !text && !attachments.length){ text='hello'; }
     fetch('/chat/new?cwd='+encodeURIComponent(dir)+'&vendor='+encodeURIComponent(vendor),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text, attachments:attachments, model:model||undefined, effort:effort||undefined})})
       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ setNewPending(false, res.error||'failed'); return; }
         rememberNewSessionPrefs(vendor, model, effort);
         var cwd=res.cwd||dir;
         var shown=composeTurnText(text, attachments);
         var ns={vendor:vendor,model:model||'',effort:effort||'',sessionId:res.session,title:shown||'(new session)',lastPrompt:null,cwd:cwd,project:basename(cwd),file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,tags:[],generating:!!shown};
-        if(shown){ rememberPendingUserMsg(res.session, shown, attachments); noteUserTurn(ns, shown); }
-        cacheTranscript(ns, shown ? [{role:'user',text:String(shown||''),attachments:cloneAttachments(attachments),tools:[]}] : []);
+        // Anchor the optimistic first turn before registering it as pending.
+        // Without this empty baseline, afterMsgs falls back to the later cache
+        // length after orphaned app-server assistant events are drained, so the
+        // same user turn is appended again below the assistant response.
+        cacheTranscript(ns, []);
+        if(shown){
+          rememberPendingUserMsg(res.session, shown, attachments);
+          noteUserTurn(ns, shown);
+          cacheTranscriptUserMsg(ns, shown, attachments);
+        }
         SESS.unshift(ns); drainOrphanBusEvents(ns); select(ns); markReplied(ns);
         if(shown && ns.generating && !turnActive) beginTurn();
         byId('np').value=''; newAttachments=[]; renderAttachments('new'); byId('nmsg').textContent=''; byId('ndir').value=cwd; applyDirChooserTheme(cwd); closeNewBox();
@@ -8089,6 +9121,21 @@ window.__E2EE__ = ${e2eeJson};
   }
 
   function initApp(){
+  var chatScrollBottom=byId('chatScrollBottom'); if(chatScrollBottom){ setIconButton(chatScrollBottom,'down','Scroll to bottom'); chatScrollBottom.onclick=scrollChatToBottom; }
+  var commentScrollBottom=byId('commentScrollBottom'); if(commentScrollBottom){ setIconButton(commentScrollBottom,'down','Scroll comments to bottom'); commentScrollBottom.onclick=scrollCommentsToBottom; }
+  var commentMsgs=byId('commentMsgs'); if(commentMsgs) commentMsgs.addEventListener('scroll',function(){ commentStick=nearScrollBottom(commentMsgs); syncScrollBottomButton(commentMsgs,commentScrollBottom); scheduleCommentLatestPin(); });
+  var commentLatestPin=byId('commentLatestPin'); if(commentLatestPin){ commentLatestPin.onclick=jumpToCommentLatestPin; commentLatestPin.onkeydown=function(ev){ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); jumpToCommentLatestPin(); } }; }
+  var commentAnchorHead=byId('commentAnchorHead'); if(commentAnchorHead){ commentAnchorHead.onclick=toggleCommentAnchor; commentAnchorHead.onkeydown=function(ev){ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); toggleCommentAnchor(); } }; }
+  var commentClose=byId('commentClose'); if(commentClose) commentClose.onclick=closeCommentDrawer;
+  var commentPromote=byId('commentPromote'); if(commentPromote) commentPromote.onclick=promoteCommentThread;
+  var commentDrawer=byId('commentDrawer'); if(commentDrawer) commentDrawer.onclick=function(ev){ if(ev.target===commentDrawer) closeCommentDrawer(); };
+  var commentSend=byId('commentSend'); if(commentSend) commentSend.onclick=commentPrimaryAction;
+  var commentInput=byId('commentInput'); if(commentInput){
+    commentInput.onkeydown=function(ev){
+      if(ev.key==='Enter'&&!ev.shiftKey&&!isImeConfirming(ev)){ ev.preventDefault(); sendComment(); }
+      else if(ev.key==='Escape'&&commentDrawerState.generating){ ev.preventDefault(); stopCommentTurn(); }
+    };
+  }
   // Stream active-session snapshots so background tabs show generating state
   // without spending one request every few seconds. /chat/live remains a low-
   // frequency fallback when EventSource is unavailable or disconnected.
@@ -8108,6 +9155,13 @@ window.__E2EE__ = ${e2eeJson};
     refreshCodexModels();
     codexModelRefreshCount++;
     if(codexModelRefreshCount>=12) window.clearInterval(codexModelRefreshTimer);
+  }, 5000);
+  refreshCursorModels();
+  var cursorModelRefreshCount=0;
+  var cursorModelRefreshTimer=window.setInterval(function(){
+    refreshCursorModels();
+    cursorModelRefreshCount++;
+    if(cursorModelRefreshCount>=12) window.clearInterval(cursorModelRefreshTimer);
   }, 5000);
 
   // Drag the divider to resize the sidebar; width persists across reloads.
@@ -8129,6 +9183,7 @@ window.__E2EE__ = ${e2eeJson};
   resetOpenHeader();
   setupCustomSelects();
   setupVendorChooser();
+  syncModelWarnings();
   setupDirChooser();
   bindComposerDrop();
   bindNewAttachments();
@@ -8136,7 +9191,9 @@ window.__E2EE__ = ${e2eeJson};
   renderAttachments();
   renderAttachments('new');
   scheduleOverlayOffsets();
+  scheduleCommentOverlayOffsets();
   window.addEventListener('resize', scheduleOverlayOffsets);
+  window.addEventListener('resize', scheduleCommentOverlayOffsets);
   window.addEventListener('resize',function(){ if(!byId('forkTree').hidden) fitForkTree(); });
   if(window.ResizeObserver){
     var overlayObserver=new ResizeObserver(scheduleOverlayOffsets);
@@ -8144,6 +9201,8 @@ window.__E2EE__ = ${e2eeJson};
       var node=byId(id);
       if(node) overlayObserver.observe(node);
     });
+    var commentFoot=document.querySelector('.commentfoot');
+    if(commentFoot) new ResizeObserver(scheduleCommentOverlayOffsets).observe(commentFoot);
   }
   syncRefreshButton();
   refreshRunConfigButton();
@@ -8206,12 +9265,20 @@ window.__E2EE__ = ${e2eeJson};
   byId('bulkArchiveSeen').onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); archiveSeenInView(); };
   // Live-filter the sidebar as you type; Esc clears the search.
   function syncSearchFilterState(input){
-    var on=!!filterQ;
+    var on=!!String(input&&input.value||'').trim();
     input.classList.toggle('filtering', on);
     if(input.parentElement) input.parentElement.classList.toggle('filtering', on);
+    var clear=byId(input.id==='tagSearch' ? 'tagSearchClear' : 'searchClear');
+    if(clear) clear.hidden=!on;
   }
-  byId('search').addEventListener('input',function(){ filterQ=this.value.trim().toLowerCase(); syncSearchFilterState(this); sortSessions(); renderSidebar(); scheduleContentSearch(); });
-  byId('search').addEventListener('keydown',function(e){ if(e.key==='Escape'){ this.value=''; filterQ=''; syncSearchFilterState(this); sortSessions(); renderSidebar(); scheduleContentSearch(); } });
+  function applySessionSearch(input){ filterQ=input.value.trim().toLowerCase(); syncSearchFilterState(input); sortSessions(); renderSidebar(); scheduleContentSearch(); }
+  function applyTagSearch(input){ tagSearchQ=input.value.trim().toLowerCase(); syncSearchFilterState(input); renderTagFilters(); reconcileCurrentSessionToFilter(); }
+  byId('search').addEventListener('input',function(){ applySessionSearch(this); });
+  byId('search').addEventListener('keydown',function(e){ if(e.key==='Escape'){ this.value=''; applySessionSearch(this); } });
+  byId('searchClear').onclick=function(){ var input=byId('search'); input.value=''; applySessionSearch(input); input.focus(); };
+  byId('tagSearch').addEventListener('input',function(){ applyTagSearch(this); });
+  byId('tagSearch').addEventListener('keydown',function(e){ if(e.key==='Escape'){ this.value=''; applyTagSearch(this); } });
+  byId('tagSearchClear').onclick=function(){ var input=byId('tagSearch'); input.value=''; applyTagSearch(input); input.focus(); };
   byId('imgPreview').onclick=function(ev){ if(ev.target===this) closeImagePreview(); };
   byId('imgPreviewViewport').onclick=function(ev){ if(ev.target===this) closeImagePreview(); };
   byId('imgPreviewViewport').addEventListener('wheel', function(ev){
@@ -8263,12 +9330,6 @@ window.__E2EE__ = ${e2eeJson};
     renderTagFilters();
   });
   document.addEventListener('click',function(ev){
-    var box=byId('newbox'), btn=byId('newToggle');
-    if(!newBoxOpen() || newSessionPending || !box || !btn) return;
-    if(box.contains(ev.target) || btn.contains(ev.target)) return;
-    closeNewBox();
-  });
-  document.addEventListener('click',function(ev){
     var pop=byId('runPop'), btn=byId('runCfgBtn');
     if(!runPopOpen() || !pop || !btn) return;
     if(pop.contains(ev.target) || btn.contains(ev.target)) return;
@@ -8280,8 +9341,23 @@ window.__E2EE__ = ${e2eeJson};
   byId('input').addEventListener('input',function(){
     syncComposerHeight();
     if(!cur) return;
+    var hadDraft=!!draftTextForSession(cur);
     setDraftForSession(cur, this.value);
-    if(String(this.value||'').trim()) touchSession(cur);
+    var hasDraft=!!String(this.value||'').trim();
+    // Draft text is intentionally hidden from the sidebar while this composer
+    // owns focus, so subsequent keystrokes do not change any rendered row.
+    // Reorder once when a draft begins; render once when it becomes empty.
+    if(hasDraft && !hadDraft) touchSession(cur);
+    else if(!hasDraft && hadDraft) renderSidebar();
+    syncOpenHeader();
+  });
+  byId('input').addEventListener('focus',function(){
+    renderSidebar();
+    syncOpenHeader();
+  });
+  byId('input').addEventListener('blur',function(){
+    renderSidebar();
+    syncOpenHeader();
   });
   document.addEventListener('visibilitychange', function(){
     if(document.hidden) flushVisit(true);

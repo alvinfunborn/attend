@@ -1,163 +1,126 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import type { ModelOption } from "../model-options.js";
+import {
+  type ModelInfo,
+  type Query,
+  type SDKUserMessage,
+  query,
+  resolveSettings,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { ModelDefaults, ModelOption } from "../model-options.js";
 
-type Source = "cache" | "settings";
-
-interface Candidate {
-  value: string;
-  priority: number;
-  index: number;
-  source: Source;
+export interface ClaudeModelCatalogInspection {
+  models: ModelOption[];
+  defaults: ModelDefaults;
+  warning: string | null;
 }
 
-const FAMILY_ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
+export type ClaudeModelQueryFactory = (cwd: string) => Query;
+export type ClaudeSettingsResolver = (cwd: string) => Promise<{
+  effective: { model?: unknown; effortLevel?: unknown };
+}>;
+
+async function* emptyPrompt(): AsyncGenerator<SDKUserMessage> {}
+
+function createModelQuery(cwd: string, executable?: string | null): Query {
+  return query({
+    prompt: emptyPrompt(),
+    options: {
+      cwd,
+      permissionMode: "plan",
+      persistSession: false,
+      ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
+    },
+  });
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function resolvedDefaultModel(models: ModelInfo[], configured: string): string {
+  const selected = configured
+    ? models.find((model) => text(model.value) === configured)
+    : models.find((model) => text(model.value) === "default");
+  return (
+    text((selected as (ModelInfo & { resolvedModel?: unknown }) | undefined)?.resolvedModel) ||
+    configured
+  );
+}
+
+function modelOptions(models: ModelInfo[]): ModelOption[] {
+  const seen = new Set<string>();
+  const out: ModelOption[] = [];
+  for (const model of models) {
+    const value = typeof model.value === "string" ? model.value.trim() : "";
+    // Claude advertises a synthetic `default` entry. Attend represents the same
+    // no-override choice with an empty value and labels it with resolvedModel.
+    if (!value || value === "default" || seen.has(value)) continue;
+    seen.add(value);
+    const label =
+      typeof model.displayName === "string" && model.displayName.trim()
+        ? model.displayName.trim()
+        : value;
+    const efforts = Array.isArray(model.supportedEffortLevels)
+      ? model.supportedEffortLevels.filter(
+          (effort, index, all) =>
+            typeof effort === "string" && effort.trim() && all.indexOf(effort) === index,
+        )
+      : [];
+    out.push({ value, label, ...(efforts.length ? { efforts } : {}) });
+  }
+  return out;
+}
 
 /**
- * Claude Code's optional gateway discovery writes this cache when enabled by the
- * CLI. Attend only reads it; it does not trigger network discovery itself.
+ * Ask Claude's own Agent SDK for the effective model catalog. The query is only
+ * initialized; no user message is sent and the subprocess is closed immediately
+ * after `supportedModels()` resolves.
  */
-export function defaultClaudeModelsCachePath(): string {
-  return path.join(os.homedir(), ".claude", "cache", "gateway-models.json");
-}
-
-export function defaultClaudeSettingsPaths(): string[] {
-  const root = path.join(os.homedir(), ".claude");
-  return [path.join(root, "settings.json"), path.join(root, "settings.local.json")];
-}
-
-export function readClaudeModelOptions(
-  cachePath = defaultClaudeModelsCachePath(),
-  settingsPaths = defaultClaudeSettingsPaths(),
-): ModelOption[] {
-  const candidates = [
-    ...readGatewayCache(cachePath),
-    ...settingsPaths.flatMap((settingsPath) => readAvailableModels(settingsPath)),
-  ];
-  return dedupeClaudeModels(candidates).map(({ value }) => ({ value, label: value }));
-}
-
-function readJson(file: string): unknown {
+export async function inspectClaudeModels(
+  cwd: string,
+  createQuery?: ClaudeModelQueryFactory,
+  timeoutMs = 30_000,
+  executable?: string | null,
+  settingsResolver: ClaudeSettingsResolver = (settingsCwd) => resolveSettings({ cwd: settingsCwd }),
+): Promise<ClaudeModelCatalogInspection> {
+  const modelQuery = createQuery ? createQuery(cwd) : createModelQuery(cwd, executable);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return JSON.parse(fs.readFileSync(file, "utf-8"));
+    const [models, settings] = await Promise.all([
+      Promise.race([
+        modelQuery.supportedModels(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Claude model discovery timed out")),
+            timeoutMs,
+          );
+          timer.unref();
+        }),
+      ]),
+      settingsResolver(cwd).catch(() => null),
+    ]);
+    const options = modelOptions(models);
+    const configuredModel = text(settings?.effective.model);
+    const configuredEffort = text(
+      (settings?.effective as { effortLevel?: unknown } | undefined)?.effortLevel,
+    );
+    return {
+      models: options,
+      defaults: {
+        model: resolvedDefaultModel(models, configuredModel),
+        effort: configuredEffort,
+      },
+      warning: options.length
+        ? null
+        : "Claude returned no available models; Attend will use Claude's default model.",
+    };
   } catch {
-    return null;
+    return {
+      models: [],
+      defaults: { model: "", effort: "" },
+      warning: "Claude model discovery failed; Attend will use Claude's default model.",
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    modelQuery.close();
   }
-}
-
-function readGatewayCache(file: string): Candidate[] {
-  const parsed = readJson(file);
-  const items = modelItems(parsed);
-  return items
-    .map((raw, index) => toCacheCandidate(raw, index))
-    .filter((item): item is Candidate => item !== null);
-}
-
-function readAvailableModels(file: string): Candidate[] {
-  const parsed = readJson(file);
-  const values: string[] = [];
-  collectAvailableModels(parsed, values);
-  return values
-    .map((raw, index) => toModelValue(raw))
-    .filter((value): value is string => value !== null)
-    .map((value, index) => ({
-      value,
-      priority: 0,
-      index,
-      source: "settings" as const,
-    }));
-}
-
-function modelItems(parsed: unknown): unknown[] {
-  if (Array.isArray(parsed)) return parsed;
-  if (!parsed || typeof parsed !== "object") return [];
-  const obj = parsed as Record<string, unknown>;
-  for (const key of ["models", "data", "items"]) {
-    const value = obj[key];
-    if (Array.isArray(value)) return value;
-    if (value && typeof value === "object") return Object.values(value as Record<string, unknown>);
-  }
-  return [];
-}
-
-function toCacheCandidate(raw: unknown, index: number): Candidate | null {
-  if (typeof raw === "string") {
-    const value = toModelValue(raw);
-    return value ? { value, priority: index, index, source: "cache" } : null;
-  }
-  if (!raw || typeof raw !== "object") return null;
-  const obj = raw as Record<string, unknown>;
-  if (obj.disabled === true || obj.available === false) return null;
-  if (
-    typeof obj.visibility === "string" &&
-    ["hide", "hidden", "disabled"].includes(obj.visibility)
-  ) {
-    return null;
-  }
-  const rawValue = firstString(obj, ["id", "slug", "model", "name", "apiName", "api_name"]);
-  const value = rawValue ? toModelValue(rawValue) : null;
-  if (!value) return null;
-  const priority =
-    typeof obj.priority === "number" && Number.isFinite(obj.priority) ? obj.priority : index;
-  return { value, priority, index, source: "cache" };
-}
-
-function firstString(obj: Record<string, unknown>, keys: string[]): string | null {
-  for (const key of keys) {
-    const value = obj[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return null;
-}
-
-function collectAvailableModels(raw: unknown, out: string[]): void {
-  if (!raw || typeof raw !== "object") return;
-  if (Array.isArray(raw)) {
-    for (const item of raw) collectAvailableModels(item, out);
-    return;
-  }
-  const obj = raw as Record<string, unknown>;
-  if (Array.isArray(obj.availableModels)) {
-    for (const item of obj.availableModels) {
-      if (typeof item === "string") out.push(item);
-    }
-  }
-  for (const value of Object.values(obj)) collectAvailableModels(value, out);
-}
-
-function toModelValue(raw: string): string | null {
-  const value = raw.trim();
-  if (!value) return null;
-  const lower = value.toLowerCase();
-  if (FAMILY_ALIASES.has(lower)) return lower;
-  if (
-    /^claude-[a-z0-9]+(?:-[a-z0-9]+)*(?:[-@]\d{8})?(?:-v\d+(?::\d+)?)?(?:\[[12]m\])?$/.test(lower)
-  ) {
-    return lower;
-  }
-  return null;
-}
-
-function familyAlias(value: string): string | null {
-  if (FAMILY_ALIASES.has(value)) return value;
-  return value.match(/^claude-(fable|opus|sonnet|haiku)-/)?.[1] ?? null;
-}
-
-function dedupeClaudeModels(candidates: Candidate[]): Candidate[] {
-  const aliasValues = new Set(
-    candidates.map((item) => item.value).filter((value) => FAMILY_ALIASES.has(value)),
-  );
-  const seen = new Set<string>();
-  return candidates
-    .filter((item) => {
-      const alias = familyAlias(item.value);
-      return !(alias && item.value !== alias && aliasValues.has(alias));
-    })
-    .sort((a, b) => a.priority - b.priority || a.index - b.index || a.value.localeCompare(b.value))
-    .filter((item) => {
-      if (seen.has(item.value)) return false;
-      seen.add(item.value);
-      return true;
-    });
 }

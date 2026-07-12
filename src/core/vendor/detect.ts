@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 
-export type VendorId = "claude" | "codex";
+export type VendorId = "claude" | "codex" | "cursor";
 
 /**
  * macOS desktop apps bundle the `codex` CLI but don't symlink it onto PATH.
@@ -24,14 +24,37 @@ export interface VendorAvailability {
 /** Probe whether a command resolves on PATH. Injectable so tests never spawn. */
 export type CliProbe = (command: string) => boolean;
 
-/** Default probe: `where` on Windows, `which` elsewhere. Resolves shims (claude.cmd). */
-export function onPath(command: string): boolean {
+/** Resolve a PATH command to the concrete executable used by the current shell. */
+export function resolveOnPath(command: string): string | null {
   const probe = process.platform === "win32" ? "where" : "which";
   try {
-    return spawnSync(probe, [command], { stdio: "ignore", windowsHide: true }).status === 0;
+    const result = spawnSync(probe, [command], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.status !== 0) return null;
+    return (
+      String(result.stdout || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) ?? null
+    );
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function resolveClaudeBin(resolve: (command: string) => string | null = resolveOnPath) {
+  return resolve("claude");
+}
+
+export function resolveCursorBin(resolve: (command: string) => string | null = resolveOnPath) {
+  return resolve("cursor-agent") ?? resolve("agent");
+}
+
+/** Default probe: `where` on Windows, `which` elsewhere. Resolves shims (claude.cmd). */
+export function onPath(command: string): boolean {
+  return resolveOnPath(command) !== null;
 }
 
 /**
@@ -63,6 +86,9 @@ const VENDORS: readonly {
   // Codex is driven in-browser via `codex exec --json` (no SDK needed); resolves
   // from PATH or the desktop-app bundle.
   { vendor: "codex", chat: true, resolve: (p, e) => resolveCodexBin(p, e) !== null },
+  // Cursor's headless CLI exposes the same process-per-turn primitives Attend
+  // needs: stream-json output and --resume=<session id>.
+  { vendor: "cursor", chat: true, resolve: (p) => p("cursor-agent") || p("agent") },
 ];
 
 export function isVendorId(value: unknown): value is VendorId {

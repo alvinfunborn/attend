@@ -1,14 +1,14 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 
-export type LaunchVendor = "claude" | "codex";
+export type LaunchVendor = "claude" | "codex" | "cursor";
 export type LaunchAction = "resume" | "fork" | "new";
 
 export interface LaunchOpts {
   sessionId?: string;
   prompt?: string;
   model?: string;
-  effort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  effort?: string;
 }
 
 function shellQuote(s: string): string {
@@ -29,10 +29,16 @@ export function buildCommand(
 ): string {
   const id = opts.sessionId ?? "";
   if (action === "resume") {
-    return vendor === "claude" ? `claude --resume ${id}` : `codex resume ${id}`;
+    if (vendor === "claude") return `claude --resume ${id}`;
+    if (vendor === "codex") return `codex resume ${id}`;
+    return `cursor-agent --resume=${id}`;
   }
   if (action === "fork") {
-    return vendor === "claude" ? `claude --resume ${id} --fork-session` : `codex fork ${id}`;
+    if (vendor === "claude") return `claude --resume ${id} --fork-session`;
+    if (vendor === "codex") return `codex fork ${id}`;
+    throw new Error(
+      "Cursor supports interactive /fork, but its headless CLI does not expose a fork command",
+    );
   }
   // new
   if (vendor === "claude") {
@@ -40,6 +46,11 @@ export function buildCommand(
     const effortArg = opts.effort?.trim() ? ` --effort ${shellQuote(opts.effort.trim())}` : "";
     const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
     return `claude${modelArg}${effortArg}${promptArg}`;
+  }
+  if (vendor === "cursor") {
+    const modelArg = opts.model?.trim() ? ` --model ${shellQuote(opts.model.trim())}` : "";
+    const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
+    return `cursor-agent${modelArg}${promptArg}`;
   }
   const modelArg = opts.model?.trim() ? ` -c ${shellQuote(`model="${opts.model.trim()}"`)}` : "";
   const effort = opts.effort?.trim();

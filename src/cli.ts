@@ -24,7 +24,8 @@ Options:
   -h, --help           Show this help
 
 Config precedence: CLI args > env (ATTEND_VAULTS / ATTEND_PORT / ATTEND_CLAUDE_PROJECTS
-/ ATTEND_CODEX_SESSIONS / ATTEND_HOST / ATTEND_E2EE_PASSPHRASE) > attend.config.json > platform defaults.`;
+/ ATTEND_CODEX_SESSIONS / ATTEND_CURSOR_SESSIONS / ATTEND_HOST / ATTEND_E2EE_PASSPHRASE)
+> attend.config.json > platform defaults.`;
 
 function installShutdownHandlers(server: RunningServer): void {
   let closing = false;
