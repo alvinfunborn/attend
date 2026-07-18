@@ -3917,22 +3917,30 @@ describe("console browser behavior", () => {
     const dropTagOn = async (sourceName: string, targetName: string, edge: "start" | "end") => {
       const source = tag(sourceName);
       const target = tag(targetName);
-      const targetBox = await target.boundingBox();
-      if (!targetBox) throw new Error(`missing ${targetName} tag bounds`);
       const transfer = await page.evaluateHandle(() => {
         const BrowserDataTransfer = (
           globalThis as unknown as { DataTransfer: new () => Record<string, never> }
         ).DataTransfer;
         return new BrowserDataTransfer();
       });
+      await source.dispatchEvent("dragstart", { dataTransfer: transfer });
+      await page.evaluate(() => {
+        const browserWindow = globalThis as unknown as {
+          requestAnimationFrame(callback: () => void): number;
+        };
+        return new Promise<void>((resolve) => {
+          browserWindow.requestAnimationFrame(() => resolve());
+        });
+      });
+      const targetBox = await target.boundingBox();
+      if (!targetBox) throw new Error(`missing ${targetName} tag bounds`);
       const point = {
         clientX: targetBox.x + (edge === "start" ? 1 : targetBox.width - 2),
         clientY: targetBox.y + targetBox.height / 2,
         dataTransfer: transfer,
       };
-      await source.dispatchEvent("dragstart", { dataTransfer: transfer });
-      await target.dispatchEvent("dragover", point);
-      await target.dispatchEvent("drop", point);
+      await page.locator("#tagFilters").dispatchEvent("dragover", point);
+      await page.locator("#tagFilters").dispatchEvent("drop", point);
       await transfer.dispose();
     };
     expect(await userOrder()).toEqual(["old", "new", "middle"]);
