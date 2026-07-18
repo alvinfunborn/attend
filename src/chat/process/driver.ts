@@ -3,12 +3,14 @@ import type { CodexEvent } from "../codex/events.js";
 import { toUiEventsFromCodex } from "../codex/events.js";
 import type { ActiveSessionState, ChatDriver, StartOpts, ToolAnswer, UserTurn } from "../driver.js";
 import type { UiEvent } from "../events.js";
+import { type ProviderErrorClassifier, providerErrorPayload } from "../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../runtime.js";
 import type { ProcessForkFn, ProcessSandbox, ProcessTurnFn, ProcessTurnHandle } from "./types.js";
 
 interface ProcessRun extends DriverRun {
   model?: string;
   effort?: StartOpts["effort"];
+  speed?: StartOpts["speed"];
   child: ProcessTurnHandle<CodexEvent> | null;
   awaitingInputToolUseId: string | null;
   stoppingForInput: boolean;
@@ -54,6 +56,7 @@ export class ProcessChatDriver implements ChatDriver {
     private readonly sandbox: ProcessSandbox = "danger-full-access",
     private readonly forkFn: ProcessForkFn = () => null,
     vendor = "codex",
+    readonly classifyError?: ProviderErrorClassifier,
   ) {
     this.vendor = vendor;
   }
@@ -82,6 +85,14 @@ export class ProcessChatDriver implements ChatDriver {
 
   shutdown(): void {
     this.runtime.clearPending();
+    for (const run of this.runtime.values()) {
+      try {
+        run.child?.kill();
+      } catch {
+        // Best effort during process shutdown.
+      }
+      run.child = null;
+    }
   }
 
   start(opts: StartOpts): Promise<string> {
@@ -98,6 +109,7 @@ export class ProcessChatDriver implements ChatDriver {
       cwd: opts.cwd,
       model: opts.model,
       effort: opts.effort,
+      speed: opts.speed,
       events: [],
       emitter: new EventEmitter(),
       turnActive: false,
@@ -139,7 +151,7 @@ export class ProcessChatDriver implements ChatDriver {
 
   send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runtime.get(sessionId);
-    if (!run || run.turnActive) return false;
+    if (!run || run.turnActive || run.awaitingInputToolUseId) return false;
     this.runTurn(run, turn.text, turn.attachments);
     return true;
   }
@@ -172,7 +184,7 @@ export class ProcessChatDriver implements ChatDriver {
     try {
       child.kill();
     } catch {
-      // Local terminal state still wins when process signaling fails.
+      return false;
     }
     if (run.child === child) run.child = null;
     this.emit(run, { kind: "result", ok: false, text: "interrupted" });
@@ -194,6 +206,7 @@ export class ProcessChatDriver implements ChatDriver {
       resume: run.sessionId ?? undefined,
       model: run.model,
       effort: run.effort,
+      speed: run.speed,
       sandbox: this.sandbox,
     });
     run.child = handle;
@@ -204,6 +217,9 @@ export class ProcessChatDriver implements ChatDriver {
         for await (const providerEvent of handle.events) {
           if (run.child !== handle) break;
           for (const event of toUiEventsFromCodex(providerEvent)) {
+            if (event.kind === "error") {
+              Object.assign(event, providerErrorPayload(this.classifyError, event.message));
+            }
             if (this.emit(run, event) && (event.kind === "result" || event.kind === "error")) {
               terminal = true;
             }
@@ -213,7 +229,7 @@ export class ProcessChatDriver implements ChatDriver {
         if (run.child === handle) {
           this.emit(run, {
             kind: "error",
-            message: error instanceof Error ? error.message : String(error),
+            ...providerErrorPayload(this.classifyError, error),
           });
           terminal = true;
         }

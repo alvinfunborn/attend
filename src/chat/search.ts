@@ -2,6 +2,7 @@ import fs from "node:fs";
 import type { RawSession } from "../core/types.js";
 import { readCodexTranscript } from "./codex/transcript.js";
 import { readCursorTranscript } from "./cursor/transcript.js";
+import { parseSearchQuery } from "./search-query.js";
 import { type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
 
 export interface SearchHit {
@@ -21,13 +22,13 @@ interface CacheEntry {
   mtimeMs: number;
   size: number;
   chunks: SearchHit[];
+  bytes: number;
 }
 
 const transcriptSearchCache = new Map<string, CacheEntry>();
-
-function normalizeQuery(q: string): string {
-  return q.trim().toLowerCase();
-}
+const SEARCH_CACHE_MAX_ENTRIES = 256;
+const SEARCH_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+let transcriptSearchCacheBytes = 0;
 
 function compact(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -50,7 +51,15 @@ function readChunks(session: RawSession): SearchHit[] {
     return [];
   }
   const cached = transcriptSearchCache.get(session.path);
-  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.chunks;
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+    transcriptSearchCache.delete(session.path);
+    transcriptSearchCache.set(session.path, cached);
+    return cached.chunks;
+  }
+  if (cached) {
+    transcriptSearchCache.delete(session.path);
+    transcriptSearchCacheBytes -= cached.bytes;
+  }
   const read =
     session.vendor === "codex"
       ? readCodexTranscript
@@ -58,16 +67,26 @@ function readChunks(session: RawSession): SearchHit[] {
         ? readCursorTranscript
         : readClaudeTranscript;
   const chunks = chunksFromMessages(read(session.path, Number.POSITIVE_INFINITY));
-  transcriptSearchCache.set(session.path, { mtimeMs: st.mtimeMs, size: st.size, chunks });
+  const bytes = chunks.reduce((total, chunk) => total + Buffer.byteLength(chunk.text), 0);
+  transcriptSearchCache.set(session.path, { mtimeMs: st.mtimeMs, size: st.size, chunks, bytes });
+  transcriptSearchCacheBytes += bytes;
+  while (
+    transcriptSearchCache.size > SEARCH_CACHE_MAX_ENTRIES ||
+    transcriptSearchCacheBytes > SEARCH_CACHE_MAX_BYTES
+  ) {
+    const oldest = transcriptSearchCache.entries().next().value as [string, CacheEntry] | undefined;
+    if (!oldest) break;
+    transcriptSearchCache.delete(oldest[0]);
+    transcriptSearchCacheBytes -= oldest[1].bytes;
+  }
   return chunks;
 }
 
-function snippet(text: string, needle: string): string {
-  const hay = text.toLowerCase();
-  const idx = hay.indexOf(needle);
+function snippet(text: string, matcher: RegExp | undefined): string {
+  const idx = matcher ? text.search(matcher) : -1;
   if (idx < 0) return text.length > 180 ? `${text.slice(0, 179)}...` : text;
   const start = Math.max(0, idx - 70);
-  const end = Math.min(text.length, idx + needle.length + 90);
+  const end = Math.min(text.length, idx + 90);
   return `${start > 0 ? "..." : ""}${text.slice(start, end)}${end < text.length ? "..." : ""}`;
 }
 
@@ -76,8 +95,8 @@ export function searchSessions(
   query: string,
   opts: { maxResults?: number; maxHitsPerSession?: number } = {},
 ): SessionSearchResult[] {
-  const needle = normalizeQuery(query);
-  if (!needle) return [];
+  const parsed = parseSearchQuery(query.trim());
+  if (!parsed.clauses.length) return [];
   const maxResults = opts.maxResults ?? 50;
   const maxHitsPerSession = opts.maxHitsPerSession ?? 3;
   const out: SessionSearchResult[] = [];
@@ -85,13 +104,19 @@ export function searchSessions(
     if (out.length >= maxResults) break;
     const hits: SearchHit[] = [];
     let count = 0;
-    for (const chunk of readChunks(session)) {
-      if (!chunk.text.toLowerCase().includes(needle)) continue;
+    const chunks = readChunks(session);
+    const searchable = chunks.map((chunk) => chunk.text).join("\n");
+    if (!parsed.test(searchable)) continue;
+    const positive = parsed.matchingClauses(searchable).filter((clause) => !clause.exclude);
+    for (const chunk of chunks) {
+      const matcher = positive.find((clause) => clause.regex.test(chunk.text))?.regex;
+      if (positive.length && !matcher) continue;
       count += 1;
       if (hits.length < maxHitsPerSession) {
-        hits.push({ role: chunk.role, text: snippet(chunk.text, needle) });
+        hits.push({ role: chunk.role, text: snippet(chunk.text, matcher) });
       }
     }
+    if (!positive.length) count = Math.max(1, count);
     if (count > 0) {
       out.push({
         vendor: session.vendor,

@@ -2,7 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveConfig } from "../src/config.js";
+import { isLoopbackHost, resolveConfig } from "../src/config.js";
+import { scopeIdForRoots } from "../src/core/scope.js";
+import { resolveClaudeBin } from "../src/core/vendor/detect.js";
 
 const ENV_KEYS = [
   "ATTEND_VAULTS",
@@ -24,19 +26,55 @@ afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
 });
 
+describe("isLoopbackHost", () => {
+  it("accepts loopback names and the complete IPv4 loopback range", () => {
+    expect(isLoopbackHost("localhost")).toBe(true);
+    expect(isLoopbackHost("api.localhost")).toBe(true);
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("127.12.34.56")).toBe(true);
+    expect(isLoopbackHost("::1")).toBe(true);
+  });
+
+  it("rejects wildcard, LAN, and public bindings", () => {
+    expect(isLoopbackHost("0.0.0.0")).toBe(false);
+    expect(isLoopbackHost("::")).toBe(false);
+    expect(isLoopbackHost("192.168.1.2")).toBe(false);
+    expect(isLoopbackHost("example.com")).toBe(false);
+  });
+});
+
 describe("resolveConfig precedence", () => {
   it("falls back to platform defaults (no scope, port 5050, localhost)", () => {
     const c = resolveConfig({ positionals: [] });
     expect(c.port).toBe(5050);
     expect(c.host).toBe("127.0.0.1");
     expect(c.scopeRoots).toEqual([]); // no dirs → list every session
+    expect(c.scopeId).toBe("scope:v1:all");
     expect(c.open).toBe(true);
   });
 
   it("uses positional dirs as scope roots over env/defaults", () => {
     process.env.ATTEND_VAULTS = "/should/be/ignored";
     const c = resolveConfig({ positionals: ["foo", "bar"] });
-    expect(c.scopeRoots).toEqual([path.resolve("foo"), path.resolve("bar")]);
+    expect(c.scopeRoots).toEqual([path.resolve("bar"), path.resolve("foo")]);
+    expect(c.scopeId).toBe(scopeIdForRoots(c.scopeRoots));
+  });
+
+  it("canonicalizes duplicate, descendant, and symlinked scope roots", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-scope-"));
+    const child = path.join(root, "packages", "app");
+    const link = `${root}-link`;
+    fs.mkdirSync(child, { recursive: true });
+    fs.symlinkSync(root, link, "dir");
+    try {
+      const combined = resolveConfig({ positionals: [child, root, root, link] });
+      const parentOnly = resolveConfig({ positionals: [root] });
+      expect(combined.scopeRoots).toEqual([path.resolve(root)]);
+      expect(combined.scopeId).toBe(parentOnly.scopeId);
+    } finally {
+      fs.unlinkSync(link);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("scopes from ATTEND_VAULTS when no positional dirs are given", () => {
@@ -81,6 +119,10 @@ describe("resolveConfig precedence", () => {
     expect(resolveConfig({ positionals: [] }).tags).toBe(path.resolve("/tmp/attend-tags.json"));
   });
 
+  it("uses the concrete system Claude CLI by default and never the SDK bundle", () => {
+    expect(resolveConfig({ positionals: [] }).claudeBin).toBe(resolveClaudeBin());
+  });
+
   it("allows overriding the Claude executable used by the Agent SDK", () => {
     process.env.ATTEND_CLAUDE_BIN = "/opt/claude/current/claude";
     expect(resolveConfig({ positionals: [] }).claudeBin).toBe("/opt/claude/current/claude");
@@ -96,20 +138,20 @@ describe("resolveConfig precedence", () => {
     expect(config.cursorSessions).toBe(path.resolve("/tmp/attend-cursor-sessions"));
   });
 
-  it("defaults tags to the scoped vault when one vault root is set", () => {
+  it("keeps tags global when the session list is directory-scoped", () => {
     const root = path.join(os.tmpdir(), "attend-vault-tags");
     const c = resolveConfig({ positionals: [root] });
-    expect(c.tags).toBe(path.join(path.resolve(root), ".attend", "tags.json"));
+    expect(c.tags).toBe(path.join(os.homedir(), ".attend", "tags.json"));
   });
 
-  it("defaults user-owned persistence to the scoped vault", () => {
+  it("uses one global data home independently of the directory filters", () => {
     const root = path.join(os.tmpdir(), "attend-vault-state");
     const c = resolveConfig({ positionals: [root] });
-    expect(c.overrides).toBe(path.join(path.resolve(root), ".attend", "overrides.json"));
-    expect(c.engagement).toBe(path.join(path.resolve(root), ".attend", "engagement.json"));
-    expect(c.uiState).toBe(path.join(path.resolve(root), ".attend", "ui-state.json"));
-    expect(c.chatQueue).toBe(path.join(path.resolve(root), ".attend", "chat-queues.json"));
-    expect(c.workEvents).toBe(path.join(path.resolve(root), ".attend", "work-events.json"));
+    expect(c.overrides).toBe(path.join(os.homedir(), ".attend", "overrides.json"));
+    expect(c.engagement).toBe(path.join(os.homedir(), ".attend", "engagement.json"));
+    expect(c.uiState).toBe(path.join(os.homedir(), ".attend", "ui-state.json"));
+    expect(c.chatQueue).toBe(path.join(os.homedir(), ".attend", "chat-queues.json"));
+    expect(c.workEvents).toBe(path.join(os.homedir(), ".attend", "attend.sqlite3"));
     expect(c.daemonRegistry).toBe(path.join(os.homedir(), ".attend", "daemons.json"));
     expect(c.analysisCache).toBe(path.join(os.homedir(), ".attend", "analysis.json"));
   });

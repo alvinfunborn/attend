@@ -1,5 +1,5 @@
-import fs from "node:fs";
-import path from "node:path";
+import { JsonFile, type JsonRepository } from "../json-file.js";
+import { SqliteDocument } from "../state-database.js";
 
 export type AnalysisState =
   | "continue_ready"
@@ -24,6 +24,9 @@ export interface Analysis {
   reason: string;
   /** editable user message that lowers the friction to resume an avoidance session */
   avoidancePrompt?: string | null;
+  /** ready-to-send user message when the next move is obvious/mechanical; null/absent
+   *  when the human must decide (so the console shows nothing rather than a nudge) */
+  nextStep?: string | null;
 }
 
 /**
@@ -33,41 +36,26 @@ export interface Analysis {
  * lastTs gating: freshness is maintained by re-running on each turn).
  */
 export class AnalysisCache {
-  private map = new Map<string, Analysis>();
-  private loaded = false;
+  private readonly data: JsonRepository<Record<string, Analysis>>;
 
-  constructor(private readonly file: string) {}
-
-  private load(): void {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const obj = JSON.parse(fs.readFileSync(this.file, "utf-8")) as Record<string, Analysis>;
-      for (const [k, v] of Object.entries(obj)) this.map.set(k, v);
-    } catch {
-      // missing/corrupt — start empty
-    }
+  constructor(file: string, databaseFile?: string) {
+    this.data = databaseFile
+      ? new SqliteDocument(databaseFile, "analysis-cache", file, normalizeAnalyses)
+      : new JsonFile(file, normalizeAnalyses);
   }
 
   get(taskId: string): Analysis | null {
-    this.load();
-    return this.map.get(taskId) ?? null;
+    return this.data.read()[taskId] ?? null;
   }
 
   set(taskId: string, a: Analysis): void {
-    this.load();
-    this.map.set(taskId, a);
-    this.persist();
+    this.data.update((analyses) => {
+      analyses[taskId] = a;
+    });
   }
+}
 
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      const obj: Record<string, Analysis> = {};
-      for (const [k, v] of this.map) obj[k] = v;
-      fs.writeFileSync(this.file, JSON.stringify(obj, null, 2));
-    } catch {
-      // best-effort persistence
-    }
-  }
+function normalizeAnalyses(value: unknown): Record<string, Analysis> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, Analysis>;
 }

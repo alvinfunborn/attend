@@ -2,10 +2,18 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeAnalyzer } from "../src/chat/analyzer/claude.js";
+import type { SessionAnalyzer } from "../src/chat/analyzer/index.js";
 import { DaemonOrchestrator } from "../src/chat/daemon.js";
-import type { ChatDriver, StartOpts, ToolAnswer, UserTurn } from "../src/chat/driver.js";
+import type {
+  ChatDriver,
+  SessionGoal,
+  StartOpts,
+  ToolAnswer,
+  UserTurn,
+} from "../src/chat/driver.js";
 import { ChatEngine, type QueryFn } from "../src/chat/engine.js";
 import type { UiEvent } from "../src/chat/events.js";
 import { resolveConfig } from "../src/config.js";
@@ -13,18 +21,41 @@ import { AnalysisCache } from "../src/core/daemon/cache.js";
 import { DaemonRegistry } from "../src/core/daemon/registry.js";
 import type { LaunchAction, LaunchVendor } from "../src/core/launch.js";
 import type { ModelOption } from "../src/core/model-options.js";
+import { TagStore } from "../src/core/tags.js";
 import type { ClaudeModelCatalogInspection } from "../src/core/vendor/claude-models.js";
 import { WorkEventStore } from "../src/core/work-events.js";
-import { type AppDeps, createApp, startServer } from "../src/server.js";
+import {
+  type AppDeps,
+  createApp as createServerApp,
+  defaultNewSessionDir,
+  startServer,
+  suggestProjectDirs,
+} from "../src/server.js";
 
 interface Call {
   action: LaunchAction;
   vendor: LaunchVendor;
   cwd: string;
-  opts: { sessionId?: string; prompt?: string; model?: string; effort?: string };
+  opts: { sessionId?: string; prompt?: string; model?: string; effort?: string; speed?: string };
 }
 
 const queryCalls: Array<{ prompt: unknown; options?: Record<string, unknown> }> = [];
+const defaultConfig = resolveConfig({ positionals: [] });
+
+function createApp(config: ReturnType<typeof resolveConfig>, deps: AppDeps) {
+  const uniq = Math.random().toString(36).slice(2);
+  if (config.claudeProjects === defaultConfig.claudeProjects)
+    config.claudeProjects = path.join(os.tmpdir(), `attend-isolated-claude-${uniq}`);
+  if (config.codexSessions === defaultConfig.codexSessions)
+    config.codexSessions = path.join(os.tmpdir(), `attend-isolated-codex-${uniq}`);
+  if (config.cursorProjects === defaultConfig.cursorProjects)
+    config.cursorProjects = path.join(os.tmpdir(), `attend-isolated-cursor-projects-${uniq}`);
+  if (config.cursorSessions === defaultConfig.cursorSessions)
+    config.cursorSessions = path.join(os.tmpdir(), `attend-isolated-cursor-sessions-${uniq}`);
+  if (config.workEvents === defaultConfig.workEvents)
+    config.workEvents = path.join(os.tmpdir(), `attend-isolated-work-events-${uniq}.sqlite3`);
+  return createServerApp(config, deps);
+}
 // Fake SDK query(): yields init → assistant → result, no network.
 const fakeQuery = ((args: { prompt: unknown; options?: Record<string, unknown> }) => {
   queryCalls.push({ prompt: args.prompt, options: args.options });
@@ -45,7 +76,12 @@ function appWithSpy(config = resolveConfig({ positionals: [] }), extraDeps: Part
   const calls: Call[] = [];
   const reveals: string[] = [];
   const uniq = Math.random().toString(36).slice(2);
-  const workEvents = path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`);
+  const workEvents =
+    config.workEvents === defaultConfig.workEvents
+      ? path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`)
+      : config.workEvents;
+  const claudeProjects = path.join(os.tmpdir(), `attend-test-claude-projects-${uniq}`);
+  const codexSessions = path.join(os.tmpdir(), `attend-test-codex-sessions-${uniq}`);
   const cursorProjects = path.join(os.tmpdir(), `attend-test-cursor-projects-${uniq}`);
   const cursorSessions = path.join(os.tmpdir(), `attend-test-cursor-sessions-${uniq}`);
   const orchestrator = new DaemonOrchestrator(
@@ -65,11 +101,57 @@ function appWithSpy(config = resolveConfig({ positionals: [] }), extraDeps: Part
     orchestrator,
     ...extraDeps,
   };
+  const effectiveConfig = {
+    ...config,
+    claudeProjects:
+      config.claudeProjects === defaultConfig.claudeProjects
+        ? claudeProjects
+        : config.claudeProjects,
+    codexSessions:
+      config.codexSessions === defaultConfig.codexSessions ? codexSessions : config.codexSessions,
+    cursorProjects,
+    cursorSessions,
+    daemonRegistry:
+      config.daemonRegistry === defaultConfig.daemonRegistry
+        ? path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)
+        : config.daemonRegistry,
+    analysisCache:
+      config.analysisCache === defaultConfig.analysisCache
+        ? path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)
+        : config.analysisCache,
+    overrides:
+      config.overrides === defaultConfig.overrides
+        ? path.join(os.tmpdir(), `attend-test-overrides-${uniq}.json`)
+        : config.overrides,
+    tags:
+      config.tags === defaultConfig.tags
+        ? path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`)
+        : config.tags,
+    engagement:
+      config.engagement === defaultConfig.engagement
+        ? path.join(os.tmpdir(), `attend-test-engagement-${uniq}.json`)
+        : config.engagement,
+    sessionStatus:
+      config.sessionStatus === defaultConfig.sessionStatus
+        ? path.join(os.tmpdir(), `attend-test-session-status-${uniq}.json`)
+        : config.sessionStatus,
+    uiState:
+      config.uiState === defaultConfig.uiState
+        ? path.join(os.tmpdir(), `attend-test-ui-state-${uniq}.json`)
+        : config.uiState,
+    chatQueue:
+      config.chatQueue === defaultConfig.chatQueue
+        ? path.join(os.tmpdir(), `attend-test-queue-${uniq}.json`)
+        : config.chatQueue,
+    workEvents,
+  };
   return {
     // Never scan the developer's real Cursor history from server tests. Besides
     // leaking host state into assertions, a logged-in installation can contain
     // hundreds of native transcripts and make every app fixture expensive.
-    app: createApp({ ...config, cursorProjects, cursorSessions, workEvents }, deps),
+    app: createApp(effectiveConfig, deps),
+    config: effectiveConfig,
+    deps,
     calls,
     reveals,
     workEvents,
@@ -77,6 +159,39 @@ function appWithSpy(config = resolveConfig({ positionals: [] }), extraDeps: Part
 }
 
 const tmp = encodeURIComponent(os.tmpdir());
+
+function readStateDocument<T>(database: string, key: string): T {
+  const db = new DatabaseSync(database, { readOnly: true });
+  try {
+    const row = db.prepare("SELECT value FROM state_documents WHERE key = ?").get(key) as {
+      value: string;
+    };
+    return JSON.parse(row.value) as T;
+  } finally {
+    db.close();
+  }
+}
+
+describe("new-session directory default", () => {
+  it("uses the most recent directory without collapsing it to a vault root", () => {
+    const rootA = path.join(os.tmpdir(), "attend-vault-a");
+    const rootB = path.join(os.tmpdir(), "attend-vault-b");
+    const recentA = path.join(rootA, "nested", "repo");
+    const recentB = path.join(rootB, "nested", "repo");
+
+    expect(defaultNewSessionDir([rootA], [recentA])).toBe(recentA);
+    expect(defaultNewSessionDir([rootA, rootB], [recentB, path.join(rootA, "other")])).toBe(
+      recentB,
+    );
+  });
+
+  it("falls back to the scope or Attend launch directory when there is no recent dir", () => {
+    const root = path.join(os.tmpdir(), "attend-vault");
+    const launchDir = path.join(os.tmpdir(), "attend-launch-root");
+    expect(defaultNewSessionDir([root], [], launchDir)).toBe(root);
+    expect(defaultNewSessionDir([], [], launchDir)).toBe(path.resolve(launchDir));
+  });
+});
 
 describe("GET /", () => {
   it("shows the scoped vault name while e2ee is locked", async () => {
@@ -115,14 +230,18 @@ describe("GET /models/codex", () => {
     const cache = path.join(root, "models_cache.json");
     const config = { ...resolveConfig({ positionals: [] }), codexModelsCache: cache };
     const { app } = appWithSpy(config, {
-      codexModelDefaults: async () => ({ model: "gpt-cli-default", effort: "high" }),
+      codexModelDefaults: async () => ({
+        model: "gpt-cli-default",
+        effort: "high",
+        speed: "priority",
+      }),
     });
     fs.writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-5.5", visibility: "list" }] }));
 
     const firstResponse = await app.request("/models/codex");
     const first = (await firstResponse.json()) as {
       models: Array<{ value: string }>;
-      defaults: { model: string; effort: string };
+      defaults: { model: string; effort: string; speed: string };
     };
     fs.writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-5.6", visibility: "list" }] }));
     const second = (await (await app.request("/models/codex")).json()) as {
@@ -130,7 +249,11 @@ describe("GET /models/codex", () => {
     };
 
     expect(first.models.map((model) => model.value)).toEqual(["gpt-5.5"]);
-    expect(first.defaults).toEqual({ model: "gpt-cli-default", effort: "high" });
+    expect(first.defaults).toEqual({
+      model: "gpt-cli-default",
+      effort: "high",
+      speed: "priority",
+    });
     expect(second.models.map((model) => model.value)).toEqual(["gpt-5.6"]);
     expect(firstResponse.headers.get("cache-control")).toBe("no-store");
     fs.rmSync(root, { recursive: true, force: true });
@@ -190,7 +313,7 @@ describe("GET /models/claude", () => {
           efforts: ["vendor-effort-a", "vendor-effort-b"],
         },
       ],
-      defaults: { model: "vendor-model", effort: "vendor-effort-a" },
+      defaults: { model: "vendor-model", effort: "vendor-effort-a", speed: "" },
       warning: null,
     });
     const firstResponse = await responsePromise;
@@ -222,7 +345,7 @@ describe("GET /models/claude", () => {
                   { value: "sonnet", label: "Sonnet" },
                   { value: "claude-fable-5[1m]", label: "Fable" },
                 ],
-          defaults: { model: "sonnet", effort: "" },
+          defaults: { model: "sonnet", effort: "", speed: "" },
           warning: null,
         };
       },
@@ -253,7 +376,7 @@ describe("GET /models/claude", () => {
             efforts: ["vendor-effort-a", "vendor-effort-b"],
           },
         ],
-        defaults: { model: "vendor-model", effort: "vendor-effort-a" },
+        defaults: { model: "vendor-model", effort: "vendor-effort-a", speed: "" },
         warning: null,
       }),
     });
@@ -282,16 +405,25 @@ describe("GET /models/cursor", () => {
           {
             value: "gpt-5.3-codex",
             label: "Codex 5.3",
-            efforts: ["gpt-5.3-codex[reasoning=high,fast=true]"],
-            effortLabels: {
-              "gpt-5.3-codex[reasoning=high,fast=true]": "High · Fast",
-            },
-            defaultEffort: "gpt-5.3-codex[reasoning=high,fast=true]",
+            efforts: ["high"],
+            effortLabels: { high: "High" },
+            defaultEffort: "high",
+            speeds: ["true"],
+            speedLabels: { true: "Fast" },
+            defaultSpeed: "true",
+            configurations: [
+              {
+                value: "gpt-5.3-codex[reasoning=high,fast=true]",
+                effort: "high",
+                speed: "true",
+              },
+            ],
           },
         ],
         defaults: {
           model: "gpt-5.3-codex",
-          effort: "gpt-5.3-codex[reasoning=high,fast=true]",
+          effort: "high",
+          speed: "true",
         },
         warning: null,
       }),
@@ -299,43 +431,129 @@ describe("GET /models/cursor", () => {
     const response = await app.request("/models/cursor");
     const body = (await response.json()) as {
       models: ModelOption[];
-      defaults: { model: string; effort: string };
+      defaults: { model: string; effort: string; speed: string };
     };
-    expect(body.models[0]?.effortLabels).toEqual({
-      "gpt-5.3-codex[reasoning=high,fast=true]": "High · Fast",
-    });
+    expect(body.models[0]?.effortLabels).toEqual({ high: "High" });
+    expect(body.models[0]?.speedLabels).toEqual({ true: "Fast" });
     expect(body.defaults.model).toBe("gpt-5.3-codex");
     expect(response.headers.get("cache-control")).toBe("no-store");
   });
 });
 
 describe("vault UI state", () => {
-  it("persists browser-independent preferences in the scoped vault", async () => {
+  it("hydrates a multi-directory scope with tag display state from each directory", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-vault-ui-multi-"));
+    const firstRoot = path.join(dir, "first");
+    const secondRoot = path.join(dir, "second");
+    const shared = {
+      uiState: path.join(dir, "ui-state.json"),
+      workEvents: path.join(dir, "attend.sqlite3"),
+      tags: path.join(dir, "tags.json"),
+    };
+    fs.mkdirSync(firstRoot);
+    fs.mkdirSync(secondRoot);
+
+    const firstConfig = { ...resolveConfig({ positionals: [firstRoot] }), ...shared };
+    const first = appWithSpy(firstConfig).app;
+    await first.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pinnedTags: ["urgent"], hiddenTags: ["stable"] }),
+    });
+    const secondConfig = { ...resolveConfig({ positionals: [secondRoot] }), ...shared };
+    const second = appWithSpy(secondConfig).app;
+    await second.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pinnedTags: ["later"], hiddenTags: ["someday"] }),
+    });
+
+    const combinedConfig = {
+      ...resolveConfig({ positionals: [firstRoot, secondRoot] }),
+      ...shared,
+    };
+    const combined = appWithSpy(combinedConfig).app;
+    const html = await (await combined.request("/")).text();
+    const match = /window\.__VAULT_STATE__ = (\{[^\n]*\});/.exec(html);
+    const state = JSON.parse(match?.[1] ?? "{}") as {
+      pinnedTags?: string[];
+      hiddenTags?: string[];
+    };
+    expect(state.pinnedTags).toEqual(["urgent", "later"]);
+    expect(state.hiddenTags).toEqual(["stable", "someday"]);
+
+    await combined.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pinnedTags: ["urgent"], hiddenTags: ["stable", "later"] }),
+    });
+    const persisted = readStateDocument<{
+      scopes: Record<string, { pinnedTags?: string[]; hiddenTags?: string[] }>;
+    }>(shared.workEvents, "ui-state");
+    expect(persisted.scopes[firstConfig.scopeId]).toMatchObject({
+      pinnedTags: ["urgent"],
+      hiddenTags: ["stable", "later"],
+    });
+    expect(persisted.scopes[secondConfig.scopeId]).toMatchObject({
+      pinnedTags: ["urgent"],
+      hiddenTags: ["stable", "later"],
+    });
+    expect(persisted.scopes).not.toHaveProperty(combinedConfig.scopeId);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("persists browser-independent preferences in the shared Attend data root", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-vault-ui-"));
-    const config = resolveConfig({ positionals: [root] });
-    const { app } = appWithSpy(config);
+    const { app, config } = appWithSpy(resolveConfig({ positionals: [root] }));
     const res = await app.request("/vault/ui-state", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         theme: "dark",
         modelPrefs: { codex: { effort: "medium" } },
+        pinnedTags: ["urgent", "work"],
+        hiddenTags: ["stable", "later"],
+        shortcuts: [{ id: "s1", text: "Run tests", createdAt: 1, updatedAt: 1 }],
+        sessionNotes: {
+          session: [{ id: "n1", text: "Remember this", createdAt: 2, updatedAt: 2 }],
+        },
+        sessionTodos: {
+          session: [{ id: "t1", text: "Review", completed: false, createdAt: 3, updatedAt: 3 }],
+        },
+        sessionPins: { s1: 123 },
         sessionTitles: { s1: "Customer escalation" },
         forkParents: { s2: "s1" },
       }),
     });
 
     expect(res.status).toBe(200);
-    expect(JSON.parse(fs.readFileSync(config.uiState, "utf-8"))).toMatchObject({
+    expect(readStateDocument(config.workEvents, "ui-state")).toMatchObject({
       theme: "dark",
       modelPrefs: { codex: { effort: "medium" } },
+      scopes: {
+        [config.scopeId]: {
+          pinnedTags: ["urgent", "work"],
+          hiddenTags: ["stable", "later"],
+        },
+      },
+      sessionPins: { s1: 123 },
       sessionTitles: { s1: "Customer escalation" },
       forkParents: { s2: "s1" },
     });
+    expect(readStateDocument(config.workEvents, "composer-text")).toMatchObject({
+      shortcuts: [{ id: "s1", text: "Run tests", createdAt: 1, updatedAt: 1 }],
+      sessionNotes: { session: [expect.objectContaining({ id: "n1" })] },
+      sessionTodos: { session: [expect.objectContaining({ id: "t1", completed: false })] },
+    });
+    const restarted = appWithSpy(config).app;
+    const html = await (await restarted.request("/")).text();
+    expect(html).toContain("Run tests");
+    expect(html).toContain("Remember this");
+    expect(html).toContain("Review");
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("hydrates custom session titles from the scoped vault into session views", async () => {
+  it("hydrates custom session titles from shared state into session views", async () => {
     const uniq = Math.random().toString(36).slice(2);
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-vault-title-"));
     const claudeProjects = path.join(os.tmpdir(), `attend-test-projects-${uniq}`);
@@ -360,6 +578,7 @@ describe("vault UI state", () => {
       overrides: path.join(os.tmpdir(), `attend-test-ov-${uniq}.json`),
       workEvents: path.join(os.tmpdir(), `attend-test-work-events-${uniq}.json`),
       tags: path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`),
+      uiState: path.join(os.tmpdir(), `attend-test-ui-state-${uniq}.json`),
     };
     fs.mkdirSync(path.dirname(config.uiState), { recursive: true });
     fs.writeFileSync(
@@ -383,10 +602,12 @@ describe("vault UI state", () => {
 });
 
 class FakeCodexDriver implements ChatDriver {
-  readonly vendor = "codex";
+  readonly vendor: string;
   readonly starts: StartOpts[] = [];
   readonly sends: Array<{ sessionId: string; turn: UserTurn }> = [];
   readonly interrupts: string[] = [];
+  readonly goalCalls: Array<{ action: "set" | "get" | "clear"; sessionId: string }> = [];
+  readonly goals = new Map<string, SessionGoal>();
   interruptResult = false;
   active: Array<{ sessionId: string; startedAt: number; clientSessionId?: string }> = [];
   readonly turnEndListeners = new Set<(sessionId: string) => void>();
@@ -394,8 +615,18 @@ class FakeCodexDriver implements ChatDriver {
     (sessionId: string, event: UiEvent, clientSessionId?: string) => void
   >();
 
+  constructor(vendor = "codex") {
+    this.vendor = vendor;
+  }
+
   get(_sessionId: string): { cwd: string } | undefined {
     return { cwd: os.tmpdir() };
+  }
+
+  validateAttachments(attachments: UserTurn["attachments"] = []): string | null {
+    return attachments.some((attachment) => attachment.kind === "document")
+      ? "Codex chat does not support PDF attachments"
+      : null;
   }
 
   start(opts: StartOpts): Promise<string> {
@@ -406,6 +637,31 @@ class FakeCodexDriver implements ChatDriver {
   send(sessionId: string, turn: UserTurn): boolean {
     this.sends.push({ sessionId, turn });
     return true;
+  }
+
+  setGoal(sessionId: string, objective: string): Promise<SessionGoal> {
+    this.goalCalls.push({ action: "set", sessionId });
+    const goal: SessionGoal = {
+      threadId: sessionId,
+      objective,
+      status: "active",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+    };
+    this.goals.set(sessionId, goal);
+    return Promise.resolve(goal);
+  }
+
+  getGoal(sessionId: string): Promise<SessionGoal | null> {
+    this.goalCalls.push({ action: "get", sessionId });
+    return Promise.resolve(this.goals.get(sessionId) ?? null);
+  }
+
+  clearGoal(sessionId: string): Promise<boolean> {
+    this.goalCalls.push({ action: "clear", sessionId });
+    return Promise.resolve(this.goals.delete(sessionId));
   }
 
   answer(_sessionId: string, _answer: ToolAnswer): boolean {
@@ -474,14 +730,38 @@ describe("POST /launch", () => {
     expect(calls[0]?.opts.prompt).toBe("do X");
   });
 
-  it("passes model and effort through terminal launches", async () => {
+  it("moves a successfully launched new-session directory to the front of recent dirs", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-launch-mru-"));
+    const first = path.join(root, "first");
+    const second = path.join(root, "second");
+    fs.mkdirSync(first);
+    fs.mkdirSync(second);
+    try {
+      const { app } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const launched = await app.request(
+        `/launch?action=new&vendor=codex&cwd=${encodeURIComponent(second)}`,
+        { method: "POST" },
+      );
+      expect(launched.status).toBe(200);
+
+      const suggested = await app.request(`/dirs/suggest?q=${encodeURIComponent(root)}`);
+      const body = (await suggested.json()) as {
+        dirs: Array<{ path: string; source: string }>;
+      };
+      expect(body.dirs[0]).toEqual({ path: second, source: "recent" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes model, effort, and speed through terminal launches", async () => {
     const { app, calls } = appWithSpy();
     const res = await app.request(
-      `/launch?action=new&vendor=claude&cwd=${tmp}&model=${encodeURIComponent("sonnet")}&effort=high`,
+      `/launch?action=new&vendor=claude&cwd=${tmp}&model=${encodeURIComponent("sonnet")}&effort=high&speed=fast`,
       { method: "POST" },
     );
     expect(res.status).toBe(200);
-    expect(calls[0]?.opts).toMatchObject({ model: "sonnet", effort: "high" });
+    expect(calls[0]?.opts).toMatchObject({ model: "sonnet", effort: "high", speed: "fast" });
   });
 
   it("resolves a vault-relative cwd for new terminal launches", async () => {
@@ -582,7 +862,56 @@ describe("POST /open", () => {
   });
 });
 
+describe("POST /paths/exists", () => {
+  it("checks relative paths exactly without falling back to an existing parent", async () => {
+    const { app } = appWithSpy();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-path-check-"));
+    fs.mkdirSync(path.join(root, "src", "ui"), { recursive: true });
+    try {
+      const res = await app.request("/paths/exists", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cwd: root, paths: ["src/ui", "armed/active", "0.72rem/650"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ exists: [true, false, false] });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("GET /dirs/suggest", () => {
+  it("caps recent directories at five while retaining browsed folders", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-"));
+    const recentDirs = Array.from({ length: 8 }, (_, index) => path.join(root, `recent-${index}`));
+    const folder = path.join(root, "folder-only");
+    for (const dir of recentDirs) fs.mkdirSync(dir);
+    fs.mkdirSync(folder);
+    try {
+      const suggestions = suggestProjectDirs(root, [root], recentDirs);
+      expect(suggestions.filter((item) => item.source === "recent")).toHaveLength(5);
+      expect(suggestions).toContainEqual({ path: folder, source: "folder" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("browses children when the input is an existing directory without a trailing slash", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-"));
+    const child = path.join(root, "child-project");
+    fs.mkdirSync(child);
+    try {
+      const { app } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const res = await app.request(`/dirs/suggest?q=${encodeURIComponent(root)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { dirs: Array<{ path: string; source: string }> };
+      expect(body.dirs).toContainEqual({ path: child, source: "folder" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("lists local child directories for an absolute directory input", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-"));
     const child = path.join(root, "magicline");
@@ -773,7 +1102,7 @@ describe("tag routes", () => {
 
     await post(app, "/session/tags?session=s1", { tags: ["work"] });
 
-    const persisted = JSON.parse(fs.readFileSync(tagFile, "utf-8")) as {
+    const persisted = readStateDocument(config.workEvents, "tags") as {
       sessions: Record<string, string[]>;
     };
     expect(persisted.sessions.s1).toEqual(["work"]);
@@ -800,6 +1129,17 @@ describe("tag routes", () => {
     expect(await res.json()).toMatchObject({ ok: true, tags: ["work"] });
   });
 
+  it("clears all session bindings while keeping the global tag", async () => {
+    const app = appWithTags();
+    await post(app, "/session/tags?session=s1", { tags: ["work", "urgent"] });
+    await post(app, "/session/tags?session=s2", { tags: ["urgent"] });
+
+    const res = await post(app, "/tags/clear-session-bindings", { name: "urgent" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, tags: ["work", "urgent"] });
+  });
+
   it("reorders global tags", async () => {
     const app = appWithTags();
     await post(app, "/session/tags?session=s1", { tags: ["work", "urgent", "later"] });
@@ -808,6 +1148,82 @@ describe("tag routes", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, tags: ["later", "work", "urgent"] });
+  });
+
+  it("binds a tag across directories without creating combined-scope state", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-tag-multi-scope-"));
+    const firstRoot = path.join(dir, "first");
+    const secondRoot = path.join(dir, "second");
+    const claudeProjects = path.join(dir, "claude");
+    const projectDir = path.join(claudeProjects, "project");
+    fs.mkdirSync(firstRoot);
+    fs.mkdirSync(secondRoot);
+    fs.mkdirSync(projectDir, { recursive: true });
+    const timestamp = new Date().toISOString();
+    fs.writeFileSync(
+      path.join(projectDir, "first.jsonl"),
+      JSON.stringify({
+        type: "user",
+        timestamp,
+        cwd: firstRoot,
+        sessionId: "first-session",
+        message: { content: "first" },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectDir, "second.jsonl"),
+      JSON.stringify({
+        type: "user",
+        timestamp,
+        cwd: secondRoot,
+        sessionId: "second-session",
+        message: { content: "second" },
+      }),
+    );
+    const shared = {
+      claudeProjects,
+      codexSessions: path.join(dir, "codex"),
+      cursorProjects: path.join(dir, "cursor-projects"),
+      cursorSessions: path.join(dir, "cursor-sessions"),
+      tags: path.join(dir, "tags.json"),
+      uiState: path.join(dir, "ui-state.json"),
+      workEvents: path.join(dir, "attend.sqlite3"),
+    };
+    const firstConfig = { ...resolveConfig({ positionals: [firstRoot] }), ...shared };
+    const secondConfig = { ...resolveConfig({ positionals: [secondRoot] }), ...shared };
+    const combinedConfig = {
+      ...resolveConfig({ positionals: [firstRoot, secondRoot] }),
+      ...shared,
+    };
+
+    const first = appWithSpy(firstConfig).app;
+    await post(first, "/session/tags?session=first-session", { tags: ["shared"] });
+    await post(first, "/vault/ui-state", { hiddenTags: ["shared"], pinnedTags: [] });
+
+    const combined = appWithSpy(combinedConfig).app;
+    await post(combined, "/session/tags?session=second-session", { tags: ["shared"] });
+    await post(combined, "/session/tags?session=second-session", { tags: [] });
+
+    const tagState = readStateDocument<{
+      sessions: Record<string, string[]>;
+    }>(shared.workEvents, "tags");
+    expect(tagState.sessions[`scope-id:${firstConfig.scopeId}`]).toContain("shared");
+    expect(tagState.sessions[`scope-id:${secondConfig.scopeId}`]).toContain("shared");
+    expect(tagState.sessions).not.toHaveProperty(`scope-id:${combinedConfig.scopeId}`);
+    expect(tagState.sessions).not.toHaveProperty("second-session");
+
+    const uiState = readStateDocument<{
+      scopes: Record<string, { hiddenTags?: string[] }>;
+    }>(shared.workEvents, "ui-state");
+    expect(uiState.scopes[firstConfig.scopeId]?.hiddenTags).toContain("shared");
+    expect(uiState.scopes[secondConfig.scopeId]?.hiddenTags).toContain("shared");
+    expect(uiState.scopes).not.toHaveProperty(combinedConfig.scopeId);
+
+    const second = appWithSpy(secondConfig).app;
+    const html = await (await second.request("/")).text();
+    const tagsMatch = /window\.__TAGS__ = (\[[^\n]*\]);/.exec(html);
+    expect(JSON.parse(tagsMatch?.[1] ?? "[]")).toContain("shared");
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("keeps tag write responses scoped to the current vault", async () => {
@@ -869,10 +1285,10 @@ describe("tag routes", () => {
         ok: true,
         tags: ["local", "new local"],
       });
-      const persistedAfterCreate = JSON.parse(fs.readFileSync(tagFile, "utf-8")) as {
+      const persistedAfterCreate = readStateDocument(config.workEvents, "tags") as {
         sessions: Record<string, string[]>;
       };
-      expect(persistedAfterCreate.sessions[`scope:${currentRoot}`]).toEqual(["new local"]);
+      expect(persistedAfterCreate.sessions[`scope-id:${config.scopeId}`]).toEqual(["new local"]);
 
       expect(
         await (
@@ -884,6 +1300,14 @@ describe("tag routes", () => {
         tags: ["local", "new local", "tab local"],
       });
 
+      expect(
+        await (await post(app, "/session/tags?session=s1", { tags: [] })).json(),
+      ).toMatchObject({
+        ok: true,
+        sessionTags: [],
+        tags: ["local", "new local", "tab local"],
+      });
+
       const restarted = createApp(config, {
         launcher: () => "noop",
         engine: new ChatEngine(fakeQuery),
@@ -892,6 +1316,7 @@ describe("tag routes", () => {
       const html = await (await restarted.request("/")).text();
       expect(html).toContain('"local"');
       expect(html).toContain('"new local"');
+      expect(html).toContain('"tab local"');
       expect(html).not.toContain('"foreign"');
     } finally {
       fs.rmSync(claudeProjects, { recursive: true, force: true });
@@ -991,7 +1416,7 @@ describe("engagement routes", () => {
       }),
     });
     expect(res.status).toBe(200);
-    return { app, transcript, root, cwd, endedAt };
+    return { app, transcript, root, cwd, endedAt, config };
   }
 
   it("records a view visit and returns the engagement aggregate", async () => {
@@ -1103,6 +1528,21 @@ describe("engagement routes", () => {
     });
   });
 
+  it("keeps live snapshots available when work-history backfill cannot acquire its lock", async () => {
+    const { app, workEvents } = appWithSpy();
+    const holder = new DatabaseSync(workEvents);
+    holder.exec("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE");
+
+    try {
+      const res = await app.request("/chat/live");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ stats: { prompts1h: 0 } });
+    } finally {
+      holder.exec("ROLLBACK");
+      holder.close();
+    }
+  });
+
   it("serves work-pattern statistics from scoped session prompt history", async () => {
     const { app } = await appWithTrackedSession();
     const res = await app.request("/stats/work?range=7d");
@@ -1116,9 +1556,9 @@ describe("engagement routes", () => {
     });
   });
 
-  it("stores unfinished tab state under the scope root and deletes it when grayed", async () => {
-    const { app, root, cwd } = await appWithTrackedSession();
-    const statusFile = path.join(root, ".attend", "session-status.json");
+  it("stores unfinished tab state in shared Attend data and deletes it when grayed", async () => {
+    const { app, root, cwd, config } = await appWithTrackedSession();
+    const rootStatusFile = path.join(root, ".attend", "session-status.json");
     const childStatusFile = path.join(cwd, ".attend", "session-status.json");
 
     const markAlreadyRead = await app.request(
@@ -1130,7 +1570,9 @@ describe("engagement routes", () => {
       },
     );
     expect(markAlreadyRead.status).toBe(200);
-    expect(fs.existsSync(statusFile)).toBe(false);
+    const initialStatus = readStateDocument(config.workEvents, "session-status");
+    expect(initialStatus).toEqual({ sessions: {}, versions: { s1: 1111 } });
+    expect(fs.existsSync(rootStatusFile)).toBe(false);
     expect(fs.existsSync(childStatusFile)).toBe(false);
 
     const markSeen = await app.request(
@@ -1142,9 +1584,10 @@ describe("engagement routes", () => {
       },
     );
     expect(markSeen.status).toBe(200);
-    expect(JSON.parse(fs.readFileSync(statusFile, "utf-8"))).toMatchObject({
+    expect(readStateDocument(config.workEvents, "session-status")).toMatchObject({
       sessions: { s1: { state: "seen", updatedAt: 1234 } },
     });
+    expect(fs.existsSync(rootStatusFile)).toBe(false);
     expect(fs.existsSync(childStatusFile)).toBe(false);
 
     const res = await app.request("/");
@@ -1162,7 +1605,10 @@ describe("engagement routes", () => {
       },
     );
     expect(markRead.status).toBe(200);
-    expect(JSON.parse(fs.readFileSync(statusFile, "utf-8"))).toEqual({ sessions: {} });
+    expect(readStateDocument(config.workEvents, "session-status")).toEqual({
+      sessions: {},
+      versions: { s1: 2345 },
+    });
   });
 
   it("rejects a missing session id", async () => {
@@ -1394,14 +1840,23 @@ describe("external Codex active state", () => {
     expect(live.active).not.toContain("cx-live");
   });
 
-  it("suppresses stale transcript active state even when no live run is interruptible", async () => {
-    const { app } = appWithExternalCodexSession();
+  it("reports a successful logical stop when suppressing stale external active state", async () => {
+    const { app, config } = appWithExternalCodexSession();
 
     const stop = await app.request("/chat/abort?session=cx-live&vendor=codex", { method: "POST" });
-    expect(await stop.json()).toMatchObject({ ok: false, session: "cx-live" });
+    expect(await stop.json()).toMatchObject({ ok: true, session: "cx-live" });
 
     const live = (await (await app.request("/chat/live")).json()) as { active: string[] };
     expect(live.active).not.toContain("cx-live");
+
+    const restarted = createApp(config, {
+      ...appWithSpy(config).deps,
+      codex: new FakeCodexDriver(),
+    });
+    const afterRestart = (await (await restarted.request("/chat/live")).json()) as {
+      active: string[];
+    };
+    expect(afterRestart.active).not.toContain("cx-live");
   });
 
   it("routes abort by session id when the vendor query is missing or stale", async () => {
@@ -1536,6 +1991,36 @@ describe("GET /session/source", () => {
   });
 });
 
+describe("request boundaries", () => {
+  it("does not read an arbitrary JSONL path that is not a visible session", async () => {
+    const file = path.join(
+      os.tmpdir(),
+      `attend-private-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    fs.writeFileSync(file, JSON.stringify({ secret: true }));
+    try {
+      const { app } = appWithSpy();
+      const response = await app.request(
+        `/chat/messages?file=${encodeURIComponent(file)}&vendor=claude`,
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ ok: false, error: "transcript not found" });
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it("rejects oversized request bodies before route parsing", async () => {
+    const { app } = appWithSpy();
+    const response = await app.request("/tags", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(40 * 1024 * 1024) },
+      body: "{}",
+    });
+    expect(response.status).toBe(413);
+  });
+});
+
 describe("GET /search", () => {
   it("finds transcript content in listed sessions", async () => {
     const uniq = Math.random().toString(36).slice(2);
@@ -1607,7 +2092,7 @@ describe("GET /search", () => {
 });
 
 describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
-  function appWithCodexSpy() {
+  function appWithCodexSpy(engine?: ChatDriver) {
     const codex = new FakeCodexDriver();
     const uniq = Math.random().toString(36).slice(2);
     const config = {
@@ -1629,7 +2114,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     return {
       app: createApp(config, {
         launcher: () => "noop",
-        engine: new ChatEngine(fakeQuery),
+        engine: engine ?? new ChatEngine(fakeQuery),
         codex,
         orchestrator,
       }),
@@ -1638,23 +2123,168 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     };
   }
 
+  it("resolves Pin references with their full text-only comment thread", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    const at = new Date().toISOString();
+    const commentRows = [
+      { type: "session_meta", timestamp: at, payload: { id: "cx-1", cwd: os.tmpdir() } },
+      {
+        type: "response_item",
+        timestamp: at,
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "why this choice?\n\n@referenced-assistant-response\n> pinned answer\n@end-reference",
+            },
+          ],
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: at,
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "because it preserves the invariant" }],
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: at,
+        payload: {
+          type: "function_call",
+          call_id: "tool-secret",
+          name: "SECRET_TOOL_NAME",
+          arguments: JSON.stringify({ secret: "SECRET_TOOL_INPUT" }),
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: at,
+        payload: {
+          type: "function_call_output",
+          call_id: "tool-secret",
+          output: "SECRET_TOOL_RESULT",
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: at,
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "does that hold on mobile?" }],
+        },
+      },
+      {
+        type: "response_item",
+        timestamp: at,
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "yes, the same rule applies" }],
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(config.codexSessions, "rollout-pin-comment.jsonl"),
+      commentRows.map((row) => JSON.stringify(row)).join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(config.codexSessions, "rollout-parent-pin.jsonl"),
+      [
+        { type: "session_meta", timestamp: at, payload: { id: "parent-pin", cwd: os.tmpdir() } },
+        {
+          type: "response_item",
+          timestamp: at,
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "main task" }],
+          },
+        },
+        {
+          type: "response_item",
+          timestamp: at,
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "pinned answer" }],
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    );
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pins: {
+          "attend.pins.v1:parent-pin": [
+            { key: "msg:2", role: "codex", text: "pinned answer", pinnedAt: Date.now() },
+          ],
+        },
+      }),
+    });
+    const commentResponse = await app.request("/comments/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        threadId: "comment-thread",
+        parentSessionId: "parent-pin",
+        anchorKey: "msg:2",
+        anchorText: "pinned answer",
+        question: "why this choice?",
+        contextMessages: [{ role: "user", text: "main task" }],
+      }),
+    });
+    expect(commentResponse.status).toBe(200);
+
+    const response = await app.request(`/chat/send?session=parent-pin&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "use the referenced decision",
+        references: [{ kind: "pin", pinKey: "msg:2", pinSessionId: "parent-pin" }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const providerText = codex.sends.at(-1)?.turn.text ?? "";
+    expect(providerText).toContain("use the referenced decision");
+    expect(providerText).toContain("Attend pinned context:");
+    expect(providerText).toContain("Pinned assistant response:\npinned answer");
+    expect(providerText).toContain("User: why this choice?");
+    expect(providerText).toContain("Assistant: because it preserves the invariant");
+    expect(providerText).toContain("User: does that hold on mobile?");
+    expect(providerText).toContain("Assistant: yes, the same rule applies");
+    expect(providerText).not.toContain("SECRET_TOOL_NAME");
+    expect(providerText).not.toContain("SECRET_TOOL_INPUT");
+    expect(providerText).not.toContain("SECRET_TOOL_RESULT");
+  });
+
   it("creates one hidden comment session per assistant message and reuses it", async () => {
     const { app, codex, config } = appWithCodexSpy();
     fs.mkdirSync(config.codexSessions, { recursive: true });
     const rollout = (id: string, user: string, assistant: string) =>
       [
         JSON.stringify({
-          timestamp: "2026-07-12T10:00:00.000Z",
+          timestamp: new Date(Date.now() - 3_000).toISOString(),
           type: "session_meta",
           payload: { id, cwd: os.tmpdir() },
         }),
         JSON.stringify({
-          timestamp: "2026-07-12T10:00:01.000Z",
+          timestamp: new Date(Date.now() - 2_000).toISOString(),
           type: "response_item",
           payload: { type: "message", role: "user", content: [{ type: "input_text", text: user }] },
         }),
         JSON.stringify({
-          timestamp: "2026-07-12T10:00:02.000Z",
+          timestamp: new Date(Date.now() - 1_000).toISOString(),
           type: "response_item",
           payload: {
             type: "message",
@@ -1677,6 +2307,43 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         "because it is simpler",
       ),
     );
+    const inheritedNote = {
+      id: "comment-note",
+      text: "Preserve the parent constraints",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const inheritedTodo = {
+      id: "comment-todo",
+      text: "Verify the promoted branch",
+      createdAt: 1,
+      updatedAt: 1,
+      completed: false,
+    };
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionRunConfigs: {
+          "codex:parent-comment": {
+            model: "gpt-parent-comment",
+            effort: "high",
+            speed: "priority",
+            updatedAt: 1,
+          },
+        },
+        sessionNotes: { "parent-comment": [inheritedNote] },
+        sessionTodos: { "parent-comment": [inheritedTodo] },
+        sessionGoals: {
+          "parent-comment": {
+            objective: "Finish the parent objective",
+            vendor: "codex",
+            status: "active",
+            updatedAt: 1,
+          },
+        },
+      }),
+    });
 
     const first = await app.request("/comments/send", {
       method: "POST",
@@ -1694,7 +2361,9 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         ],
       }),
     });
-    const firstBody = await first.json();
+    const firstBody = (await first.json()) as {
+      thread: { lastUserMessageAt: number };
+    } & Record<string, unknown>;
     expect(first.status, JSON.stringify(firstBody)).toBe(200);
     expect(firstBody).toMatchObject({
       ok: true,
@@ -1702,10 +2371,17 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         id: "comment-ui-1",
         providerSessionId: "cx-1",
         messageCount: 1,
+        lastUserMessageAt: expect.any(Number),
         anchorData: { kind: "message", role: "assistant", text: "main answer" },
       },
     });
-    expect(codex.starts[0]).toMatchObject({ clientSessionId: "comment-ui-1", cwd: os.tmpdir() });
+    expect(codex.starts[0]).toMatchObject({
+      clientSessionId: "comment-ui-1",
+      cwd: os.tmpdir(),
+      model: "gpt-parent-comment",
+      effort: "high",
+      speed: "priority",
+    });
     expect(codex.starts[0]?.firstText).toMatch(/^why this choice\?/);
     expect(codex.starts[0]?.firstText).toContain(
       "@referenced-assistant-response\n> main answer\n@end-reference",
@@ -1730,16 +2406,31 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(second.status).toBe(200);
     expect(codex.starts).toHaveLength(1);
     expect(codex.sends).toEqual([{ sessionId: "cx-1", turn: { text: "can you elaborate?" } }]);
-    expect(await second.json()).toMatchObject({
+    const secondBody = (await second.json()) as {
+      thread: { lastUserMessageAt: number };
+    } & Record<string, unknown>;
+    expect(secondBody).toMatchObject({
       thread: {
         id: "comment-ui-1",
         anchorKey: "assistant:2",
         anchorText: "main answer after reload",
         messageCount: 2,
+        lastUserMessageAt: expect.any(Number),
       },
     });
+    expect(secondBody.thread.lastUserMessageAt).toBeGreaterThanOrEqual(
+      firstBody.thread.lastUserMessageAt,
+    );
 
     codex.emitEvent("cx-1", { kind: "assistant_text", text: "side answer" });
+    codex.emitEvent("cx-1", { kind: "result", ok: true });
+    await vi.waitFor(() =>
+      expect(
+        new WorkEventStore(config.workEvents)
+          .list()
+          .filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1"),
+      ).toHaveLength(2),
+    );
     const commentEvents = new WorkEventStore(config.workEvents).list();
     expect(
       commentEvents.filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1"),
@@ -1772,7 +2463,24 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       ok: true,
       queued: true,
       item: { text: "one more thing" },
-      thread: { status: "generating", messageCount: 3 },
+      thread: {
+        status: "generating",
+        messageCount: 3,
+        lastUserMessageAt: expect.any(Number),
+      },
+    });
+    const staleRead = await app.request("/comments/read", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "comment-ui-1",
+        readAt: firstBody.thread.lastUserMessageAt - 1,
+      }),
+    });
+    expect(await staleRead.json()).toMatchObject({
+      ok: true,
+      stale: true,
+      thread: { id: "comment-ui-1", status: "generating" },
     });
     expect(codex.sends).toHaveLength(1);
     const queuedMessages = (await (
@@ -1813,21 +2521,54 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       session: "cx-1",
       vendor: "codex",
       cwd: os.tmpdir(),
-      view: { sessionId: "cx-1", vendor: "codex" },
+      view: {
+        sessionId: "cx-1",
+        vendor: "codex",
+        model: "gpt-parent-comment",
+        effort: "high",
+        speed: "priority",
+      },
     });
     expect(codex.starts).toHaveLength(startsBeforePromotion);
     expect(codex.sends).toHaveLength(sendsBeforePromotion);
+    await vi.waitFor(() =>
+      expect(codex.goalCalls).toContainEqual({ action: "set", sessionId: "cx-1" }),
+    );
+    const promotedComposerText = readStateDocument<{
+      sessionNotes?: Record<string, unknown[]>;
+      sessionTodos?: Record<string, unknown[]>;
+    }>(config.workEvents, "composer-text");
+    expect(promotedComposerText.sessionNotes?.["cx-1"]).toEqual([inheritedNote]);
+    expect(promotedComposerText.sessionTodos?.["cx-1"]).toEqual([inheritedTodo]);
+    const promotedUiState = readStateDocument<{
+      forkParents?: Record<string, string>;
+      sessionGoals?: Record<string, { objective?: string; vendor?: string; status?: string }>;
+      sessionRunConfigs?: Record<string, { model?: string; effort?: string; speed?: string }>;
+    }>(config.workEvents, "ui-state");
+    expect(promotedUiState.forkParents?.["cx-1"]).toBe("parent-comment");
+    expect(promotedUiState.sessionGoals?.["cx-1"]).toMatchObject({
+      objective: "Finish the parent objective",
+      vendor: "codex",
+      status: "active",
+    });
+    expect(promotedUiState.sessionRunConfigs?.["codex:cx-1"]).toMatchObject({
+      model: "gpt-parent-comment",
+      effort: "high",
+      speed: "priority",
+    });
     expect(await (await app.request("/comments?parent=parent-comment")).json()).toEqual({
       threads: [],
     });
-    const promotedStats = (await (await app.request("/stats/work?range=today")).json()) as {
-      summary: { sessionsTouched: number };
-    };
-    expect(promotedStats.summary.sessionsTouched).toBe(2);
+    await vi.waitFor(async () => {
+      const promotedStats = (await (await app.request("/stats/work?range=7d")).json()) as {
+        summary: { sessionsTouched: number };
+      };
+      expect(promotedStats.summary.sessionsTouched).toBe(2);
+    });
     const afterPromotionEvents = new WorkEventStore(config.workEvents).list();
     expect(
       afterPromotionEvents.some(
-        (event) => event.sessionId === "cx-1" && event.source === "transcript",
+        (event) => event.sessionId === "cx-1" && event.kind === "user_prompt",
       ),
     ).toBe(true);
     codex.emitEvent("cx-1", {
@@ -1835,13 +2576,15 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       text: "now a regular session",
       startedAt: Date.now(),
     });
-    expect(new WorkEventStore(config.workEvents).list()).toContainEqual(
-      expect.objectContaining({
-        kind: "user_prompt",
-        sessionId: "cx-1",
-        chars: "now a regular session".length,
-        source: "live",
-      }),
+    await vi.waitFor(() =>
+      expect(new WorkEventStore(config.workEvents).list()).toContainEqual(
+        expect.objectContaining({
+          kind: "user_prompt",
+          sessionId: "cx-1",
+          chars: "now a regular session".length,
+          source: "live",
+        }),
+      ),
     );
 
     const page = await (await app.request("/")).text();
@@ -1862,7 +2605,150 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(await res.json()).toMatchObject({ ok: true, session: "fake-1" });
   });
 
-  it("passes model and effort through in-browser new sessions", async () => {
+  it("rejects an unavailable vendor server-side with the same startup guidance", async () => {
+    const message =
+      "Claude CLI 2.0.99 is too old. Attend requires 2.1.0 or newer. Update Claude Code, then restart Attend.";
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      vendorAvailability: [
+        {
+          vendor: "claude",
+          available: false,
+          chat: true,
+          version: "2.0.99",
+          minimumVersion: "2.1.0",
+          issue: "version_too_old",
+          message,
+        },
+      ],
+    });
+
+    const res = await app.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "must not reach the fake driver" }),
+    });
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      ok: false,
+      code: "vendor_unavailable",
+      vendor: "claude",
+      error: message,
+      retryable: false,
+      version: "2.0.99",
+      minimumVersion: "2.1.0",
+    });
+    expect(queryCalls).toEqual([]);
+    expect(await (await app.request("/")).text()).toContain(message);
+  });
+
+  it("starts new Claude and Codex sessions with their opening message as a Goal", async () => {
+    const claude = new FakeCodexDriver("claude");
+    const claudeApp = appWithCodexSpy(claude).app;
+    const claudeResponse = await claudeApp.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "verify the Claude opener", goal: true }),
+    });
+    expect(claudeResponse.status).toBe(200);
+    expect(await claudeResponse.json()).toMatchObject({
+      ok: true,
+      goal: { objective: "verify the Claude opener", vendor: "claude", status: "active" },
+    });
+    expect(claude.starts[0]).toMatchObject({ firstText: "/goal verify the Claude opener" });
+
+    const { app: codexApp, codex } = appWithCodexSpy();
+    const codexResponse = await codexApp.request(`/chat/new?cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "verify the Codex opener", goal: true }),
+    });
+    expect(codexResponse.status).toBe(200);
+    expect(await codexResponse.json()).toMatchObject({
+      ok: true,
+      goal: { objective: "verify the Codex opener", status: "active" },
+    });
+    expect(codex.starts[0]).not.toHaveProperty("firstText");
+    expect(codex.goalCalls[0]).toEqual({ action: "set", sessionId: "cx-1" });
+    expect(codex.sends).toContainEqual({
+      sessionId: "cx-1",
+      turn: { text: "verify the Codex opener", attachments: [] },
+    });
+  });
+
+  it("rejects an empty or unsupported opening Goal", async () => {
+    const { app } = appWithCodexSpy();
+    const empty = await app.request(`/chat/new?cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "", goal: true }),
+    });
+    expect(empty.status).toBe(400);
+    expect(await empty.json()).toMatchObject({ error: "Goal requires an objective" });
+
+    const cursor = await app.request(`/chat/new?cwd=${tmp}&vendor=cursor`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "unsupported objective", goal: true }),
+    });
+    expect(cursor.status).toBe(400);
+    expect(await cursor.json()).toMatchObject({ error: "Cursor does not support Goal" });
+  });
+
+  it("records a successful in-browser new session as the most recent directory", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-chat-mru-"));
+    const first = path.join(root, "first");
+    const second = path.join(root, "second");
+    fs.mkdirSync(first);
+    fs.mkdirSync(second);
+    try {
+      const { app } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const created = await app.request(
+        `/chat/new?cwd=${encodeURIComponent(second)}&vendor=claude`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "hello" }),
+        },
+      );
+      expect(created.status).toBe(200);
+
+      const suggested = await app.request(`/dirs/suggest?q=${encodeURIComponent(root)}`);
+      const body = (await suggested.json()) as {
+        dirs: Array<{ path: string; source: string }>;
+      };
+      expect(body.dirs[0]).toEqual({ path: second, source: "recent" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns an actionable 401 when a new Claude session needs login", async () => {
+    const authFailure = (() => {
+      throw new Error("Failed to authenticate: OAuth session expired and could not be refreshed");
+    }) as unknown as QueryFn;
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      engine: new ChatEngine(authFailure),
+    });
+
+    const res = await app.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hello" }),
+    });
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({
+      ok: false,
+      code: "claude_auth_required",
+      error: "Claude sign-in is required. Run `claude auth login`, then retry.",
+      command: "claude auth login",
+      vendor: "claude",
+      retryable: false,
+    });
+  });
+
+  it("passes model, effort, and speed through in-browser new sessions", async () => {
     const { app } = appWithSpy();
     const res = await app.request(`/chat/new?cwd=${tmp}`, {
       method: "POST",
@@ -1871,16 +2757,162 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         text: "hello",
         model: "vendor-model",
         effort: "future-effort",
+        speed: "fast",
       }),
     });
     expect(res.status).toBe(200);
     expect(queryCalls[0]?.options).toMatchObject({
       model: "vendor-model",
       effort: "future-effort",
+      settings: { fastMode: true },
     });
   });
 
-  it("passes model and effort through in-browser fork sessions", async () => {
+  it("persists a session configuration, displays it after restart, and reapplies it cold", async () => {
+    const first = appWithSpy();
+    const created = await first.app.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "remember this tuple",
+        model: "claude-opus",
+        effort: "xhigh",
+        speed: "fast",
+      }),
+    });
+    expect(created.status).toBe(200);
+    expect(await created.json()).toMatchObject({ session: "fake-1" });
+    expect(
+      readStateDocument<{
+        sessionRunConfigs?: Record<string, { model?: string; effort?: string; speed?: string }>;
+      }>(first.config.workEvents, "ui-state").sessionRunConfigs?.["claude:fake-1"],
+    ).toMatchObject({ model: "claude-opus", effort: "xhigh", speed: "fast" });
+
+    const transcriptDir = path.join(first.config.claudeProjects, "project");
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(transcriptDir, "fake-1.jsonl"),
+      JSON.stringify({
+        type: "user",
+        sessionId: "fake-1",
+        cwd: os.tmpdir(),
+        timestamp: new Date().toISOString(),
+        message: { content: "remember this tuple" },
+      }),
+    );
+
+    const restarted = appWithSpy(first.config);
+    const page = await (await restarted.app.request("/")).text();
+    const embedded = /window\.__SESSIONS__ = (\[[\s\S]*?\]);/.exec(page);
+    const sessions = JSON.parse(embedded?.[1] ?? "[]") as Array<Record<string, unknown>>;
+    expect(sessions.find((session) => session.sessionId === "fake-1")).toMatchObject({
+      model: "claude-opus",
+      effort: "xhigh",
+      speed: "fast",
+    });
+
+    queryCalls.length = 0;
+    const sent = await restarted.app.request(`/chat/send?session=fake-1&cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "continue after restart" }),
+    });
+    expect(sent.status).toBe(200);
+    expect(queryCalls[0]?.options).toMatchObject({
+      resume: "fake-1",
+      model: "claude-opus",
+      effort: "xhigh",
+      settings: { fastMode: true },
+    });
+  });
+
+  it("resolves Cursor selections through its exact configuration matrix", async () => {
+    const cursor = new FakeCodexDriver("cursor");
+    const cursorModelCatalog = () => ({
+      models: [
+        {
+          value: "gpt-5.3-codex",
+          label: "Codex 5.3",
+          efforts: ["medium", "high"],
+          defaultEffort: "medium",
+          speeds: ["false", "true"],
+          defaultSpeed: "false",
+          configurations: [
+            {
+              value: "gpt-5.3-codex[reasoning=medium,fast=false]",
+              effort: "medium",
+              speed: "false",
+            },
+            {
+              value: "gpt-5.3-codex[reasoning=high,fast=true]",
+              effort: "high",
+              speed: "true",
+            },
+          ],
+        },
+      ],
+      defaults: { model: "gpt-5.3-codex", effort: "medium", speed: "false" },
+      warning: null,
+    });
+    const { app, config } = appWithSpy(resolveConfig({ positionals: [] }), {
+      cursor,
+      cursorModelCatalog,
+    });
+
+    const valid = await app.request(`/chat/new?cwd=${tmp}&vendor=cursor`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "hello",
+        model: "gpt-5.3-codex",
+        effort: "high",
+        speed: "true",
+      }),
+    });
+    expect(valid.status).toBe(200);
+    expect(cursor.starts[0]).toMatchObject({
+      model: "gpt-5.3-codex[reasoning=high,fast=true]",
+    });
+    expect(cursor.starts[0]?.effort).toBeUndefined();
+    expect(cursor.starts[0]?.speed).toBeUndefined();
+    expect(
+      readStateDocument<{
+        sessionRunConfigs?: Record<string, { model?: string; effort?: string; speed?: string }>;
+      }>(config.workEvents, "ui-state").sessionRunConfigs?.["cursor:cx-1"],
+    ).toMatchObject({ model: "gpt-5.3-codex", effort: "high", speed: "true" });
+
+    const invalid = await app.request(`/chat/new?cwd=${tmp}&vendor=cursor`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "hello",
+        model: "gpt-5.3-codex",
+        effort: "medium",
+        speed: "true",
+      }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(cursor.starts).toHaveLength(1);
+
+    const resumedCursor = new FakeCodexDriver("cursor");
+    vi.spyOn(resumedCursor, "get").mockReturnValue(undefined);
+    const restarted = appWithSpy(config, { cursor: resumedCursor, cursorModelCatalog });
+    const resumed = await restarted.app.request(
+      `/chat/send?session=cx-1&cwd=${tmp}&vendor=cursor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "continue after restart" }),
+      },
+    );
+    expect(resumed.status).toBe(200);
+    expect(resumedCursor.starts[0]).toMatchObject({
+      resume: "cx-1",
+      model: "gpt-5.3-codex[reasoning=high,fast=true]",
+    });
+  });
+
+  it("passes model, effort, and speed through in-browser fork sessions", async () => {
     const { app } = appWithSpy();
     const res = await app.request(`/chat/fork?session=abc&cwd=${tmp}`, {
       method: "POST",
@@ -1889,6 +2921,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         text: "try another approach",
         model: "sonnet",
         effort: "xhigh",
+        speed: "fast",
         clientSessionId: "branch-ui-claude",
       }),
     });
@@ -1899,6 +2932,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       forkSession: true,
       model: "sonnet",
       effort: "xhigh",
+      settings: { fastMode: true },
     });
   });
 
@@ -1937,7 +2971,118 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(codex.starts[0]?.firstText).toContain("Attend fork context:");
   });
 
-  it("passes model and effort through same-session configured sends", async () => {
+  it("inherits run config, notes, and todos into a fork but NOT the parent's Goal", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    const note = { id: "note-1", text: "Keep context", createdAt: 1, updatedAt: 1 };
+    const todo = {
+      id: "todo-1",
+      text: "Verify child",
+      createdAt: 1,
+      updatedAt: 1,
+      completed: false,
+    };
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionRunConfigs: {
+          "codex:parent-1": {
+            model: "gpt-parent-fork",
+            effort: "xhigh",
+            speed: "priority",
+            updatedAt: 1,
+          },
+        },
+        sessionNotes: { "parent-1": [note] },
+        sessionTodos: { "parent-1": [todo] },
+        sessionGoals: {
+          "parent-1": {
+            objective: "Ship the parent task",
+            vendor: "codex",
+            status: "active",
+            updatedAt: 1,
+          },
+        },
+      }),
+    });
+    const res = await app.request(`/chat/fork?session=parent-1&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "continue in child",
+        parentVendor: "codex",
+        clientSessionId: "branch-with-context",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(codex.starts[0]).toMatchObject({
+      resume: "parent-1",
+      forkSession: true,
+      model: "gpt-parent-fork",
+      effort: "xhigh",
+      speed: "priority",
+    });
+    // The fork's opening turn is its own plain message — never the parent's Goal.
+    expect(codex.starts[0]?.firstText).toBe("continue in child");
+    const composerText = readStateDocument<{
+      sessionNotes?: Record<string, unknown[]>;
+      sessionTodos?: Record<string, unknown[]>;
+    }>(config.workEvents, "composer-text");
+    const state = readStateDocument<{
+      forkParents?: Record<string, string>;
+      sessionGoals?: Record<string, { objective?: string; vendor?: string; status?: string }>;
+      sessionRunConfigs?: Record<string, { model?: string; effort?: string; speed?: string }>;
+    }>(config.workEvents, "ui-state");
+    expect(composerText.sessionNotes?.["cx-1"]).toEqual([note]);
+    expect(composerText.sessionTodos?.["cx-1"]).toEqual([todo]);
+    expect(state.forkParents?.["cx-1"]).toBe("parent-1");
+    // The parent's Goal is NOT inherited: no native setGoal, no child Goal mirror.
+    expect(codex.goalCalls.some((call) => call.action === "set")).toBe(false);
+    expect(state.sessionGoals?.["cx-1"]).toBeUndefined();
+    expect(state.sessionRunConfigs?.["codex:cx-1"]).toMatchObject({
+      model: "gpt-parent-fork",
+      effort: "xhigh",
+      speed: "priority",
+    });
+  });
+
+  it("makes the fork's own opening message the Goal when armed", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    const res = await app.request(`/chat/fork?session=parent-1&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "drive the child objective",
+        parentVendor: "codex",
+        clientSessionId: "branch-goal",
+        goal: true,
+      }),
+    });
+    expect(res.status).toBe(200);
+    // Codex goal fork: fork the thread with no opening turn, then setGoal + send it.
+    expect(codex.starts[0]).toMatchObject({ resume: "parent-1", forkSession: true });
+    expect(codex.starts[0]?.firstText).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(codex.goalCalls).toContainEqual({ action: "set", sessionId: "cx-1" }),
+    );
+    expect(codex.sends).toContainEqual({
+      sessionId: "cx-1",
+      turn: { text: "drive the child objective", attachments: [] },
+    });
+    const body = (await res.json()) as { goal?: { objective?: string; status?: string } };
+    expect(body.goal).toMatchObject({ objective: "drive the child objective", status: "active" });
+    const state = readStateDocument<{
+      sessionGoals?: Record<string, { objective?: string; vendor?: string; status?: string }>;
+    }>(config.workEvents, "ui-state");
+    expect(state.sessionGoals?.["cx-1"]).toMatchObject({
+      objective: "drive the child objective",
+      vendor: "codex",
+      status: "active",
+    });
+  });
+
+  it("passes model, effort, and speed through same-session configured sends", async () => {
     const { app } = appWithSpy();
     const res = await app.request(`/chat/send?session=abc&cwd=${tmp}`, {
       method: "POST",
@@ -1947,6 +3092,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         runConfig: true,
         model: "opus",
         effort: "high",
+        speed: "fast",
       }),
     });
     expect(res.status).toBe(200);
@@ -1955,6 +3101,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       resume: "abc",
       model: "opus",
       effort: "high",
+      settings: { fastMode: true },
     });
   });
 
@@ -1980,6 +3127,73 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(codex.sends).toHaveLength(0);
   });
 
+  it("sets and clears a native Codex Goal from the send toggle", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const res = await app.request(`/chat/send?session=cx-goal&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "ship a verified fix", goal: true }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      goal: { objective: "ship a verified fix", status: "active" },
+    });
+    expect(codex.goalCalls[0]).toEqual({ action: "set", sessionId: "cx-goal" });
+    expect(codex.sends).toContainEqual({
+      sessionId: "cx-goal",
+      turn: { text: "ship a verified fix", attachments: [] },
+    });
+
+    const current = await app.request("/chat/goal?session=cx-goal&vendor=codex");
+    expect(await current.json()).toMatchObject({
+      ok: true,
+      supported: true,
+      goal: { objective: "ship a verified fix", status: "active" },
+    });
+    const cleared = await app.request("/chat/goal/clear?session=cx-goal&vendor=codex", {
+      method: "POST",
+    });
+    expect(await cleared.json()).toEqual({ ok: true, goal: null });
+    expect(codex.goals.has("cx-goal")).toBe(false);
+  });
+
+  it("bridges the Goal toggle to Claude /goal and rejects Cursor", async () => {
+    const claude = new FakeCodexDriver("claude");
+    const { app } = appWithCodexSpy(claude);
+    const claudeResponse = await app.request(
+      `/chat/send?session=cl-goal&cwd=${tmp}&vendor=claude`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "finish the migration", goal: true }),
+      },
+    );
+    expect(await claudeResponse.json()).toMatchObject({
+      ok: true,
+      goal: { objective: "finish the migration", vendor: "claude", status: "active" },
+    });
+    expect(claude.sends).toContainEqual({
+      sessionId: "cl-goal",
+      turn: { text: "/goal finish the migration", attachments: [] },
+    });
+
+    const cursorResponse = await app.request(
+      `/chat/send?session=cu-goal&cwd=${tmp}&vendor=cursor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "finish the migration", goal: true }),
+      },
+    );
+    expect(cursorResponse.status).toBe(400);
+    expect(await cursorResponse.json()).toMatchObject({
+      ok: false,
+      error: "Cursor does not support Goal",
+    });
+  });
+
   it("persists the first in-browser turn lifecycle with its true start time", async () => {
     const { app, workEvents } = appWithSpy();
     const res = await app.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
@@ -1989,10 +3203,15 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     });
     expect(res.status).toBe(200);
     const sessionId = ((await res.json()) as { session: string }).session;
-    const stored = JSON.parse(fs.readFileSync(workEvents, "utf-8")) as {
-      events: Array<{ kind: string; at: number; sessionId: string }>;
-    };
-    const sessionEvents = stored.events.filter((event) => event.sessionId === sessionId);
+    let sessionEvents: ReturnType<WorkEventStore["list"]> = [];
+    await vi.waitFor(() => {
+      sessionEvents = new WorkEventStore(workEvents)
+        .list()
+        .filter((event) => event.sessionId === sessionId);
+      expect(sessionEvents.map((event) => event.kind)).toEqual(
+        expect.arrayContaining(["user_prompt", "turn_started", "turn_finished"]),
+      );
+    });
     expect(sessionEvents.map((event) => event.kind)).toEqual(
       expect.arrayContaining(["user_prompt", "turn_started", "turn_finished"]),
     );
@@ -2042,6 +3261,28 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(afterTool.lastAssistantAt["cx-live-output"]).toBeGreaterThanOrEqual(beforeTool);
   });
 
+  it("persists provider run-configuration events without letting observations replace them", () => {
+    const { codex, config } = appWithCodexSpy();
+    codex.emitEvent("cx-config", {
+      kind: "run_config",
+      source: "provider",
+      model: "gpt-provider",
+      effort: "xhigh",
+    });
+    codex.emitEvent("cx-config", {
+      kind: "run_config",
+      source: "provider-observed",
+      model: "routed-display-name",
+      speed: "priority",
+    });
+
+    expect(
+      readStateDocument<{
+        sessionRunConfigs?: Record<string, { model?: string; effort?: string; speed?: string }>;
+      }>(config.workEvents, "ui-state").sessionRunConfigs?.["codex:cx-config"],
+    ).toMatchObject({ model: "gpt-provider", effort: "xhigh", speed: "priority" });
+  });
+
   it("clears ETA and state pins at the next turn start but keeps priority", async () => {
     const { app, codex, config } = appWithCodexSpy();
     await app.request("/session/override?session=cx-turn", {
@@ -2052,7 +3293,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
 
     codex.emitEvent("cx-turn", { kind: "user_turn_started", text: "continue" });
 
-    expect(JSON.parse(fs.readFileSync(config.overrides, "utf-8"))).toEqual({
+    expect(readStateDocument(config.workEvents, "overrides")).toEqual({
       "cx-turn": { priority: 8 },
     });
   });
@@ -2084,6 +3325,124 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(await remaining.json()).toMatchObject({ ok: true, items: [], parked: false });
   });
 
+  it("snapshots Pin context when enqueuing so a later unpin cannot change the turn", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "cx-pin-queue", startedAt: Date.now() }];
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pins: {
+          "attend.pins.v1:cx-pin-queue": [
+            { key: "assistant:4", role: "codex", text: "queued Pin snapshot", pinnedAt: 1 },
+          ],
+        },
+      }),
+    });
+    const queued = await app.request(
+      `/chat/queue?session=cx-pin-queue&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: "use it later",
+          references: [{ kind: "pin", pinKey: "assistant:4", pinSessionId: "cx-pin-queue" }],
+        }),
+      },
+    );
+    const queuedBody = (await queued.json()) as Record<string, unknown>;
+    expect(queuedBody).toMatchObject({
+      ok: true,
+      items: [{ references: [{ kind: "pin", pinKey: "assistant:4" }] }],
+    });
+    expect(JSON.stringify(queuedBody)).not.toContain("referenceContext");
+
+    const queuedItemId = (queuedBody.item as { id: string }).id;
+    const edited = await app.request(
+      `/chat/queue?session=cx-pin-queue&item=${encodeURIComponent(queuedItemId)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "use it after editing" }),
+      },
+    );
+    const editedBody = (await edited.json()) as Record<string, unknown>;
+    expect(editedBody).toMatchObject({
+      ok: true,
+      item: {
+        text: "use it after editing",
+        references: [{ kind: "pin", pinKey: "assistant:4" }],
+      },
+    });
+    expect(JSON.stringify(editedBody)).not.toContain("referenceContext");
+
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pins: { "attend.pins.v1:cx-pin-queue": null } }),
+    });
+    codex.finishTurn("cx-pin-queue");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(codex.sends.at(-1)?.turn.text).toContain(
+      "Pinned assistant response:\nqueued Pin snapshot",
+    );
+  });
+
+  it("keeps a mid-turn Codex Goal queued until the next turn starts", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
+
+    const queued = await app.request(
+      `/chat/queue?session=cx-1&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "finish the queued objective", goal: true }),
+      },
+    );
+
+    expect(await queued.json()).toMatchObject({
+      ok: true,
+      items: [{ text: "finish the queued objective", goal: true }],
+    });
+    expect(codex.goalCalls).toEqual([]);
+    expect(codex.sends).toEqual([]);
+
+    codex.finishTurn("cx-1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(codex.goalCalls[0]).toEqual({ action: "set", sessionId: "cx-1" });
+    expect(codex.sends).toContainEqual({
+      sessionId: "cx-1",
+      turn: { text: "finish the queued objective", attachments: [] },
+    });
+  });
+
+  it("dispatches a queued Claude Goal through /goal after the active turn", async () => {
+    const claude = new FakeCodexDriver("claude");
+    const { app } = appWithCodexSpy(claude);
+    claude.active = [{ sessionId: "cl-1", startedAt: Date.now() }];
+
+    await app.request(
+      `/chat/queue?session=cl-1&cwd=${encodeURIComponent(os.tmpdir())}&vendor=claude`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "finish after this response", goal: true }),
+      },
+    );
+    expect(claude.sends).toEqual([]);
+
+    claude.finishTurn("cl-1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(claude.sends).toContainEqual({
+      sessionId: "cl-1",
+      turn: { text: "/goal finish after this response", attachments: [] },
+    });
+  });
+
   it("parks the server queue on Stop until a queued item is explicitly sent", async () => {
     const { app, codex } = appWithCodexSpy();
     codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
@@ -2110,6 +3469,77 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(codex.sends[0]).toMatchObject({ sessionId: "cx-1", turn: { text: "keep parked" } });
   });
 
+  it("consumes a queued message as a fork opener instead of sending it to the parent", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "cx-parent", startedAt: Date.now() }];
+    const queued = await app.request(
+      `/chat/queue?session=cx-parent&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "branch this queued idea" }),
+      },
+    );
+    const queuedBody = (await queued.json()) as { item: { id: string } };
+
+    const forked = await app.request(
+      `/chat/queue/fork?session=cx-parent&item=${encodeURIComponent(queuedBody.item.id)}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "stale client copy", parentVendor: "codex" }),
+      },
+    );
+
+    expect(forked.status).toBe(200);
+    expect(await forked.json()).toMatchObject({ ok: true, session: "cx-1" });
+    expect(codex.starts.at(-1)).toMatchObject({
+      resume: "cx-parent",
+      forkSession: true,
+      firstText: "branch this queued idea",
+    });
+    expect(codex.sends).toEqual([]);
+    expect(await (await app.request("/chat/queue?session=cx-parent")).json()).toMatchObject({
+      ok: true,
+      items: [],
+    });
+  });
+
+  it("restores a queued message in place when its fork cannot start", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "cx-parent", startedAt: Date.now() }];
+    const enqueue = async (text: string) => {
+      const response = await app.request(
+        `/chat/queue?session=cx-parent&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      return (await response.json()) as { item: { id: string } };
+    };
+    await enqueue("first");
+    const second = await enqueue("restore me");
+    await enqueue("third");
+
+    const failed = await app.request(
+      `/chat/queue/fork?session=cx-parent&item=${encodeURIComponent(second.item.id)}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clientSessionId: "invalid id with spaces", parentVendor: "codex" }),
+      },
+    );
+
+    expect(failed.status).toBe(400);
+    expect(codex.starts).toEqual([]);
+    expect(await (await app.request("/chat/queue?session=cx-parent")).json()).toMatchObject({
+      ok: true,
+      items: [{ text: "first" }, { text: "restore me" }, { text: "third" }],
+    });
+  });
+
   it("persists inherited tags when forking a session", async () => {
     const { app, config } = appWithCodexSpy();
     const uniq = Math.random().toString(36).slice(2);
@@ -2128,10 +3558,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       }),
     );
     config.claudeProjects = claudeProjects;
-    fs.writeFileSync(
-      config.tags,
-      JSON.stringify({ tags: ["work"], sessions: { "parent-1": ["work"] } }),
-    );
+    new TagStore(config.tags, config.workEvents).setSessionTags("parent-1", ["work"]);
 
     const res = await app.request(
       `/chat/fork?session=parent-1&cwd=${encodeURIComponent(cwd)}&vendor=codex`,
@@ -2143,7 +3570,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     );
 
     expect(res.status).toBe(200);
-    const persisted = JSON.parse(fs.readFileSync(config.tags, "utf-8")) as {
+    const persisted = readStateDocument(config.workEvents, "tags") as {
       sessions: Record<string, string[]>;
     };
     expect(persisted.sessions["cx-1"]).toEqual(["work"]);
@@ -2155,6 +3582,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        clientSessionId: "new-ui-codex",
         attachments: [
           { kind: "text", name: "notes.md", text: "# start here" },
           { kind: "image", name: "ui.png", mediaType: "image/png", data: "abcd" },
@@ -2162,8 +3590,10 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       }),
     });
     expect(res.status).toBe(200);
+    expect(await res.clone().json()).toMatchObject({ clientSessionId: "new-ui-codex" });
     expect(codex.starts[0]).toMatchObject({
       cwd: os.tmpdir(),
+      clientSessionId: "new-ui-codex",
       firstText: "",
       firstAttachments: [
         { kind: "text", name: "notes.md", text: "# start here" },
@@ -2306,7 +3736,12 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "branch with Codex", model: "gpt-5.5", effort: "high" }),
+        body: JSON.stringify({
+          text: "branch with Codex",
+          model: "gpt-5.5",
+          effort: "high",
+          speed: "priority",
+        }),
       },
     );
 
@@ -2320,6 +3755,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       cwd,
       model: "gpt-5.5",
       effort: "high",
+      speed: "priority",
     });
     expect(codex.starts[0]?.resume).toBeUndefined();
     expect(codex.starts[0]?.forkSession).toBeUndefined();
@@ -2453,7 +3889,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
   it("fork branches with a first message and returns the new session id", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-fork-tree-"));
     const config = resolveConfig({ positionals: [root] });
-    const { app } = appWithSpy(config);
+    const { app, config: effectiveConfig } = appWithSpy(config);
     const res = await app.request(`/chat/fork?session=abc&cwd=${encodeURIComponent(root)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2463,9 +3899,10 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(await res.json()).toMatchObject({
       ok: true,
       session: "fake-1",
+      generating: true,
       parentSessionId: "abc",
     });
-    expect(JSON.parse(fs.readFileSync(config.uiState, "utf-8"))).toMatchObject({
+    expect(readStateDocument(effectiveConfig.workEvents, "ui-state")).toMatchObject({
       forkParents: { "fake-1": "abc" },
     });
     fs.rmSync(root, { recursive: true, force: true });
@@ -2524,9 +3961,104 @@ describe("startServer port rollover", () => {
     cleanup.push(() => taken.close());
 
     const config = resolveConfig({ positionals: [], port: String(takenPort), host: "127.0.0.1" });
-    const running = await startServer(config);
+    const fixture = appWithSpy(config);
+    const running = await startServer(fixture.config, 10, fixture.deps);
     cleanup.push(() => running.close());
 
     expect(running.port).toBeGreaterThan(takenPort);
+  });
+
+  it("refuses a non-loopback bind without a passphrase", async () => {
+    const config = resolveConfig({ positionals: [], host: "0.0.0.0" });
+    await expect(startServer(config)).rejects.toThrow("without --e2ee-passphrase");
+  });
+
+  it("persists active turns as stopped before shutting their drivers down", async () => {
+    const listener = net.createServer();
+    const port: number = await new Promise((resolve) => {
+      listener.listen(0, "127.0.0.1", () => resolve((listener.address() as net.AddressInfo).port));
+    });
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+
+    const codex = new FakeCodexDriver();
+    codex.active = [{ sessionId: "cx-shutdown", startedAt: Date.now() - 1_000 }];
+    const fixture = appWithSpy(
+      resolveConfig({ positionals: [], port: String(port), host: "127.0.0.1" }),
+      { codex },
+    );
+    const running = await startServer(fixture.config, 1, fixture.deps);
+    running.close();
+
+    expect(new WorkEventStore(fixture.config.workEvents).list()).toContainEqual(
+      expect.objectContaining({
+        kind: "turn_finished",
+        sessionId: "cx-shutdown",
+        vendor: "codex",
+        source: "live",
+        ok: false,
+      }),
+    );
+  });
+});
+
+describe("live-stream daemon analysis broadcast", () => {
+  it("pushes the cached daemon verdict over the live bus when a turn ends", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const verdict = {
+      analysis: {
+        brief: "codex 排查付费墙",
+        state: "continue_ready" as const,
+        priority: 5,
+        etaMin: 3,
+        reason: "下一步明显",
+        nextStep: "继续,然后跑测试",
+      },
+      observedTurns: [],
+      labels: [],
+    };
+    const fakeAnalyzer: SessionAnalyzer = {
+      vendor: "codex",
+      spawn: () => Promise.resolve("daemon-cx-1"),
+      analyze: () => Promise.resolve(verdict),
+    };
+    const config = resolveConfig({ positionals: [] });
+    const orchestrator = new DaemonOrchestrator(
+      new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
+      new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)),
+      [fakeAnalyzer],
+    );
+    const codex = new FakeCodexDriver();
+    codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
+    const app = createApp(config, {
+      launcher: () => "noop",
+      engine: new ChatEngine(fakeQuery),
+      codex,
+      orchestrator,
+    });
+    await orchestrator.ensureDaemon("cx-1", "codex", os.tmpdir());
+
+    const res = await app.request("/chat/live-stream");
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    codex.finishTurn("cx-1");
+
+    let buf = "";
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && !buf.includes('"kind":"analysis"')) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<{ done: true; value?: Uint8Array }>((r) =>
+          setTimeout(() => r({ done: true }), 250),
+        ),
+      ]);
+      if (chunk.value) buf += decoder.decode(chunk.value, { stream: true });
+    }
+    await reader.cancel().catch(() => {});
+
+    // The verdict reaches the console via SSE (not a fixed poll), brief + nextStep intact.
+    expect(buf).toContain('"kind":"analysis"');
+    expect(buf).toContain("codex 排查付费墙");
+    expect(buf).toContain("继续,然后跑测试");
+    expect(orchestrator.analysis("cx-1")?.brief).toBe("codex 排查付费墙");
   });
 });

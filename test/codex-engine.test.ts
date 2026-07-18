@@ -183,7 +183,7 @@ describe("CodexEngine", () => {
     expect(calls[1]).toMatchObject({ resume: "cx-queue", prompt: "queued" });
   });
 
-  it("preserves model and effort across the first turn and follow-up turns", async () => {
+  it("preserves model, effort, and speed across the first turn and follow-up turns", async () => {
     const { fn, calls } = fakeExec([turn("cx-1", "one"), turn("cx-1", "two")]);
     const engine = new CodexEngine(fn);
     const id = await engine.start({
@@ -191,12 +191,21 @@ describe("CodexEngine", () => {
       firstText: "first",
       model: "gpt-5.2-codex",
       effort: "high",
+      speed: "priority",
     });
     await new Promise((r) => setTimeout(r, 20));
     expect(engine.send(id, { text: "second" })).toBe(true);
     await new Promise((r) => setTimeout(r, 20));
-    expect(calls[0]).toMatchObject({ model: "gpt-5.2-codex", effort: "high" });
-    expect(calls[1]).toMatchObject({ model: "gpt-5.2-codex", effort: "high" });
+    expect(calls[0]).toMatchObject({
+      model: "gpt-5.2-codex",
+      effort: "high",
+      speed: "priority",
+    });
+    expect(calls[1]).toMatchObject({
+      model: "gpt-5.2-codex",
+      effort: "high",
+      speed: "priority",
+    });
   });
 
   it("passes high reasoning levels (max/ultra) straight through — no xhigh downgrade", async () => {
@@ -256,7 +265,7 @@ describe("CodexEngine", () => {
     expect(engine.send(id, { text: "again" })).toBe(false); // turn still active
   });
 
-  it("shutdown leaves the in-flight Codex exec running", async () => {
+  it("shutdown kills the in-flight Codex exec", async () => {
     let killed = false;
     const fn: CodexExecFn = () => ({
       events: (async function* () {
@@ -273,8 +282,7 @@ describe("CodexEngine", () => {
 
     engine.shutdown();
 
-    expect(killed).toBe(false);
-    expect(engine.activeSessions()).toContain(id);
+    expect(killed).toBe(true);
   });
 
   it("fires onTurnEnd with the session id when a turn completes", async () => {
@@ -309,7 +317,7 @@ describe("CodexEngine", () => {
     expect(await engine.interrupt("nope")).toBe(false);
   });
 
-  it("interrupt clears active state even if killing the Codex process throws", async () => {
+  it("interrupt reports failure and preserves active state if killing throws", async () => {
     const fn: CodexExecFn = () => ({
       events: (async function* () {
         yield { type: "thread.started", thread_id: "cx-kill-throws" } as CodexEvent;
@@ -324,10 +332,10 @@ describe("CodexEngine", () => {
     const got: UiEvent[] = [];
     engine.subscribe(id, (ev) => got.push(ev));
 
-    expect(await engine.interrupt(id)).toBe(true);
+    expect(await engine.interrupt(id)).toBe(false);
 
-    expect(engine.activeSessions()).toHaveLength(0);
-    expect(got).toContainEqual({ kind: "result", ok: false, text: "interrupted" });
+    expect(engine.activeSessions()).toContain(id);
+    expect(got).not.toContainEqual({ kind: "result", ok: false, text: "interrupted" });
   });
 
   it("drops late events from a Codex process after interrupt", async () => {

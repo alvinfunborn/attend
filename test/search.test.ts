@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { parseSearchQuery } from "../src/chat/search-query.js";
 import { searchSessions } from "../src/chat/search.js";
 import type { RawSession } from "../src/core/types.js";
 
@@ -24,6 +25,26 @@ function session(overrides: Partial<RawSession>): RawSession {
 }
 
 describe("searchSessions", () => {
+  it("supports implicit AND, phrases, exclusions, and CloudWatch-style regex", () => {
+    const q = parseSearchQuery('cursor "cold start" -indexing %session\\s+id%');
+    expect(q.test("Cursor had a cold start and then printed session id")).toBe(true);
+    expect(q.test("Cursor had a cold start while indexing, then printed session id")).toBe(false);
+    expect(q.test("Cursor start was cold and then printed session id")).toBe(false);
+  });
+
+  it("supports OR alternatives with AND precedence inside each branch", () => {
+    const q = parseSearchQuery('cursor cold OR codex "fork history"');
+    expect(q.test("cursor had a cold startup")).toBe(true);
+    expect(q.test("codex restored fork history")).toBe(true);
+    expect(q.test("cursor only")).toBe(false);
+    expect(() => parseSearchQuery("cursor OR")).toThrow("OR must precede");
+  });
+
+  it("rejects malformed and unsafe regex search syntax", () => {
+    expect(() => parseSearchQuery('"unfinished')).toThrow("unclosed quote");
+    expect(() => parseSearchQuery("%([a]+)+%")).toThrow("groups and backreferences");
+  });
+
   it("indexes Claude text messages, not assistant tool calls or tool results", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-search-"));
     const file = path.join(dir, "claude.jsonl");
@@ -97,6 +118,27 @@ describe("searchSessions", () => {
       expect(searchSessions(sessions, "release notes")).toHaveLength(1);
       expect(searchSessions(sessions, "hidden-codex-command")).toEqual([]);
       expect(searchSessions(sessions, "hidden-codex-output")).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("matches AND terms across separate visible transcript messages", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-search-and-"));
+    const file = path.join(dir, "claude.jsonl");
+    fs.writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: "user", message: { content: "cursor startup" } }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "cold indexing finished" }] },
+        }),
+      ].join("\n"),
+    );
+    try {
+      expect(searchSessions([session({ path: file })], "cursor cold")).toHaveLength(1);
+      expect(searchSessions([session({ path: file })], "cursor -cold")).toEqual([]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

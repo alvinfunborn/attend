@@ -29,7 +29,7 @@ import { ScanCache } from "./scan-cache.js";
 
 const ACTION_ITEM_TYPES = new Set(["function_call", "local_shell_call", "custom_tool_call"]);
 
-type Payload = ResponseItem & SessionMeta & EventPayload;
+type Payload = ResponseItem & SessionMeta & EventPayload & TurnContext;
 
 interface RolloutLine {
   timestamp?: string;
@@ -61,6 +61,17 @@ interface EventPayload {
   started_at?: number;
   completed_at?: number;
   phase?: string;
+}
+
+interface TurnContext {
+  model?: string;
+  effort?: string;
+  service_tier?: string;
+  serviceTier?: string;
+}
+
+function configValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 interface ActiveTurn {
@@ -207,6 +218,22 @@ export function parseCodexTranscript(file: string, raw: string): RawSession {
       const cwd = item?.cwd ?? obj.cwd;
       if (session.cwd === null && cwd) session.cwd = cwd;
       if (session.sessionId === null && item?.id) session.sessionId = item.id;
+    } else if (kind === "turn_context" && item) {
+      // Each resumed turn can select a different tuple. Keep overwriting with
+      // concrete fields so the final context describes the session's latest run.
+      const model = configValue(item.model);
+      const effort = configValue(item.effort);
+      const speed = configValue(item.service_tier ?? item.serviceTier);
+      if (model || effort || speed) {
+        session.runConfig = {
+          source: "provider",
+          ...(session.runConfig ?? {}),
+          ...(ts !== null ? { updatedAt: ts } : {}),
+          ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
+          ...(speed ? { speed } : {}),
+        };
+      }
     } else if (kind === "event_msg" && item) {
       if (item.type === "task_started") {
         activeTurn = {

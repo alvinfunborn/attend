@@ -11,6 +11,17 @@ function modelQuery(models: ModelInfo[]): { query: Query; close: ReturnType<type
 }
 
 describe("inspectClaudeModels", () => {
+  it("does not fall back to the Agent SDK bundled CLI when no system executable exists", async () => {
+    const settings = vi.fn(async () => ({ effective: {} }));
+
+    await expect(inspectClaudeModels("/tmp", undefined, 30_000, null, settings)).resolves.toEqual({
+      models: [],
+      defaults: { model: "", effort: "", speed: "" },
+      warning: "Claude model discovery requires an installed system Claude CLI.",
+    });
+    expect(settings).not.toHaveBeenCalled();
+  });
+
   it("uses Claude's model IDs and exact per-model effort order", async () => {
     const fake = modelQuery([
       {
@@ -27,6 +38,7 @@ describe("inspectClaudeModels", () => {
         description: "new vendor model",
         supportsEffort: true,
         supportedEffortLevels: ["low", "xhigh"],
+        supportsFastMode: true,
       },
     ] as Array<ModelInfo & { resolvedModel?: string }>);
 
@@ -37,12 +49,21 @@ describe("inspectClaudeModels", () => {
         30_000,
         undefined,
         async () => ({
-          effective: { effortLevel: "high" },
+          effective: { effortLevel: "high", fastMode: true },
         }),
       ),
     ).resolves.toEqual({
-      models: [{ value: "future-model", label: "Future Model", efforts: ["low", "xhigh"] }],
-      defaults: { model: "claude-default-resolved", effort: "high" },
+      models: [
+        {
+          value: "future-model",
+          label: "Future Model",
+          efforts: ["low", "xhigh"],
+          speeds: ["standard", "fast"],
+          defaultSpeed: "standard",
+          speedLabels: { standard: "Standard", fast: "Fast" },
+        },
+      ],
+      defaults: { model: "claude-default-resolved", effort: "high", speed: "fast" },
       warning: null,
     });
     expect(fake.close).toHaveBeenCalledOnce();
@@ -59,7 +80,7 @@ describe("inspectClaudeModels", () => {
 
     await expect(inspectClaudeModels("/tmp", () => fake)).resolves.toEqual({
       models: [],
-      defaults: { model: "", effort: "" },
+      defaults: { model: "", effort: "", speed: "" },
       warning: "Claude model discovery failed; Attend will use Claude's default model.",
     });
     expect(close).toHaveBeenCalledOnce();

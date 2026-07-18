@@ -201,7 +201,17 @@ function modeFor(sessionCount: number): WorkMode | null {
 }
 
 function sampleFor(samples: HourSample[], at: number): HourSample | null {
-  return samples.find((sample) => at >= sample.observedStart && at <= sample.observedEnd) ?? null;
+  let low = 0;
+  let high = samples.length - 1;
+  while (low <= high) {
+    const index = (low + high) >> 1;
+    const sample = samples[index];
+    if (!sample) return null;
+    if (at < sample.observedStart) high = index - 1;
+    else if (at > sample.observedEnd) low = index + 1;
+    else return sample;
+  }
+  return null;
 }
 
 function openWorkState(state: AnalysisState | null): state is AnalysisState {
@@ -430,9 +440,10 @@ export function buildWorkStats(
   const windowStart = rangeStart(now, range);
   const elapsedHours = Math.max((now - windowStart) / HOUR_MS, 1 / 60);
   const samples = hourSamples(windowStart, now);
-  const events = [...(options.events ?? [])].sort(
-    (a, b) => a.at - b.at || a.id.localeCompare(b.id),
-  );
+  const eventFloor = windowStart - OUTCOME_WINDOW_MS;
+  const events = (options.events ?? [])
+    .filter((event) => event.at >= eventFloor && event.at <= now)
+    .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
   const promptEvents = events.filter(
     (event) => event.kind === "user_prompt" && event.at >= windowStart && event.at <= now,
   );
@@ -487,6 +498,31 @@ export function buildWorkStats(
     promptsBySession.set(event.sessionId, list);
   }
 
+  const outcomesBySample = new Map<number, boolean[]>();
+  for (const stateEvent of stateEvents) {
+    const sessionPrompts = promptsBySession.get(stateEvent.sessionId) ?? [];
+    const prompt = lastEventAtOrBefore(sessionPrompts, stateEvent.at);
+    if (!prompt || prompt.at < windowStart || prompt.at > now) continue;
+    const sample = sampleFor(samples, prompt.at);
+    if (!sample) continue;
+    const outcomes = outcomesBySample.get(sample.start) ?? [];
+    if (terminalState(stateEvent.state)) {
+      outcomes.push(true);
+    } else if (
+      stateEvent.state !== "blocked" &&
+      openWorkState(stateEvent.state ?? null) &&
+      prompt.at <= now - OUTCOME_WINDOW_MS
+    ) {
+      outcomes.push(
+        sessionPrompts.some(
+          (candidate) =>
+            candidate.at > stateEvent.at && candidate.at <= stateEvent.at + OUTCOME_WINDOW_MS,
+        ),
+      );
+    }
+    outcomesBySample.set(sample.start, outcomes);
+  }
+
   const modeStats = (["focus", "balanced", "parallel"] as const).map((mode): WorkModeStats => {
     const matchingSamples = comparableSamples.filter(
       (sample) => modeFor(sample.sessionKeys.size) === mode,
@@ -502,26 +538,7 @@ export function buildWorkStats(
       const sample = sampleFor(samples, turn.start);
       return sample ? sampleStarts.has(sample.start) : false;
     });
-    const outcomes: boolean[] = [];
-    for (const stateEvent of stateEvents) {
-      const sessionPrompts = promptsBySession.get(stateEvent.sessionId) ?? [];
-      const prompt = lastEventAtOrBefore(sessionPrompts, stateEvent.at);
-      if (!prompt || prompt.at < windowStart || prompt.at > now) continue;
-      const sample = sampleFor(samples, prompt.at);
-      if (!sample || !sampleStarts.has(sample.start)) continue;
-      if (terminalState(stateEvent.state)) {
-        outcomes.push(true);
-        continue;
-      }
-      if (stateEvent.state === "blocked" || !openWorkState(stateEvent.state ?? null)) continue;
-      if (prompt.at > now - OUTCOME_WINDOW_MS) continue;
-      outcomes.push(
-        sessionPrompts.some(
-          (candidate) =>
-            candidate.at > stateEvent.at && candidate.at <= prompt.at + OUTCOME_WINDOW_MS,
-        ),
-      );
-    }
+    const outcomes = [...sampleStarts].flatMap((start) => outcomesBySample.get(start) ?? []);
     const succeeded = outcomes.filter(Boolean).length;
     return {
       mode,

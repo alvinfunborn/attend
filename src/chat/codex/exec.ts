@@ -37,6 +37,7 @@ function configArgs(req: CodexExecRequest): string[] {
   const args: string[] = [];
   if (req.model) args.push("-c", `model=${quoteConfigString(req.model)}`);
   if (req.effort) args.push("-c", `model_reasoning_effort=${quoteConfigString(req.effort)}`);
+  if (req.speed) args.push("-c", `service_tier=${quoteConfigString(req.speed)}`);
   return args;
 }
 

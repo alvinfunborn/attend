@@ -76,24 +76,40 @@ function textOf(content: unknown): string {
 
 export function visiblePromptText(raw: string): string {
   const text = raw.trim();
+  const command = commandText(text);
+  if (command) return visiblePromptText(command);
+  const pinnedMarker = "Attend pinned context:";
+  const pinnedAtStart = text.startsWith(pinnedMarker);
+  const pinnedAfterLineBreak = text.indexOf(`\n${pinnedMarker}`);
+  const pinnedIdx = pinnedAtStart ? 0 : pinnedAfterLineBreak;
+  let validPinnedIdx = -1;
+  if (pinnedIdx >= 0) {
+    const tail = text.slice(pinnedAtStart ? pinnedIdx : pinnedIdx + 1);
+    if (
+      tail.includes("\nThe user explicitly selected the quoted Pin context below for this turn.") &&
+      tail.includes("\nTool calls, tool inputs, and tool results are intentionally omitted.")
+    ) {
+      validPinnedIdx = pinnedIdx;
+    }
+  }
   const marker = "Attend fork context:";
   const markerAtStart = text.startsWith(marker);
   const markerAfterLineBreak = text.indexOf(`\n${marker}`);
   const idx = markerAtStart ? 0 : markerAfterLineBreak;
-  if (idx < 0) return text;
-
-  const tail = text.slice(markerAtStart ? idx : idx + 1);
-  if (
-    !tail.includes("\nUse the transcript below as prior context") ||
-    !tail.includes("\nTranscript:")
-  ) {
-    return text;
+  if (idx >= 0) {
+    const tail = text.slice(markerAtStart ? idx : idx + 1);
+    const validFork =
+      tail.includes("\nUse the transcript below as prior context") &&
+      tail.includes("\nTranscript:");
+    if (validFork && (validPinnedIdx < 0 || idx <= validPinnedIdx)) {
+      const opening = text.slice(0, idx).trim();
+      const attachmentNote = "\nThe user's opening turn includes ";
+      const noteIdx = opening.indexOf(attachmentNote);
+      return (noteIdx >= 0 ? opening.slice(0, noteIdx) : opening).trim();
+    }
   }
-
-  const opening = text.slice(0, idx).trim();
-  const attachmentNote = "\nThe user's opening turn includes ";
-  const noteIdx = opening.indexOf(attachmentNote);
-  return (noteIdx >= 0 ? opening.slice(0, noteIdx) : opening).trim();
+  if (validPinnedIdx >= 0) return text.slice(0, validPinnedIdx).trim();
+  return text;
 }
 
 function resultText(content: unknown): string {

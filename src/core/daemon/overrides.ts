@@ -1,5 +1,5 @@
-import fs from "node:fs";
-import path from "node:path";
+import { JsonFile, type JsonRepository } from "../json-file.js";
+import { SqliteDocument } from "../state-database.js";
 import type { Pattern } from "../types.js";
 import type { AnalysisState } from "./cache.js";
 
@@ -32,25 +32,16 @@ const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.m
  * without the daemon ever clobbering them.
  */
 export class OverrideStore {
-  private map = new Map<string, Override>();
-  private loaded = false;
+  private readonly data: JsonRepository<Record<string, Override>>;
 
-  constructor(private readonly file: string) {}
-
-  private load(): void {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const obj = JSON.parse(fs.readFileSync(this.file, "utf-8")) as Record<string, Override>;
-      for (const [k, v] of Object.entries(obj)) this.map.set(k, v);
-    } catch {
-      // missing/corrupt — start empty
-    }
+  constructor(file: string, databaseFile?: string) {
+    this.data = databaseFile
+      ? new SqliteDocument(databaseFile, "overrides", file, normalizeOverrides)
+      : new JsonFile(file, normalizeOverrides);
   }
 
   get(sessionId: string): Override | null {
-    this.load();
-    return this.map.get(sessionId) ?? null;
+    return this.data.read()[sessionId] ?? null;
   }
 
   /**
@@ -67,44 +58,37 @@ export class OverrideStore {
       pattern?: Pattern | null;
     },
   ): Override | null {
-    this.load();
-    const next: Override = { ...(this.map.get(sessionId) ?? {}) };
-    if (patch.priority === null) next.priority = undefined;
-    else if (typeof patch.priority === "number" && Number.isFinite(patch.priority))
-      next.priority = clamp(patch.priority, PRIORITY_MIN, PRIORITY_MAX);
-    if (patch.etaMin === null) next.etaMin = undefined;
-    else if (typeof patch.etaMin === "number" && Number.isFinite(patch.etaMin))
-      next.etaMin = clamp(Math.round(patch.etaMin), ETA_MIN, ETA_MAX);
-    if (patch.state === null) next.state = undefined;
-    else if (isAnalysisState(patch.state)) next.state = patch.state;
-    if (patch.pattern === null) next.pattern = undefined;
-    else if (isPattern(patch.pattern)) next.pattern = patch.pattern;
+    return this.data.update((overrides) => {
+      const next: Override = { ...(overrides[sessionId] ?? {}) };
+      if (patch.priority === null) next.priority = undefined;
+      else if (typeof patch.priority === "number" && Number.isFinite(patch.priority))
+        next.priority = clamp(patch.priority, PRIORITY_MIN, PRIORITY_MAX);
+      if (patch.etaMin === null) next.etaMin = undefined;
+      else if (typeof patch.etaMin === "number" && Number.isFinite(patch.etaMin))
+        next.etaMin = clamp(Math.round(patch.etaMin), ETA_MIN, ETA_MAX);
+      if (patch.state === null) next.state = undefined;
+      else if (isAnalysisState(patch.state)) next.state = patch.state;
+      if (patch.pattern === null) next.pattern = undefined;
+      else if (isPattern(patch.pattern)) next.pattern = patch.pattern;
 
-    if (
-      next.priority === undefined &&
-      next.etaMin === undefined &&
-      next.state === undefined &&
-      next.pattern === undefined
-    ) {
-      this.map.delete(sessionId);
-      this.persist();
-      return null;
-    }
-    this.map.set(sessionId, next);
-    this.persist();
-    return next;
+      if (
+        next.priority === undefined &&
+        next.etaMin === undefined &&
+        next.state === undefined &&
+        next.pattern === undefined
+      ) {
+        delete overrides[sessionId];
+        return null;
+      }
+      overrides[sessionId] = next;
+      return next;
+    });
   }
+}
 
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      const obj: Record<string, Override> = {};
-      for (const [k, v] of this.map) obj[k] = v;
-      fs.writeFileSync(this.file, JSON.stringify(obj, null, 2));
-    } catch {
-      // best-effort persistence
-    }
-  }
+function normalizeOverrides(value: unknown): Record<string, Override> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, Override>;
 }
 
 const ANALYSIS_STATES = new Set<AnalysisState>([

@@ -9,54 +9,76 @@ export interface LaunchOpts {
   prompt?: string;
   model?: string;
   effort?: string;
+  speed?: string;
 }
 
-function shellQuote(s: string): string {
-  return `"${s.replace(/"/g, '\\"')}"`;
+export interface LaunchCommand {
+  file: string;
+  args: string[];
 }
 
-/**
- * The vendor CLI command for a launch action, run in a terminal:
- *   resume — continue an existing session   (claude --resume <id> / codex resume <id>)
- *   fork   — branch it into a new session    (claude --resume <id> --fork-session / codex fork <id>)
- *   new    — start a fresh session, optional initial prompt (claude [<prompt>] / codex [<prompt>])
- * All are interactive, so they must run in a real terminal (buildTerminalInvocation).
- */
+const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+const MODEL_OPTION = /^[A-Za-z0-9._:/=,\[\]-]+$/;
+
+/** Build the vendor CLI as argv. User-controlled values never become shell syntax. */
 export function buildCommand(
   action: LaunchAction,
   vendor: LaunchVendor,
   opts: LaunchOpts = {},
-): string {
-  const id = opts.sessionId ?? "";
+): LaunchCommand {
+  const id = opts.sessionId?.trim() ?? "";
+  if (action !== "new" && !SESSION_ID.test(id)) throw new Error("invalid session id");
+
   if (action === "resume") {
-    if (vendor === "claude") return `claude --resume ${id}`;
-    if (vendor === "codex") return `codex resume ${id}`;
-    return `cursor-agent --resume=${id}`;
+    if (vendor === "claude") return { file: "claude", args: ["--resume", id] };
+    if (vendor === "codex") return { file: "codex", args: ["resume", id] };
+    return { file: "cursor-agent", args: [`--resume=${id}`] };
   }
   if (action === "fork") {
-    if (vendor === "claude") return `claude --resume ${id} --fork-session`;
-    if (vendor === "codex") return `codex fork ${id}`;
+    if (vendor === "claude") return { file: "claude", args: ["--resume", id, "--fork-session"] };
+    if (vendor === "codex") return { file: "codex", args: ["fork", id] };
     throw new Error(
       "Cursor supports interactive /fork, but its headless CLI does not expose a fork command",
     );
   }
-  // new
+
+  const model = optionValue("model", opts.model);
+  const effort = optionValue("effort", opts.effort);
+  const speed = optionValue("speed", opts.speed);
+  const prompt = opts.prompt?.trim();
   if (vendor === "claude") {
-    const modelArg = opts.model?.trim() ? ` --model ${shellQuote(opts.model.trim())}` : "";
-    const effortArg = opts.effort?.trim() ? ` --effort ${shellQuote(opts.effort.trim())}` : "";
-    const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
-    return `claude${modelArg}${effortArg}${promptArg}`;
+    return {
+      file: "claude",
+      args: [
+        ...(model ? ["--model", model] : []),
+        ...(effort ? ["--effort", effort] : []),
+        ...(speed ? ["--settings", JSON.stringify({ fastMode: speed === "fast" })] : []),
+        ...(prompt ? [prompt] : []),
+      ],
+    };
   }
   if (vendor === "cursor") {
-    const modelArg = opts.model?.trim() ? ` --model ${shellQuote(opts.model.trim())}` : "";
-    const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
-    return `cursor-agent${modelArg}${promptArg}`;
+    return {
+      file: "cursor-agent",
+      args: [...(model ? ["--model", model] : []), ...(prompt ? [prompt] : [])],
+    };
   }
-  const modelArg = opts.model?.trim() ? ` -c ${shellQuote(`model="${opts.model.trim()}"`)}` : "";
-  const effort = opts.effort?.trim();
-  const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
-  const promptArg = opts.prompt?.trim() ? ` ${shellQuote(opts.prompt.trim())}` : "";
-  return `codex${modelArg}${effortArg}${promptArg}`;
+  return {
+    file: "codex",
+    args: [
+      ...(model ? ["-c", `model=${JSON.stringify(model)}`] : []),
+      ...(effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
+      ...(speed ? ["-c", `service_tier=${JSON.stringify(speed)}`] : []),
+      ...(prompt ? [prompt] : []),
+    ],
+  };
+}
+
+function optionValue(name: string, value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  if (!MODEL_OPTION.test(normalized)) throw new Error(`invalid ${name}`);
+  return normalized;
 }
 
 export interface TerminalInvocation {
@@ -64,35 +86,61 @@ export interface TerminalInvocation {
   args: string[];
 }
 
-/** Build the platform-specific argv that opens a terminal running `command` in `cwd`. */
+/** Build the platform terminal invocation without interpolating untrusted shell text. */
 export function buildTerminalInvocation(
   platform: NodeJS.Platform,
   cwd: string,
-  command: string,
+  command: LaunchCommand,
 ): TerminalInvocation {
   if (platform === "win32") {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      `Set-Location -LiteralPath ${powerShellQuote(cwd)}`,
+      `& ${powerShellQuote(command.file)} ${command.args.map(powerShellQuote).join(" ")}`,
+    ].join("; ");
     return {
-      file: "cmd.exe",
-      args: ["/c", "start", "", "cmd", "/k", `cd /d "${cwd}" && ${command}`],
+      file: "powershell.exe",
+      args: [
+        "-NoExit",
+        "-NoProfile",
+        "-EncodedCommand",
+        Buffer.from(script, "utf16le").toString("base64"),
+      ],
     };
   }
+
+  const shellCommand = renderPosixCommand(command);
+  const script = `cd -- ${posixQuote(cwd)} && ${shellCommand}; exec bash`;
   if (platform === "darwin") {
-    const script = `tell application "Terminal" to do script "cd '${cwd}' && ${command}"`;
-    return { file: "osascript", args: ["-e", script] };
+    return {
+      file: "osascript",
+      args: ["-e", `tell application "Terminal" to do script ${appleScriptQuote(script)}`],
+    };
   }
-  // linux / other: best-effort via x-terminal-emulator
-  return {
-    file: "x-terminal-emulator",
-    args: ["-e", `bash -lc 'cd "${cwd}" && ${command}; exec bash'`],
-  };
+  return { file: "x-terminal-emulator", args: ["-e", "bash", "-lc", script] };
 }
 
-/**
- * Launch a vendor session action in a new terminal. Detached so it outlives the
- * daemon. Returns the command run (for UI feedback). This is where attend
- * actively spawns vendor processes — a deliberate override of the original
- * "spawn = copy-only" invariant, requested explicitly (see DESIGN.md v1.2/v1.3).
- */
+export function displayCommand(command: LaunchCommand): string {
+  return renderPosixCommand(command);
+}
+
+function renderPosixCommand(command: LaunchCommand): string {
+  return [command.file, ...command.args].map(posixQuote).join(" ");
+}
+
+function posixQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:=+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function powerShellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function appleScriptQuote(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 export function launchSession(
   action: LaunchAction,
   vendor: LaunchVendor,
@@ -104,7 +152,7 @@ export function launchSession(
   const { file, args } = buildTerminalInvocation(platform, cwd, command);
   const child = spawn(file, args, { cwd, detached: true, stdio: "ignore" });
   child.unref();
-  return command;
+  return displayCommand(command);
 }
 
 export interface RevealInvocation {
@@ -112,24 +160,12 @@ export interface RevealInvocation {
   args: string[];
 }
 
-/**
- * Platform argv that reveals `target` in the OS file manager, selecting the file:
- *   macOS  → `open -R <path>`          (Finder, highlighted)
- *   win32  → `explorer /select,<path>` (Explorer, highlighted)
- *   linux  → `xdg-open <dir>`          (opens the containing folder)
- */
 export function revealCommand(platform: NodeJS.Platform, target: string): RevealInvocation {
   if (platform === "win32") return { file: "explorer.exe", args: [`/select,${target}`] };
   if (platform === "darwin") return { file: "open", args: ["-R", target] };
   return { file: "xdg-open", args: [path.dirname(target)] };
 }
 
-/**
- * Reveal a local path in the OS file manager (Finder / Explorer). Detached so it
- * outlives the daemon. Mirrors `launchSession` — this is attend deliberately
- * spawning a local viewer, for "click a file path in chat → open it" (the same
- * v1.2/v1.3 "spawn is allowed when the user asks" override).
- */
 export function revealPath(target: string, platform: NodeJS.Platform = process.platform): void {
   const { file, args } = revealCommand(platform, target);
   const child = spawn(file, args, { detached: true, stdio: "ignore" });

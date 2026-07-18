@@ -41,13 +41,12 @@ describe("Cursor CLI adapter", () => {
     ]);
   });
 
-  it("passes Cursor's selected parameterized variant as the model", () => {
+  it("passes Cursor's exact matrix variant as the model", () => {
     expect(
       buildCursorArgs({
         cwd: "/work/repo",
         prompt: "fix it",
-        model: "gpt-5.3-codex",
-        effort: "gpt-5.3-codex[reasoning=high,fast=true]",
+        model: "gpt-5.3-codex[reasoning=high,fast=true]",
       }),
     ).toContain("gpt-5.3-codex[reasoning=high,fast=true]");
   });
@@ -163,7 +162,7 @@ describe("Cursor CLI adapter", () => {
 
   it("renders and summarizes Attend-captured Cursor transcripts", () => {
     const raw = [
-      line({ type: "system", subtype: "init", session_id: "chat-1" }, 1000),
+      line({ type: "system", subtype: "init", session_id: "chat-1", model: "Auto" }, 1000),
       line({ type: "user", message: { content: [{ type: "text", text: "Fix login" }] } }, 1100),
       line({ type: "assistant", message: { content: [{ type: "text", text: "I will " }] } }, 1200),
       line(
@@ -200,8 +199,39 @@ describe("Cursor CLI adapter", () => {
       lastPrompt: "Fix login",
       prompts: 1,
       actions: 1,
+      runConfig: { model: "auto", source: "provider-observed" },
     });
     expect(session.chars).toBe("Fix login".length + "I will inspect it.".length);
+  });
+
+  it("keeps the captured init model when a native transcript exists", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-cursor-config-"));
+    const workspace = path.join(root, "workspace");
+    const projects = path.join(root, "projects");
+    const captured = path.join(root, "captured");
+    const id = "cursor-config-id";
+    const encoded = workspace.slice(path.parse(workspace).root.length).split(path.sep).join("-");
+    const transcriptDir = path.join(projects, encoded, "agent-transcripts", id);
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    fs.mkdirSync(captured, { recursive: true });
+    fs.writeFileSync(
+      path.join(transcriptDir, `${id}.jsonl`),
+      JSON.stringify({ role: "user", message: { content: "native" } }),
+    );
+    fs.writeFileSync(
+      path.join(captured, `${id}.jsonl`),
+      line({ type: "system", subtype: "init", session_id: id, model: "Composer 2.5" }, 1),
+    );
+    try {
+      expect(new CursorSource(projects, captured).scan()[0]).toMatchObject({
+        sessionId: id,
+        title: "native",
+        runConfig: { model: "Composer 2.5", source: "provider-observed" },
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("uses the successful result text when the CLI emits no assistant event", () => {

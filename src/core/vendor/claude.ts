@@ -26,7 +26,17 @@ interface JsonlEntry {
   isSidechain?: boolean;
   isMeta?: boolean;
   sessionId?: string;
-  message?: { content?: unknown };
+  message?: {
+    content?: unknown;
+    model?: unknown;
+    usage?: { speed?: unknown; service_tier?: unknown };
+  };
+}
+
+function configValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.trim();
+  return clean && !clean.startsWith("<") ? clean : undefined;
 }
 
 /** Return the user prompt text if this is a real typed prompt, else null. */
@@ -144,6 +154,17 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
         session.lastPrompt = snippet(text); // keep overwriting → ends as the latest prompt
       }
     } else if (obj.type === "assistant") {
+      const model = configValue(obj.message?.model);
+      const speed = configValue(obj.message?.usage?.speed);
+      if (model || speed) {
+        session.runConfig = {
+          source: "provider",
+          ...(session.runConfig ?? {}),
+          ...(ts !== null ? { updatedAt: ts } : {}),
+          ...(model ? { model } : {}),
+          ...(speed ? { speed } : {}),
+        };
+      }
       session.actions += countActions(obj.message?.content);
       const txt = assistantText(obj.message?.content);
       session.chars += txt;

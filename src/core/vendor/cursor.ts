@@ -12,7 +12,15 @@ interface CursorEvent {
   subtype?: string;
   session_id?: string;
   message?: { content?: unknown };
+  model?: unknown;
   _attend?: { timestamp?: number; cwd?: string };
+}
+
+function observedModel(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.trim();
+  if (!clean) return undefined;
+  return clean.toLowerCase() === "auto" ? "auto" : clean;
 }
 
 function emptySession(file: string): RawSession {
@@ -62,6 +70,15 @@ export function parseCursorSession(
     if (ev.session_id) session.sessionId = ev.session_id;
     if (!session.cwd && ev._attend?.cwd) session.cwd = ev._attend.cwd;
     const ts = Number(ev._attend?.timestamp);
+    if (ev.type === "system" && ev.subtype === "init") {
+      const model = observedModel(ev.model);
+      if (model)
+        session.runConfig = {
+          model,
+          source: "provider-observed",
+          ...(Number.isFinite(ts) && ts > 0 ? { updatedAt: ts } : {}),
+        };
+    }
     if (Number.isFinite(ts) && ts > 0) {
       if (session.firstTs === null) session.firstTs = ts;
       session.lastTs = ts;
@@ -190,6 +207,7 @@ export class CursorSource implements SessionSource {
     private readonly projectsDir: string,
     private readonly capturedDir?: string,
     private readonly cache = new ScanCache(),
+    private readonly capturedCache = new ScanCache(),
   ) {}
 
   scan(): RawSession[] {
@@ -210,10 +228,31 @@ export class CursorSource implements SessionSource {
       native.map(({ file }) => file),
       (file) => readSession(file, nativeCwds.get(file) ?? null),
     );
+    const capturedSessions = this.capturedCache.memoize(captured, (file) =>
+      readSession(file, null),
+    );
+    const capturedById = new Map(
+      capturedSessions
+        .filter((session) => !!session.sessionId)
+        .map((session) => [session.sessionId as string, session]),
+    );
+    const mergedNative = nativeSessions.map((session) => {
+      const compatibility = session.sessionId ? capturedById.get(session.sessionId) : undefined;
+      if (!compatibility) return session;
+      capturedById.delete(session.sessionId as string);
+      // Native Cursor transcripts are the canonical conversation, while Attend's
+      // compatibility capture contains the otherwise-missing init model.
+      return {
+        ...session,
+        ...(!session.runConfig && compatibility.runConfig
+          ? { runConfig: compatibility.runConfig }
+          : {}),
+      };
+    });
     const nativeIds = new Set(nativeSessions.map((session) => session.sessionId));
-    const capturedSessions = this.cache
-      .memoize(captured, (file) => readSession(file, null))
-      .filter((session) => !nativeIds.has(session.sessionId));
-    return [...nativeSessions, ...capturedSessions];
+    return [
+      ...mergedNative,
+      ...capturedSessions.filter((session) => !nativeIds.has(session.sessionId)),
+    ];
   }
 }

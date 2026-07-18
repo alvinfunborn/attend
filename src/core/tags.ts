@@ -1,26 +1,55 @@
-import fs from "node:fs";
-import path from "node:path";
+import { JsonFile, type JsonRepository } from "./json-file.js";
+import { SqliteDocument } from "./state-database.js";
 
 interface TagFile {
-  tags?: string[];
-  sessions?: Record<string, string[]>;
+  tags: string[];
+  sessions: Record<string, string[]>;
 }
 
 function normalizeTag(name: string): string {
   return name.trim().replace(/\s+/g, " ");
 }
 
-/**
- * Persisted tag state: one global tag list plus per-session assignments. Global
- * deletion cascades to every session; assigning an unknown tag auto-creates it.
- */
-export class TagStore {
-  private tags: string[] = [];
-  private bySession = new Map<string, string[]>();
-  private loaded = false;
-  private loadedFileSig: string | null = null;
+function normalizeTagFile(value: unknown): TagFile {
+  const input = value && typeof value === "object" ? (value as Partial<TagFile>) : {};
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: unknown): string | null => {
+    const tag = typeof raw === "string" ? normalizeTag(raw) : "";
+    if (!tag) return null;
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+    return tag;
+  };
+  for (const raw of Array.isArray(input.tags) ? input.tags : []) add(raw);
+  const sessions: Record<string, string[]> = {};
+  for (const [rawKey, rawList] of Object.entries(input.sessions ?? {})) {
+    const key = rawKey.trim();
+    if (!key || !Array.isArray(rawList)) continue;
+    const assigned: string[] = [];
+    const used = new Set<string>();
+    for (const raw of rawList) {
+      const tag = add(raw);
+      if (!tag || used.has(tag)) continue;
+      used.add(tag);
+      assigned.push(tag);
+    }
+    if (assigned.length) sessions[key] = assigned;
+  }
+  return { tags, sessions };
+}
 
-  constructor(private readonly file: string) {}
+/** Persisted global tag catalog plus assignments keyed by stable session aliases. */
+export class TagStore {
+  private readonly data: JsonRepository<TagFile>;
+
+  constructor(file: string, databaseFile?: string) {
+    this.data = databaseFile
+      ? new SqliteDocument(databaseFile, "tags", file, normalizeTagFile)
+      : new JsonFile(file, normalizeTagFile);
+  }
 
   private keys(input: string | string[]): string[] {
     const raw = Array.isArray(input) ? input : [input];
@@ -35,156 +64,94 @@ export class TagStore {
     return out;
   }
 
-  private fileSig(): string | null {
-    try {
-      const st = fs.statSync(this.file);
-      return `${st.mtimeMs}:${st.size}`;
-    } catch {
-      return null;
-    }
-  }
-
-  private load(force = false): void {
-    const sig = this.fileSig();
-    if (!force && this.loaded && sig === this.loadedFileSig) return;
-    this.loaded = true;
-    this.loadedFileSig = sig;
-    this.tags = [];
-    this.bySession.clear();
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.file, "utf-8")) as TagFile;
-      const seen = new Set<string>();
-      for (const tag of raw.tags ?? []) {
-        const name = normalizeTag(tag);
-        if (!name || seen.has(name)) continue;
-        seen.add(name);
-        this.tags.push(name);
-      }
-      for (const [sessionId, list] of Object.entries(raw.sessions ?? {})) {
-        const next: string[] = [];
-        const used = new Set<string>();
-        for (const tag of list) {
-          const name = normalizeTag(tag);
-          if (!name || used.has(name)) continue;
-          used.add(name);
-          next.push(name);
-          if (!seen.has(name)) {
-            seen.add(name);
-            this.tags.push(name);
-          }
-        }
-        if (next.length) this.bySession.set(sessionId, next);
-      }
-    } catch {
-      // missing/corrupt — start empty
-    }
-  }
-
   list(): string[] {
-    this.load();
-    return [...this.tags];
+    return [...this.data.read().tags];
   }
 
   tagsFor(sessionId: string | string[]): string[] {
-    this.load();
+    const data = this.data.read();
     const assigned = new Set<string>();
     for (const key of this.keys(sessionId)) {
-      for (const tag of this.bySession.get(key) ?? []) assigned.add(tag);
+      for (const tag of data.sessions[key] ?? []) assigned.add(tag);
     }
-    return this.tags.filter((tag) => assigned.has(tag));
+    return data.tags.filter((tag) => assigned.has(tag));
   }
 
   create(name: string): string[] {
-    this.load(true);
     const tag = normalizeTag(name);
     if (!tag) return this.list();
-    if (!this.tags.includes(tag)) {
-      this.tags.push(tag);
-      this.persist();
-    }
-    return this.list();
+    return this.data.update((data) => {
+      if (!data.tags.includes(tag)) data.tags.push(tag);
+      return [...data.tags];
+    });
   }
 
   delete(name: string): string[] {
-    this.load(true);
     const tag = normalizeTag(name);
     if (!tag) return this.list();
-    const idx = this.tags.indexOf(tag);
-    if (idx < 0) return this.list();
-    this.tags.splice(idx, 1);
-    for (const [sessionId, tags] of this.bySession) {
-      const next = tags.filter((x) => x !== tag);
-      if (next.length) this.bySession.set(sessionId, next);
-      else this.bySession.delete(sessionId);
-    }
-    this.persist();
-    return this.list();
+    return this.data.update((data) => {
+      data.tags = data.tags.filter((candidate) => candidate !== tag);
+      for (const [key, assigned] of Object.entries(data.sessions)) {
+        const next = assigned.filter((candidate) => candidate !== tag);
+        if (next.length) data.sessions[key] = next;
+        else delete data.sessions[key];
+      }
+      return [...data.tags];
+    });
+  }
+
+  clearSessionBindings(name: string): string[] {
+    const tag = normalizeTag(name);
+    if (!tag) return this.list();
+    return this.data.update((data) => {
+      for (const [key, assigned] of Object.entries(data.sessions)) {
+        if (key.startsWith("scope:") || key.startsWith("scope-id:")) continue;
+        const next = assigned.filter((candidate) => candidate !== tag);
+        if (next.length) data.sessions[key] = next;
+        else delete data.sessions[key];
+      }
+      return [...data.tags];
+    });
   }
 
   reorder(tags: string[]): string[] {
-    this.load(true);
-    const requested: string[] = [];
-    const used = new Set<string>();
-    for (const raw of tags) {
-      const tag = normalizeTag(raw);
-      if (!tag || used.has(tag) || !this.tags.includes(tag)) continue;
-      used.add(tag);
-      requested.push(tag);
-    }
-    if (requested.length < 2) return this.list();
-    let i = 0;
-    const next: string[] = [];
-    for (const tag of this.tags) {
-      if (used.has(tag)) {
-        const replacement = requested[i++];
-        if (replacement) next.push(replacement);
-      } else {
-        next.push(tag);
+    return this.data.update((data) => {
+      const requested: string[] = [];
+      const used = new Set<string>();
+      for (const raw of tags) {
+        const tag = normalizeTag(raw);
+        if (!tag || used.has(tag) || !data.tags.includes(tag)) continue;
+        used.add(tag);
+        requested.push(tag);
       }
-    }
-    if (next.every((tag, idx) => tag === this.tags[idx])) return this.list();
-    this.tags = next;
-    this.persist();
-    return this.list();
+      if (requested.length < 2) return [...data.tags];
+      let index = 0;
+      data.tags = data.tags.map((tag) => {
+        if (!used.has(tag)) return tag;
+        return requested[index++] ?? tag;
+      });
+      return [...data.tags];
+    });
   }
 
   setSessionTags(sessionId: string | string[], tags: string[]): string[] {
-    this.load(true);
     const keys = this.keys(sessionId);
     if (!keys.length) return [];
-    const next: string[] = [];
-    const used = new Set<string>();
-    for (const raw of tags) {
-      const tag = normalizeTag(raw);
-      if (!tag || used.has(tag)) continue;
-      used.add(tag);
-      next.push(tag);
-      if (!this.tags.includes(tag)) this.tags.push(tag);
-    }
-    for (const key of keys) {
-      if (next.length) this.bySession.set(key, next);
-      else this.bySession.delete(key);
-    }
-    this.persist();
-    return [...next];
-  }
-
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      const obj: TagFile = {
-        tags: this.tags,
-        sessions: Object.fromEntries(this.bySession),
-      };
-      const tmp = path.join(
-        path.dirname(this.file),
-        `.${path.basename(this.file)}.${process.pid}.${Date.now()}.tmp`,
-      );
-      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-      fs.renameSync(tmp, this.file);
-      this.loadedFileSig = this.fileSig();
-    } catch {
-      // best-effort persistence
-    }
+    return this.data.update((data) => {
+      const next: string[] = [];
+      const used = new Set<string>();
+      for (const raw of tags) {
+        const tag = normalizeTag(raw);
+        if (!tag || used.has(tag)) continue;
+        used.add(tag);
+        next.push(tag);
+        if (!data.tags.includes(tag)) data.tags.push(tag);
+      }
+      for (const key of keys) {
+        if (next.length) data.sessions[key] = [...next];
+        else delete data.sessions[key];
+      }
+      return [...next];
+    });
   }
 }

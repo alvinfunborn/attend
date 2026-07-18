@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .shots/
+test-results/
+logs/
 *.log
 .DS_Store
 __pycache__/

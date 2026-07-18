@@ -17,6 +17,7 @@ interface RuntimeOptions<Run extends DriverRun> {
   isActive?: (run: Run) => boolean;
   shouldReplay?: (run: Run) => boolean;
   maxBuffer?: number;
+  maxBufferBytes?: number;
 }
 
 /**
@@ -38,11 +39,14 @@ export class DriverRuntime<Run extends DriverRun> {
   private readonly isActiveRun: (run: Run) => boolean;
   private readonly shouldReplayRun: (run: Run) => boolean;
   private readonly maxBuffer: number;
+  private readonly maxBufferBytes: number;
+  private readonly bufferedBytes = new WeakMap<Run, number>();
 
   constructor(options: RuntimeOptions<Run> = {}) {
     this.isActiveRun = options.isActive ?? ((run) => run.turnActive);
     this.shouldReplayRun = options.shouldReplay ?? ((run) => run.turnActive);
     this.maxBuffer = options.maxBuffer ?? 2000;
+    this.maxBufferBytes = options.maxBufferBytes ?? 2 * 1024 * 1024;
   }
 
   get(sessionId: string): Run | undefined {
@@ -51,6 +55,24 @@ export class DriverRuntime<Run extends DriverRun> {
 
   values(): IterableIterator<Run> {
     return this.runs.values();
+  }
+
+  delete(sessionId: string, expected?: Run): boolean {
+    if (expected && this.runs.get(sessionId) !== expected) return false;
+    return this.runs.delete(sessionId);
+  }
+
+  /** Bound completed-session metadata while retaining recent sync snapshots. */
+  pruneInactive(maxInactive = 256): void {
+    let inactive = 0;
+    for (const run of this.runs.values()) if (!this.isActiveRun(run)) inactive++;
+    if (inactive <= maxInactive) return;
+    for (const [sessionId, run] of this.runs) {
+      if (this.isActiveRun(run)) continue;
+      this.runs.delete(sessionId);
+      inactive--;
+      if (inactive <= maxInactive) break;
+    }
   }
 
   clearPending(): void {
@@ -116,8 +138,16 @@ export class DriverRuntime<Run extends DriverRun> {
 
   /** Publish an already-normalized event after the provider's filtering rules. */
   publish(run: Run, event: UiEvent): void {
-    run.events.push(event);
-    if (run.events.length > this.maxBuffer) run.events.shift();
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    if (eventBytes <= this.maxBufferBytes) {
+      run.events.push(event);
+      let bytes = (run.events.length === 1 ? 0 : (this.bufferedBytes.get(run) ?? 0)) + eventBytes;
+      while (run.events.length > this.maxBuffer || bytes > this.maxBufferBytes) {
+        const removed = run.events.shift();
+        if (removed) bytes -= Buffer.byteLength(JSON.stringify(removed));
+      }
+      this.bufferedBytes.set(run, Math.max(0, bytes));
+    }
     if (event.kind === "session" && event.sessionId) this.index(event.sessionId, run);
     if (event.kind === "result" || event.kind === "error") this.finishTurn(run);
     run.emitter.emit("event", event);

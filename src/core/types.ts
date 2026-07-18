@@ -1,5 +1,7 @@
 /** Shared domain types. session = cache, brief = state. */
 
+import type { ProviderSessionRunConfig } from "./session-run-config.js";
+
 export type Pattern = "avoidance" | "unknown";
 
 export interface BriefFrontMatter {
@@ -60,6 +62,8 @@ export interface RawSession {
    *  Attend did not launch and therefore cannot track in its live engine. */
   active?: boolean;
   activeStartedAt?: number | null;
+  /** Vendor-owned model/reasoning/speed recovered from this session's history. */
+  runConfig?: ProviderSessionRunConfig;
 }
 
 export interface Telemetry {

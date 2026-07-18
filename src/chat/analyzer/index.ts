@@ -1,4 +1,11 @@
+import type { CollaborationTurnFact, CollaborationTurnLabel } from "../../core/collaboration.js";
 import type { Analysis } from "../../core/daemon/cache.js";
+
+export interface AnalyzerVerdict {
+  analysis: Analysis;
+  observedTurns: CollaborationTurnFact[];
+  labels: CollaborationTurnLabel[];
+}
 
 /**
  * The analyzer seam — the daemon side of `SessionSource`. A session is analyzed
@@ -20,11 +27,23 @@ export interface SessionAnalyzer {
    * parsed verdict, or null when unsupported / unparseable. The analyzer owns its
    * own contract + parsing; it never fabricates (null over fake data).
    */
-  analyze(daemonId: string, cwd: string, taskId: string): Promise<Analysis | null>;
+  analyze(
+    daemonId: string,
+    cwd: string,
+    taskId: string,
+    knownTurnIds?: ReadonlySet<string>,
+    analysisFromAt?: number | null,
+    uiContext?: string,
+  ): Promise<AnalyzerVerdict | null>;
   /**
    * Optional one-shot prompt generation for sessions already flagged as avoidance
    * by local telemetry. This is intentionally separate from regular analysis so
    * token cost is paid only when the UI can actually use the draft.
    */
-  avoidancePrompt?(daemonId: string, cwd: string, taskId: string): Promise<string | null>;
+  avoidancePrompt?(
+    daemonId: string,
+    cwd: string,
+    taskId: string,
+    uiContext?: string,
+  ): Promise<string | null>;
 }

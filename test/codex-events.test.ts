@@ -32,6 +32,15 @@ describe("toUiEventsFromCodex", () => {
     ]);
   });
 
+  it("carries Cursor's init model as an observed run configuration", () => {
+    expect(
+      toUiEventsFromCodex({ type: "thread.started", thread_id: "cu-1", model: "Auto" }),
+    ).toEqual([
+      { kind: "session", sessionId: "cu-1" },
+      { kind: "run_config", source: "provider-observed", model: "auto" },
+    ]);
+  });
+
   it("emits assistant text only on a completed agent_message", () => {
     const started = toUiEventsFromCodex({ type: "item.started", item: { type: "agent_message" } });
     const done = toUiEventsFromCodex({

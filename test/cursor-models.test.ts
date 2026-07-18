@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   cursorModelOptionsFromState,
   parseCursorCliModels,
+  resolveCursorModelConfiguration,
 } from "../src/core/vendor/cursor-models.js";
 
 describe("Cursor model discovery", () => {
@@ -81,12 +82,34 @@ describe("Cursor model discovery", () => {
     expect(inspection.models.map(({ value }) => value)).toEqual(["auto", "gpt-5.3-codex"]);
     expect(inspection.models[1]).toMatchObject({
       label: "Codex 5.3",
-      defaultEffort: "gpt-5.3-codex[reasoning=medium,fast=false]",
+      efforts: ["medium", "high"],
+      defaultEffort: "medium",
       effortLabels: {
-        "gpt-5.3-codex[reasoning=medium,fast=false]": "Medium",
-        "gpt-5.3-codex[reasoning=high,fast=true]": "High · Fast",
+        medium: "Medium",
+        high: "High",
       },
+      speeds: ["false", "true"],
+      defaultSpeed: "false",
+      speedLabels: { false: "Standard", true: "Fast" },
+      configurations: [
+        {
+          value: "gpt-5.3-codex[reasoning=medium,fast=false]",
+          effort: "medium",
+          speed: "false",
+        },
+        {
+          value: "gpt-5.3-codex[reasoning=high,fast=true]",
+          effort: "high",
+          speed: "true",
+        },
+      ],
     });
-    expect(inspection.defaults).toEqual({ model: "auto", effort: "" });
+    expect(inspection.defaults).toEqual({ model: "auto", effort: "", speed: "" });
+    expect(
+      resolveCursorModelConfiguration(inspection.models, "gpt-5.3-codex", "high", "true"),
+    ).toBe("gpt-5.3-codex[reasoning=high,fast=true]");
+    expect(
+      resolveCursorModelConfiguration(inspection.models, "gpt-5.3-codex", "medium", "true"),
+    ).toBeNull();
   });
 });

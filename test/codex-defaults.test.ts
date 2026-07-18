@@ -1,18 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { inspectCodexDefaults } from "../src/core/vendor/codex-defaults.js";
+import { defaultsFromCodexRpc, inspectCodexDefaults } from "../src/core/vendor/codex-defaults.js";
 
 describe("inspectCodexDefaults", () => {
-  it("reads effective cwd-aware defaults through Codex app-server config/read", async () => {
-    const result = inspectCodexDefaults("codex", "/tmp", 1_000);
-    // This is an integration-level assertion against the installed CLI when present;
-    // the unit behavior is covered by the protocol parsing in the returned shape.
-    await expect(result).resolves.toEqual({
-      model: expect.any(String),
-      effort: expect.any(String),
+  it("parses effective cwd-aware defaults from config/read", () => {
+    expect(
+      defaultsFromCodexRpc({
+        id: 2,
+        result: {
+          config: { model: "gpt-test", model_reasoning_effort: "high", service_tier: "priority" },
+        },
+      }),
+    ).toEqual({
+      model: "gpt-test",
+      effort: "high",
+      speed: "priority",
     });
   });
 
   it("returns empty defaults when Codex is unavailable", async () => {
-    await expect(inspectCodexDefaults(null, "/tmp")).resolves.toEqual({ model: "", effort: "" });
+    await expect(inspectCodexDefaults(null, "/tmp")).resolves.toEqual({
+      model: "",
+      effort: "",
+      speed: "",
+    });
   });
 });

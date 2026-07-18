@@ -18,6 +18,70 @@ const fakeQuery = ((_args: unknown) => {
 }) as unknown as QueryFn;
 
 describe("ChatEngine", () => {
+  it("passes Claude fast mode through SDK settings", async () => {
+    const seen: Array<{ options?: { settings?: unknown } }> = [];
+    const query = ((args: { options?: { settings?: unknown } }) => {
+      seen.push(args);
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-fast" };
+        yield { type: "result", subtype: "success", result: "ok", session_id: "sess-fast" };
+      })();
+    }) as unknown as QueryFn;
+    const engine = new ChatEngine(query);
+
+    await engine.start({ cwd: ".", firstText: "hello", speed: "fast" });
+
+    expect(seen[0]?.options?.settings).toEqual({ fastMode: true });
+  });
+
+  it("surfaces an actionable error when Claude authentication has expired", async () => {
+    const authFailure = (() => {
+      throw new Error("Failed to authenticate: OAuth session expired and could not be refreshed");
+    }) as unknown as QueryFn;
+    const engine = new ChatEngine(authFailure);
+
+    await expect(engine.start({ cwd: ".", firstText: "hello" })).rejects.toThrow(
+      "Claude sign-in is required. Run `claude auth login`, then retry.",
+    );
+  });
+
+  it("normalizes Claude's structured authentication failure and removes its duplicate raw text", async () => {
+    const query = ((_args: unknown) =>
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-auth" };
+        yield {
+          type: "assistant",
+          session_id: "sess-auth",
+          error: "authentication_failed",
+          message: {
+            content: [
+              {
+                type: "text",
+                text: "Failed to authenticate: OAuth session expired and could not be refreshed",
+              },
+            ],
+          },
+        };
+        yield { type: "result", subtype: "error_during_execution", session_id: "sess-auth" };
+      })()) as unknown as QueryFn;
+    const engine = new ChatEngine(query);
+    const received: UiEvent[] = [];
+    engine.onEvent((_sessionId, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "hello" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(received).toContainEqual({
+      kind: "error",
+      code: "claude_auth_required",
+      vendor: "claude",
+      message: "Claude sign-in is required. Run `claude auth login`, then retry.",
+      command: "claude auth login",
+      retryable: false,
+    });
+    expect(received.some((event) => event.kind === "assistant_text")).toBe(false);
+  });
+
   it("publishes normalized events to the global session event bus", async () => {
     const engine = new ChatEngine(fakeQuery);
     const received: Array<{ sessionId: string; event: UiEvent; clientSessionId?: string }> = [];
@@ -542,7 +606,7 @@ describe("ChatEngine", () => {
     expect(ended).toEqual(["sess-late-int"]);
   });
 
-  it("interrupt() clears active state even when the SDK interrupt rejects", async () => {
+  it("interrupt() reports failure and preserves active state when the SDK interrupt rejects", async () => {
     const interruptible = (() => {
       const it = (async function* () {
         yield { type: "system", subtype: "init", session_id: "sess-reject-int" };
@@ -559,10 +623,10 @@ describe("ChatEngine", () => {
     const got: UiEvent[] = [];
     engine.subscribe(id, (ev) => got.push(ev));
 
-    expect(await engine.interrupt(id)).toBe(true);
+    expect(await engine.interrupt(id)).toBe(false);
 
-    expect(engine.activeSessions()).toHaveLength(0);
-    expect(got).toContainEqual({ kind: "result", ok: false, text: "interrupted" });
+    expect(engine.activeSessions()).toContain(id);
+    expect(got).not.toContainEqual({ kind: "result", ok: false, text: "interrupted" });
   });
 
   it("interrupt() returns false for an unknown or non-interruptible session", async () => {

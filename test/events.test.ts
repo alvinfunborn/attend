@@ -11,6 +11,37 @@ describe("toUiEvents", () => {
     ]);
   });
 
+  it("reports Claude's provider-owned model and speed", () => {
+    expect(
+      toUiEvents(
+        as({
+          type: "system",
+          subtype: "init",
+          session_id: "s1",
+          model: "claude-opus",
+          fast_mode_state: "on",
+        }),
+      ),
+    ).toEqual([
+      { kind: "session", sessionId: "s1" },
+      { kind: "run_config", source: "provider", model: "claude-opus", speed: "fast" },
+    ]);
+    expect(
+      toUiEvents(
+        as({
+          type: "assistant",
+          session_id: "s1",
+          message: { model: "claude-opus", usage: { speed: "standard" }, content: "hello" },
+        }),
+      )[0],
+    ).toEqual({
+      kind: "run_config",
+      source: "provider",
+      model: "claude-opus",
+      speed: "standard",
+    });
+  });
+
   it("splits assistant content into text + tool_use events", () => {
     const evs = toUiEvents(
       as({

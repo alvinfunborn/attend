@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { normalizeScopeRoots, scopeIdForRoots } from "./core/scope.js";
 import { defaultCodexModelsCachePath } from "./core/vendor/codex-models.js";
 import { defaultCursorStateDbPath } from "./core/vendor/cursor-models.js";
 import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "./core/vendor/detect.js";
@@ -12,6 +14,8 @@ export interface AttendConfig {
    * dir args (`attend <dir>…`) > `ATTEND_VAULTS` > config-file `vaultRoots`.
    */
   scopeRoots: string[];
+  /** Stable identity of the canonical, minimal scope-root set. */
+  scopeId: string;
   /** ~/.claude/projects */
   claudeProjects: string;
   /** ~/.codex/sessions */
@@ -24,7 +28,7 @@ export interface AttendConfig {
   cursorStateDb: string;
   /** ~/.codex/models_cache.json */
   codexModelsCache: string;
-  /** concrete Claude Code executable used by the Agent SDK, or null to use its bundled CLI. */
+  /** exact system Claude Code executable used by the Agent SDK, or null when unavailable. */
   claudeBin: string | null;
   /** resolved `codex` binary (PATH or app bundle), or null when not installed —
    *  gates in-browser Codex chat / the Codex daemon. */
@@ -50,11 +54,11 @@ export interface AttendConfig {
   engagement: string;
   /** per-session unfinished/attention state, cleared only when dismissed to gray. */
   sessionStatus: string;
-  /** vault-owned UI state (theme, focus definitions, model prefs, message pins). */
+  /** vault-owned UI state (theme, focus, model prefs, per-session run config, pins). */
   uiState: string;
   /** persistent server-owned queued chat turns. */
   chatQueue: string;
-  /** vault-scoped timestamped prompt/turn/queue/daemon event ledger. */
+  /** shared Attend SQLite database (work events plus transactional state documents). */
   workEvents: string;
   /** only list sessions with activity within this many days (0 = no limit). */
   recentDays: number;
@@ -92,12 +96,16 @@ function platformDefaults(): AttendConfig {
   const attendHome = path.join(home, ".attend");
   return {
     scopeRoots: [],
+    scopeId: scopeIdForRoots([]),
     claudeProjects: path.join(home, ".claude", "projects"),
     codexSessions: path.join(home, ".codex", "sessions"),
     cursorProjects: path.join(home, ".cursor", "projects"),
     cursorSessions: path.join(attendHome, "cursor-sessions"),
     cursorStateDb: defaultCursorStateDbPath(),
     codexModelsCache: defaultCodexModelsCachePath(),
+    // Match the user's terminal: the Agent SDK is only an adapter around this
+    // concrete system CLI. ATTEND_CLAUDE_BIN may explicitly override the path;
+    // the SDK-bundled Claude Code is never a default or fallback.
     claudeBin: resolveClaudeBin(),
     codexBin: resolveCodexBin(),
     cursorBin: resolveCursorBin(),
@@ -114,9 +122,11 @@ function platformDefaults(): AttendConfig {
     sessionStatus: path.join(attendHome, "session-status.json"),
     uiState: path.join(attendHome, "ui-state.json"),
     chatQueue: path.join(attendHome, "chat-queues.json"),
-    workEvents: path.join(attendHome, "work-events.json"),
+    workEvents: path.join(attendHome, "attend.sqlite3"),
     recentDays: 30,
-    maxSessions: 200,
+    // The sidebar virtualizes large result sets, so keep enough history available
+    // for useful browsing/search without attaching every row to the DOM.
+    maxSessions: 1000,
     e2eePassphrase: null,
   };
 }
@@ -154,18 +164,6 @@ function splitCsv(value: string | undefined): string[] | undefined {
     .filter(Boolean);
 }
 
-function defaultTagsPath(scopeRoots: string[], globalTags: string): string {
-  return scopeRoots.length === 1
-    ? path.join(scopeRoots[0] ?? "", ".attend", "tags.json")
-    : globalTags;
-}
-
-function defaultVaultPath(scopeRoots: string[], globalFile: string): string {
-  return scopeRoots.length === 1
-    ? path.join(scopeRoots[0] ?? "", ".attend", path.basename(globalFile))
-    : globalFile;
-}
-
 /**
  * Resolve config with precedence: CLI args > env > config file > platform defaults.
  * Scope dirs / session dirs / port can all be specified, satisfying "可指定目录".
@@ -181,12 +179,13 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     cli.positionals.length > 0
       ? cli.positionals
       : (splitPaths(env.ATTEND_VAULTS) ?? file.vaultRoots ?? defaults.scopeRoots);
-  const scopeRoots = scopeRootsInput.map((p) => path.resolve(p));
+  const scopeRoots = normalizeScopeRoots(scopeRootsInput);
 
   const port = Number(cli.port ?? env.ATTEND_PORT ?? file.port ?? defaults.port);
 
   return {
     scopeRoots,
+    scopeId: scopeIdForRoots(scopeRoots),
     claudeProjects: path.resolve(
       env.ATTEND_CLAUDE_PROJECTS ?? file.claudeProjects ?? defaults.claudeProjects,
     ),
@@ -215,19 +214,28 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     scanDepth: defaults.scanDepth,
     daemonRegistry: path.resolve(env.ATTEND_DAEMON_REGISTRY ?? defaults.daemonRegistry),
     analysisCache: path.resolve(env.ATTEND_ANALYSIS_CACHE ?? defaults.analysisCache),
-    overrides: path.resolve(
-      env.ATTEND_OVERRIDES ?? defaultVaultPath(scopeRoots, defaults.overrides),
-    ),
-    tags: path.resolve(env.ATTEND_TAGS ?? defaultTagsPath(scopeRoots, defaults.tags)),
-    engagement: path.resolve(
-      env.ATTEND_ENGAGEMENT ?? defaultVaultPath(scopeRoots, defaults.engagement),
-    ),
+    overrides: path.resolve(env.ATTEND_OVERRIDES ?? defaults.overrides),
+    tags: path.resolve(env.ATTEND_TAGS ?? defaults.tags),
+    engagement: path.resolve(env.ATTEND_ENGAGEMENT ?? defaults.engagement),
     sessionStatus: path.resolve(env.ATTEND_SESSION_STATUS ?? defaults.sessionStatus),
-    uiState: path.resolve(defaultVaultPath(scopeRoots, defaults.uiState)),
-    chatQueue: path.resolve(defaultVaultPath(scopeRoots, defaults.chatQueue)),
-    workEvents: path.resolve(defaultVaultPath(scopeRoots, defaults.workEvents)),
+    uiState: path.resolve(defaults.uiState),
+    chatQueue: path.resolve(defaults.chatQueue),
+    workEvents: path.resolve(defaults.workEvents),
     recentDays: intOr(env.ATTEND_RECENT_DAYS, defaults.recentDays),
     maxSessions: intOr(env.ATTEND_MAX_SESSIONS, defaults.maxSessions),
     e2eePassphrase: cli.e2eePassphrase ?? env.ATTEND_E2EE_PASSPHRASE ?? defaults.e2eePassphrase,
   };
+}
+
+/** Whether binding this hostname keeps the service on the local machine. */
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host
+    .trim()
+    .replace(/^\[|\]$/g, "")
+    .toLowerCase();
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) return true;
+  const ipVersion = net.isIP(normalized);
+  if (ipVersion === 4) return normalized.startsWith("127.");
+  if (ipVersion === 6) return normalized === "::1" || normalized === "0:0:0:0:0:0:0:1";
+  return false;
 }

@@ -39,6 +39,8 @@ export interface CodexItem {
 export interface CodexEvent {
   type?: string;
   thread_id?: string;
+  /** Cursor's system/init reports an observed display/routing model here. */
+  model?: string;
   item?: CodexItem;
   payload?: CodexItem;
   error?: { message?: string } | string;
@@ -132,7 +134,15 @@ export function toUiEventsFromCodex(ev: CodexEvent): UiEvent[] {
       break;
 
     case "thread.started":
-      if (ev.thread_id) out.push({ kind: "session", sessionId: ev.thread_id });
+      if (ev.thread_id) {
+        out.push({ kind: "session", sessionId: ev.thread_id });
+        if (ev.model?.trim())
+          out.push({
+            kind: "run_config",
+            model: ev.model.trim().toLowerCase() === "auto" ? "auto" : ev.model.trim(),
+            source: "provider-observed",
+          });
+      }
       break;
 
     case "item.started":

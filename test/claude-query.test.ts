@@ -19,4 +19,8 @@ describe("claudeQueryForExecutable", () => {
       pathToClaudeCodeExecutable: "/opt/bin/claude",
     });
   });
+
+  it("refuses to create an unbound SDK query instead of using its bundled CLI", () => {
+    expect(() => claudeQueryForExecutable(" ")).toThrow("the Agent SDK bundled CLI is disabled");
+  });
 });

@@ -1,7 +1,11 @@
 import type { UiEvent } from "./events.js";
+import type { ProviderErrorClassifier } from "./provider-errors.js";
 
 /** Opaque vendor-advertised effort identifier; Attend never enumerates these. */
 export type SessionEffort = string;
+
+/** Opaque vendor-advertised speed tier; Attend never enumerates these. */
+export type SessionSpeed = string;
 
 /** Inputs to (re)start a chat run. Provider-specific values stay opaque here. */
 export interface StartOpts {
@@ -14,6 +18,7 @@ export interface StartOpts {
   firstAttachments?: ChatAttachment[];
   model?: string;
   effort?: SessionEffort;
+  speed?: SessionSpeed;
   permissionMode?: string;
 }
 
@@ -55,9 +60,20 @@ export interface TextAttachment {
 
 export type ChatAttachment = ImageAttachment | PdfAttachment | FileAttachment | TextAttachment;
 
+/** A user-selected piece of Attend UI context that is resolved before provider dispatch. */
+export interface PinChatReference {
+  kind: "pin";
+  pinKey: string;
+  /** UI pin scopes can retain a client id after a provider session is materialized. */
+  pinSessionId?: string;
+}
+
+export type ChatReference = PinChatReference;
+
 export interface UserTurn {
   text: string;
   attachments?: ChatAttachment[];
+  references?: ChatReference[];
 }
 
 export interface ToolAnswer {
@@ -72,14 +88,37 @@ export interface ActiveSessionState {
   clientSessionId?: string;
 }
 
+export type GoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+export interface SessionGoal {
+  threadId: string;
+  objective: string;
+  status: GoalStatus;
+  createdAt?: number;
+  updatedAt?: number;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  tokenBudget?: number | null;
+}
+
 /**
  * Attend's provider port. SDKs, app servers, and process transports implement
  * this interface while the HTTP/SSE/queue layers remain vendor-neutral.
  */
 export interface ChatDriver {
   readonly vendor: string;
+  /** Vendor-owned recognition of stable, actionable provider failures. */
+  classifyError?: ProviderErrorClassifier;
   /** A live run's cwd, or undefined when the session isn't currently live. */
   get(sessionId: string): { cwd: string } | undefined;
+  /** Provider capability validation before a turn is accepted or queued. */
+  validateAttachments?(attachments: ChatAttachment[]): string | null;
   /** Start (or resume/fork) a run; resolves with the session id once known. */
   start(opts: StartOpts): Promise<string>;
   /** Send a user turn to a live run. Returns false if it can't accept one now. */
@@ -96,6 +135,10 @@ export interface ChatDriver {
   activeSessionStates(): ActiveSessionState[];
   /** Notify on each turn completion (drives per-session daemon re-analysis). */
   onTurnEnd(cb: (sessionId: string) => void): () => void;
+  /** Provider-native durable Goal support, when exposed by the backend. */
+  setGoal?(sessionId: string, objective: string): Promise<SessionGoal>;
+  getGoal?(sessionId: string): Promise<SessionGoal | null>;
+  clearGoal?(sessionId: string): Promise<boolean>;
   /** Observe every normalized event across all sessions (global browser event bus). */
   onEvent?(cb: (sessionId: string, event: UiEvent, clientSessionId?: string) => void): () => void;
   /** Stop accepting future in-process input without interrupting active turns. */

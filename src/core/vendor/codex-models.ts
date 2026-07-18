@@ -11,6 +11,17 @@ interface CachedModel {
   priority?: unknown;
   supported_reasoning_levels?: unknown;
   default_reasoning_level?: unknown;
+  service_tiers?: unknown;
+  serviceTiers?: unknown;
+  default_service_tier?: unknown;
+  defaultServiceTier?: unknown;
+  additional_speed_tiers?: unknown;
+  additionalSpeedTiers?: unknown;
+}
+
+interface AdvertisedServiceTier {
+  id?: unknown;
+  name?: unknown;
 }
 
 /** Codex advertises per-model reasoning levels as `[{ effort, description }]`. */
@@ -29,6 +40,43 @@ function readEfforts(raw: unknown): string[] {
     }
   }
   return out;
+}
+
+function readSpeeds(model: CachedModel): {
+  speeds: string[];
+  defaultSpeed: string;
+  speedLabels: Record<string, string>;
+} {
+  const advertised = model.service_tiers ?? model.serviceTiers;
+  const tiers = Array.isArray(advertised) ? (advertised as AdvertisedServiceTier[]) : [];
+  const speedLabels: Record<string, string> = { default: "Standard" };
+  const speeds = ["default"];
+  for (const tier of tiers) {
+    const id = typeof tier?.id === "string" ? tier.id.trim() : "";
+    if (!id || speeds.includes(id)) continue;
+    speeds.push(id);
+    const name = typeof tier.name === "string" ? tier.name.trim() : "";
+    speedLabels[id] = name || id;
+  }
+  if (speeds.length === 1) {
+    const legacy = model.additional_speed_tiers ?? model.additionalSpeedTiers;
+    if (Array.isArray(legacy)) {
+      for (const raw of legacy) {
+        const id = typeof raw === "string" ? raw.trim() : "";
+        if (!id || speeds.includes(id)) continue;
+        speeds.push(id);
+        speedLabels[id] = id === "fast" ? "Fast" : id;
+      }
+    }
+  }
+  if (speeds.length === 1) return { speeds: [], defaultSpeed: "", speedLabels: {} };
+  const rawDefault = model.default_service_tier ?? model.defaultServiceTier;
+  const configured = typeof rawDefault === "string" ? rawDefault.trim() : "";
+  return {
+    speeds,
+    defaultSpeed: speeds.includes(configured) ? configured : "default",
+    speedLabels,
+  };
 }
 
 export function defaultCodexModelsCachePath(): string {
@@ -135,16 +183,21 @@ function modelOptions(models: unknown[]): ModelOption[] {
       ): item is ModelOption & {
         efforts: string[];
         defaultEffort: string;
+        speeds: string[];
+        defaultSpeed: string;
+        speedLabels: Record<string, string>;
         priority: number;
         index: number;
       } => item !== null,
     )
     .sort((a, b) => a.priority - b.priority || a.index - b.index || a.value.localeCompare(b.value))
-    .map(({ value, label, efforts, defaultEffort }) => ({
+    .map(({ value, label, efforts, defaultEffort, speeds, defaultSpeed, speedLabels }) => ({
       value,
       label,
       ...(efforts.length ? { efforts } : {}),
       ...(defaultEffort ? { defaultEffort } : {}),
+      ...(speeds.length ? { speeds, speedLabels } : {}),
+      ...(defaultSpeed ? { defaultSpeed } : {}),
     }));
 }
 
@@ -156,7 +209,15 @@ function toOption(
   model: CachedModel,
   index: number,
 ):
-  | (ModelOption & { efforts: string[]; defaultEffort: string; priority: number; index: number })
+  | (ModelOption & {
+      efforts: string[];
+      defaultEffort: string;
+      speeds: string[];
+      defaultSpeed: string;
+      speedLabels: Record<string, string>;
+      priority: number;
+      index: number;
+    })
   | null {
   const slug = typeof model.slug === "string" ? model.slug.trim() : "";
   if (!slug) return null;
@@ -169,9 +230,20 @@ function toOption(
   const rawDefault =
     typeof model.default_reasoning_level === "string" ? model.default_reasoning_level.trim() : "";
   const defaultEffort = efforts.includes(rawDefault) ? rawDefault : "";
+  const { speeds, defaultSpeed, speedLabels } = readSpeeds(model);
   const label =
     typeof model.display_name === "string" && model.display_name.trim()
       ? model.display_name.trim()
       : slug;
-  return { value: slug, label, efforts, defaultEffort, priority, index };
+  return {
+    value: slug,
+    label,
+    efforts,
+    defaultEffort,
+    speeds,
+    defaultSpeed,
+    speedLabels,
+    priority,
+    index,
+  };
 }

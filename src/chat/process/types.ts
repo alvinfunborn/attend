@@ -1,4 +1,4 @@
-import type { ChatAttachment, SessionEffort } from "../driver.js";
+import type { ChatAttachment, SessionEffort, SessionSpeed } from "../driver.js";
 
 export type ProcessSandbox = "read-only" | "workspace-write" | "danger-full-access";
 
@@ -9,6 +9,7 @@ export interface ProcessTurnRequest {
   resume?: string;
   model?: string;
   effort?: SessionEffort;
+  speed?: SessionSpeed;
   sandbox?: ProcessSandbox;
   outputSchemaFile?: string;
 }

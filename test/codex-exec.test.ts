@@ -77,6 +77,18 @@ describe("prepareCodexExecInput", () => {
 });
 
 describe("buildArgs", () => {
+  it("passes model, effort, and service tier as config overrides", () => {
+    expect(
+      buildArgs({
+        cwd: "/tmp/proj",
+        prompt: "hello",
+        model: "gpt-5.6",
+        effort: "high",
+        speed: "priority",
+      }),
+    ).toContain('service_tier="priority"');
+  });
+
   it("passes image paths through --image for exec and resume", () => {
     expect(
       buildArgs({

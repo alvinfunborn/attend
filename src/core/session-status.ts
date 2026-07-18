@@ -1,5 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
+import { JsonFile, type JsonRepository } from "./json-file.js";
+import { TRANSIENT_SESSION_RETENTION_MS } from "./retention-policy.js";
+import { SqliteDocument } from "./state-database.js";
 
 export type SessionAttentionState = "read" | "seen" | "unread";
 export type StoredSessionAttentionState = Exclude<SessionAttentionState, "read">;
@@ -11,6 +12,8 @@ export interface SessionStatusRecord {
 
 interface SessionStatusFile {
   sessions?: Record<string, SessionStatusRecord>;
+  /** Last accepted mutation per session, including read tombstones. */
+  versions?: Record<string, number>;
 }
 
 function normalizeState(input: unknown): StoredSessionAttentionState | null {
@@ -34,28 +37,16 @@ function normalizeRecord(
 }
 
 export class SessionStatusStore {
-  private bySession = new Map<string, SessionStatusRecord>();
-  private loaded = false;
+  private readonly data: JsonRepository<Required<SessionStatusFile>>;
 
-  constructor(private readonly file: string) {}
-
-  private load(): void {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.file, "utf-8")) as SessionStatusFile;
-      for (const [sessionId, value] of Object.entries(raw.sessions ?? {})) {
-        const record = normalizeRecord(value);
-        if (record) this.bySession.set(sessionId, record);
-      }
-    } catch {
-      // missing/corrupt — start empty
-    }
+  constructor(file: string, databaseFile?: string) {
+    this.data = databaseFile
+      ? new SqliteDocument(databaseFile, "session-status", file, normalizeFile)
+      : new JsonFile(file, normalizeFile);
   }
 
   get(sessionId: string): SessionStatusRecord | null {
-    this.load();
-    const found = this.bySession.get(sessionId);
+    const found = this.data.read().sessions[sessionId];
     return found ? { ...found } : null;
   }
 
@@ -68,30 +59,66 @@ export class SessionStatusStore {
     state: SessionAttentionState,
     updatedAt = Date.now(),
   ): SessionStatusRecord | null {
-    this.load();
-    if (state === "read") {
-      this.bySession.delete(sessionId);
-      this.persist();
-      return null;
-    }
-    const record: SessionStatusRecord = {
-      state,
-      updatedAt: normalizeUpdatedAt(updatedAt),
-    };
-    this.bySession.set(sessionId, record);
-    this.persist();
-    return { ...record };
+    return this.data.update((data) => {
+      const incoming = normalizeUpdatedAt(updatedAt) ?? Date.now();
+      const previousVersion = data.versions[sessionId] ?? 0;
+      if (incoming <= previousVersion) {
+        const current = data.sessions[sessionId];
+        return current ? { ...current } : null;
+      }
+      data.versions[sessionId] = incoming;
+      if (state === "read") {
+        delete data.sessions[sessionId];
+        return null;
+      }
+      const record: SessionStatusRecord = {
+        state,
+        updatedAt: incoming,
+      };
+      data.sessions[sessionId] = record;
+      return { ...record };
+    });
   }
 
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(
-        this.file,
-        JSON.stringify({ sessions: Object.fromEntries(this.bySession) }, null, 2),
-      );
-    } catch {
-      // best-effort persistence
-    }
+  /** Remove old transient attention flags; records without a trustworthy timestamp are retained. */
+  prune(now = Date.now()): number {
+    const cutoff = now - TRANSIENT_SESSION_RETENTION_MS;
+    return this.data.transact((data) => {
+      let removed = 0;
+      let changed = false;
+      for (const [sessionId, record] of Object.entries(data.sessions)) {
+        if (record.updatedAt !== null && record.updatedAt < cutoff) {
+          delete data.sessions[sessionId];
+          removed += 1;
+          changed = true;
+        }
+      }
+      for (const [sessionId, updatedAt] of Object.entries(data.versions)) {
+        if (updatedAt < cutoff) {
+          delete data.versions[sessionId];
+          changed = true;
+        }
+      }
+      return { result: removed, changed };
+    });
   }
+}
+
+function normalizeFile(value: unknown): Required<SessionStatusFile> {
+  const input = value && typeof value === "object" ? (value as SessionStatusFile) : {};
+  const sessions: Record<string, SessionStatusRecord> = {};
+  for (const [sessionId, value] of Object.entries(input.sessions ?? {})) {
+    const record = normalizeRecord(value);
+    if (record) sessions[sessionId] = record;
+  }
+  const versions: Record<string, number> = {};
+  for (const [sessionId, value] of Object.entries(input.versions ?? {})) {
+    const updatedAt = normalizeUpdatedAt(value);
+    if (updatedAt !== null) versions[sessionId] = updatedAt;
+  }
+  for (const [sessionId, record] of Object.entries(sessions)) {
+    if (record.updatedAt !== null)
+      versions[sessionId] = Math.max(versions[sessionId] ?? 0, record.updatedAt);
+  }
+  return { sessions, versions };
 }

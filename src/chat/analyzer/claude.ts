@@ -1,8 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { Analysis } from "../../core/daemon/cache.js";
-import { parseAnalysis, parseAvoidancePrompt } from "../../core/daemon/parse.js";
+import {
+  MAX_PENDING_TURNS_PER_ANALYSIS,
+  projectCollaborationTurns,
+} from "../../core/collaboration.js";
+import {
+  parseAnalysis,
+  parseAvoidancePrompt,
+  parseCollaborationLabels,
+} from "../../core/daemon/parse.js";
 import type { QueryFn } from "../claude/driver.js";
 import { toUiEventsFromClaude } from "../claude/events.js";
 import { readClaudeTranscript } from "../transcript.js";
@@ -13,7 +19,8 @@ import {
   condenseTranscript,
   requestPrompt,
 } from "./contract.js";
-import type { SessionAnalyzer } from "./index.js";
+import type { AnalyzerVerdict, SessionAnalyzer } from "./index.js";
+import { consumeAnalyzerStream } from "./timeout.js";
 
 /** The Claude daemon's standing contract — sent once at spawn, then it resumes. */
 const SEED = `You are the *attend daemon* for a single coding session. Your only job: each
@@ -35,52 +42,93 @@ This first message has no transcript yet — reply with brief "new session", sta
  * Claude session analyzer: drives a real Claude session (Agent SDK) as the
  * daemon, and parses its JSON verdict. It deliberately avoids pinning
  * model/effort/tool settings so the daemon follows the user's normal Claude
- * defaults instead of a separate analyzer profile. `query` is injectable so
- * tests never hit the network.
+ * defaults instead of a separate analyzer profile. A system-CLI-bound query is
+ * required so this adapter can never fall back to the SDK-bundled executable.
  */
 export class ClaudeAnalyzer implements SessionAnalyzer {
   readonly vendor = "claude";
 
   constructor(
     private readonly claudeProjects: string,
-    private readonly queryFn: QueryFn = query,
+    private readonly queryFn: QueryFn,
   ) {}
 
   async spawn(cwd: string): Promise<string | null> {
     let sessionId: string | null = null;
-    for await (const msg of this.queryFn({ prompt: SEED, options: this.options(cwd) })) {
-      for (const ev of toUiEventsFromClaude(msg))
-        if (ev.kind === "session" && ev.sessionId) sessionId = ev.sessionId;
-    }
+    const stream = this.queryFn({ prompt: SEED, options: this.options(cwd) });
+    await consumeAnalyzerStream(
+      stream,
+      (msg) => {
+        for (const ev of toUiEventsFromClaude(msg))
+          if (ev.kind === "session" && ev.sessionId) sessionId = ev.sessionId;
+      },
+      () => stream.interrupt(),
+    );
     return sessionId;
   }
 
-  async analyze(daemonId: string, cwd: string, taskId: string): Promise<Analysis | null> {
+  async analyze(
+    daemonId: string,
+    cwd: string,
+    taskId: string,
+    knownTurnIds: ReadonlySet<string> = new Set(),
+    analysisFromAt: number | null = null,
+    uiContext = "",
+  ): Promise<AnalyzerVerdict | null> {
     const file = this.findSessionFile(taskId);
     // The daemon needs the true session opening, not "the first message from the
     // last 200 rows"; otherwise long sessions collapse to a late subtask such as
     // "create PR". We read the full transcript, then condense it ourselves.
-    const transcript = file
-      ? condenseTranscript(readClaudeTranscript(file, Number.POSITIVE_INFINITY))
-      : "";
+    const messages = file ? readClaudeTranscript(file, Number.POSITIVE_INFINITY) : [];
+    const transcript = condenseTranscript(messages);
+    const observedTurns = projectCollaborationTurns("claude", taskId, messages, analysisFromAt);
+    const pendingTurns = observedTurns
+      .filter((turn) => !knownTurnIds.has(turn.turnId))
+      .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
     let text = "";
     const options = { ...this.options(cwd), resume: daemonId };
-    for await (const msg of this.queryFn({ prompt: requestPrompt(transcript), options })) {
-      for (const ev of toUiEventsFromClaude(msg)) if (ev.kind === "assistant_text") text += ev.text;
-    }
-    return parseAnalysis(text);
+    const stream = this.queryFn({
+      prompt: requestPrompt(transcript, pendingTurns, uiContext),
+      options,
+    });
+    await consumeAnalyzerStream(
+      stream,
+      (msg) => {
+        for (const ev of toUiEventsFromClaude(msg))
+          if (ev.kind === "assistant_text") text += ev.text;
+      },
+      () => stream.interrupt(),
+    );
+    const analysis = parseAnalysis(text);
+    if (!analysis) return null;
+    return {
+      analysis,
+      observedTurns,
+      labels: parseCollaborationLabels(text, new Set(pendingTurns.map((turn) => turn.turnId))),
+    };
   }
 
-  async avoidancePrompt(daemonId: string, cwd: string, taskId: string): Promise<string | null> {
+  async avoidancePrompt(
+    daemonId: string,
+    cwd: string,
+    taskId: string,
+    uiContext = "",
+  ): Promise<string | null> {
     const file = this.findSessionFile(taskId);
     const transcript = file
       ? condenseTranscript(readClaudeTranscript(file, Number.POSITIVE_INFINITY))
       : "";
     let text = "";
     const options = { ...this.options(cwd), resume: daemonId };
-    for await (const msg of this.queryFn({ prompt: avoidancePromptRequest(transcript), options })) {
-      for (const ev of toUiEventsFromClaude(msg)) if (ev.kind === "assistant_text") text += ev.text;
-    }
+    const stream = this.queryFn({ prompt: avoidancePromptRequest(transcript, uiContext), options });
+    await consumeAnalyzerStream(
+      stream,
+      (msg) => {
+        for (const ev of toUiEventsFromClaude(msg))
+          if (ev.kind === "assistant_text") text += ev.text;
+      },
+      () => stream.interrupt(),
+    );
     return parseAvoidancePrompt(text);
   }
 

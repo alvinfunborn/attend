@@ -24,16 +24,53 @@ function resultText(content: unknown): string {
   return "";
 }
 
+function configValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.trim();
+  return clean && !clean.startsWith("<") ? clean : undefined;
+}
+
+function fastModeSpeed(value: unknown): string | undefined {
+  if (value === "on" || value === "cooldown") return "fast";
+  if (value === "off") return "standard";
+  return undefined;
+}
+
 /** Translate Claude Agent SDK messages at the adapter boundary. */
 export function toUiEventsFromClaude(message: SDKMessage): UiEvent[] {
   const events: UiEvent[] = [];
 
   if (message.type === "system" && "session_id" in message && message.session_id) {
     events.push({ kind: "session", sessionId: message.session_id });
+    if (message.subtype === "init") {
+      const model = configValue(message.model);
+      const speed = fastModeSpeed(message.fast_mode_state);
+      if (model || speed)
+        events.push({
+          kind: "run_config",
+          source: "provider",
+          ...(model ? { model } : {}),
+          ...(speed ? { speed } : {}),
+        });
+    }
   }
 
   if (message.type === "assistant") {
-    const content = (message.message as { content?: unknown })?.content;
+    const providerMessage = message.message as {
+      content?: unknown;
+      model?: unknown;
+      usage?: { speed?: unknown };
+    };
+    const model = configValue(providerMessage.model);
+    const speed = configValue(providerMessage.usage?.speed);
+    if (model || speed)
+      events.push({
+        kind: "run_config",
+        source: "provider",
+        ...(model ? { model } : {}),
+        ...(speed ? { speed } : {}),
+      });
+    const content = providerMessage.content;
     const blocks: ContentBlock[] = Array.isArray(content)
       ? (content as ContentBlock[])
       : typeof content === "string"

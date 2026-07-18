@@ -1,3 +1,10 @@
+import {
+  type CollaborationTurnLabel,
+  isCollaborationFeedbackTarget,
+  isCollaborationIntent,
+  isCollaborationSteering,
+  parseCollaborationHandoff,
+} from "../collaboration.js";
 import type { Analysis, AnalysisState } from "./cache.js";
 
 /**
@@ -23,11 +30,14 @@ export function parseAnalysis(text: string): Analysis | null {
     brief: shorten(brief, 80),
     state: parseState(obj.state),
     priority: clampNum(obj.priority, 0, 10),
-    etaMin: Math.max(1, Math.round(clampNum(obj.etaMin, 0, 600))),
+    etaMin: obj.etaMin == null ? 0 : Math.max(0, Math.round(clampNum(obj.etaMin, 0, 600))),
     reason: typeof obj.reason === "string" ? shorten(obj.reason.trim(), 200) : "",
   };
   if ("avoidancePrompt" in obj)
     out.avoidancePrompt = parseAvoidancePromptValue(obj.avoidancePrompt);
+  // nextStep is part of the regular verdict (same shorten/empty→null shape); when
+  // the daemon emits "" (a decision is needed) this stores null so the UI hides it.
+  if ("nextStep" in obj) out.nextStep = parseAvoidancePromptValue(obj.nextStep);
   return out;
 }
 
@@ -40,6 +50,56 @@ export function parseAvoidancePrompt(text: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Parse turn classifications independently so a malformed item never discards session analysis. */
+export function parseCollaborationLabels(
+  text: string,
+  allowedTurnIds: ReadonlySet<string>,
+): CollaborationTurnLabel[] {
+  const json = lastJsonObject(text);
+  if (!json) return [];
+  let turns: unknown;
+  try {
+    turns = (JSON.parse(json) as Record<string, unknown>).turns;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(turns)) return [];
+  const labels: CollaborationTurnLabel[] = [];
+  const seen = new Set<string>();
+  for (const raw of turns) {
+    if (!raw || typeof raw !== "object") continue;
+    const item = raw as Record<string, unknown>;
+    const turnId = typeof item.turnId === "string" ? item.turnId.trim() : "";
+    if (!turnId || seen.has(turnId) || !allowedTurnIds.has(turnId)) continue;
+    if (
+      !isCollaborationIntent(item.intent) ||
+      !isCollaborationSteering(item.steering) ||
+      !isCollaborationFeedbackTarget(item.feedbackTarget)
+    )
+      continue;
+    const researchSource =
+      item.intent === "research" &&
+      (item.researchSource === "official" ||
+        item.researchSource === "community" ||
+        item.researchSource === "repository" ||
+        item.researchSource === "other")
+        ? item.researchSource
+        : undefined;
+    const confidence = Number(item.confidence);
+    labels.push({
+      turnId,
+      intent: item.intent,
+      ...(researchSource ? { researchSource } : {}),
+      steering: item.steering,
+      feedbackTarget: item.feedbackTarget,
+      handoff: parseCollaborationHandoff(item.handoff),
+      confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null,
+    });
+    seen.add(turnId);
+  }
+  return labels;
 }
 
 function parseAvoidancePromptValue(v: unknown): string | null {
@@ -88,7 +148,7 @@ function lastJsonObject(text: string): string | null {
       else if (ch === '"') inStr = false;
       continue;
     }
-    if (ch === '"') inStr = true;
+    if (ch === '"' && depth > 0) inStr = true;
     else if (ch === "{") {
       if (depth === 0) start = i;
       depth++;

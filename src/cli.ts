@@ -1,18 +1,16 @@
 import fs from "node:fs";
 import { parseArgs } from "node:util";
 import open from "open";
-import { scaffoldBrief } from "./commands/new.js";
 import { resolveConfig } from "./config.js";
 import { type RunningServer, startServer } from "./server.js";
 
-const HELP = `attend — local web dashboard for brief-based AI session management
+const HELP = `attend — local attention-management console for AI coding sessions
 
 Usage:
-  attend [dirs...] [options]     Serve the dashboard (scans dirs for brief.md)
-  attend new <name>              Scaffold projects/<name>/brief.md in the current dir
+  attend [dirs...] [options]     Serve the dashboard
 
 Arguments:
-  dirs                 Vault roots to scan for brief.md (default: current directory)
+  dirs                 Project roots used to limit the session list (default: all sessions)
 
 Options:
   -p, --port <n>       Port to listen on (default: 5050)
@@ -33,7 +31,7 @@ function installShutdownHandlers(server: RunningServer): void {
     if (closing) return;
     closing = true;
     process.stderr.write(
-      `attend: received ${signal}; closing web service and leaving active sessions running.\n`,
+      `attend: received ${signal}; closing web service and stopping active sessions.\n`,
     );
     server.close();
     process.exitCode = 0;
@@ -60,20 +58,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (positionals[0] === "new") {
-    const name = positionals[1];
-    if (!name) {
-      process.stderr.write("usage: attend new <name>\n");
-      process.exitCode = 1;
-      return;
-    }
-    const res = scaffoldBrief(name, process.cwd());
-    process.stdout.write(
-      res.created ? `created ${res.path}\n` : `already exists, left untouched: ${res.path}\n`,
-    );
-    return;
-  }
-
   const config = resolveConfig({
     positionals,
     port: values.port,
@@ -87,6 +71,19 @@ async function main(): Promise<void> {
   installShutdownHandlers(server);
 
   process.stdout.write(`attend — running at ${server.url}\n`);
+  const availableVendors = server.vendors.filter((status) => status.available);
+  process.stdout.write(
+    `vendors: ${
+      availableVendors.length
+        ? availableVendors
+            .map((status) => `${status.vendor}${status.version ? ` ${status.version}` : ""}`)
+            .join(", ")
+        : "none available"
+    }\n`,
+  );
+  for (const status of server.vendors) {
+    if (!status.available && status.message) process.stderr.write(`attend: ${status.message}\n`);
+  }
   if (config.scopeRoots.length > 0) {
     process.stdout.write("scoped to sessions under:\n");
     const missing: string[] = [];

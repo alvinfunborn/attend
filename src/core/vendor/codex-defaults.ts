@@ -4,12 +4,28 @@ import type { ModelDefaults } from "../model-options.js";
 interface RpcMessage {
   id?: number;
   result?: {
-    config?: { model?: unknown; model_reasoning_effort?: unknown };
+    config?: {
+      model?: unknown;
+      model_reasoning_effort?: unknown;
+      service_tier?: unknown;
+      serviceTier?: unknown;
+    };
   };
 }
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+export function defaultsFromCodexRpc(value: unknown): ModelDefaults | null {
+  const message = value && typeof value === "object" ? (value as RpcMessage) : {};
+  if (message.id !== 2) return null;
+  const config = message.result?.config;
+  return {
+    model: text(config?.model),
+    effort: text(config?.model_reasoning_effort),
+    speed: text(config?.service_tier ?? config?.serviceTier),
+  };
 }
 
 /** Ask Codex's config engine for the effective, cwd-aware CLI defaults. */
@@ -18,7 +34,7 @@ export function inspectCodexDefaults(
   cwd: string,
   timeoutMs = 10_000,
 ): Promise<ModelDefaults> {
-  if (!codexBin) return Promise.resolve({ model: "", effort: "" });
+  if (!codexBin) return Promise.resolve({ model: "", effort: "", speed: "" });
   return new Promise((resolve) => {
     const child = spawn(codexBin, ["app-server", "--stdio"], {
       cwd,
@@ -33,10 +49,11 @@ export function inspectCodexDefaults(
       child.kill();
       resolve(defaults);
     };
-    const timer = setTimeout(() => finish({ model: "", effort: "" }), timeoutMs);
+    const timer = setTimeout(() => finish({ model: "", effort: "", speed: "" }), timeoutMs);
     timer.unref();
-    child.on("error", () => finish({ model: "", effort: "" }));
-    child.on("exit", () => finish({ model: "", effort: "" }));
+    child.on("error", () => finish({ model: "", effort: "", speed: "" }));
+    child.on("exit", () => finish({ model: "", effort: "", speed: "" }));
+    child.stdin.on("error", () => finish({ model: "", effort: "", speed: "" }));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       buffer += chunk;
@@ -55,11 +72,7 @@ export function inspectCodexDefaults(
             `${JSON.stringify({ method: "config/read", id: 2, params: { cwd, includeLayers: false } })}\n`,
           );
         } else if (message.id === 2) {
-          const config = message.result?.config;
-          finish({
-            model: text(config?.model),
-            effort: text(config?.model_reasoning_effort),
-          });
+          finish(defaultsFromCodexRpc(message) ?? { model: "", effort: "", speed: "" });
         }
       }
     });

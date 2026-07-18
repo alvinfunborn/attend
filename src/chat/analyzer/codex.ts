@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Analysis } from "../../core/daemon/cache.js";
-import { parseAnalysis, parseAvoidancePrompt } from "../../core/daemon/parse.js";
+import {
+  MAX_PENDING_TURNS_PER_ANALYSIS,
+  projectCollaborationTurns,
+} from "../../core/collaboration.js";
+import {
+  parseAnalysis,
+  parseAvoidancePrompt,
+  parseCollaborationLabels,
+} from "../../core/daemon/parse.js";
 import { toUiEventsFromCodex } from "../codex/events.js";
 import type { CodexExecFn } from "../codex/exec.js";
 import { readCodexTranscript } from "../codex/transcript.js";
@@ -12,7 +19,8 @@ import {
   condenseTranscript,
   requestPrompt,
 } from "./contract.js";
-import type { SessionAnalyzer } from "./index.js";
+import type { AnalyzerVerdict, SessionAnalyzer } from "./index.js";
+import { consumeAnalyzerStream } from "./timeout.js";
 
 /** The Codex daemon's standing contract — sent once at spawn, then it resumes.
  *  Same vendor-neutral verdict shape as the Claude daemon (DESIGN invariant 4). */
@@ -48,37 +56,67 @@ export class CodexAnalyzer implements SessionAnalyzer {
 
   async spawn(cwd: string): Promise<string | null> {
     if (!this.execFn) return null;
-    const handle = this.execFn({ cwd, prompt: SEED });
+    const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only" });
     let sessionId: string | null = null;
-    for await (const ev of handle.events) {
-      for (const u of toUiEventsFromCodex(ev)) {
-        if (u.kind === "session" && u.sessionId) sessionId = u.sessionId;
-      }
-    }
+    await consumeAnalyzerStream(
+      handle.events,
+      (ev) => {
+        for (const u of toUiEventsFromCodex(ev)) {
+          if (u.kind === "session" && u.sessionId) sessionId = u.sessionId;
+        }
+      },
+      () => handle.kill(),
+    );
     return sessionId;
   }
 
-  async analyze(daemonId: string, cwd: string, taskId: string): Promise<Analysis | null> {
+  async analyze(
+    daemonId: string,
+    cwd: string,
+    taskId: string,
+    knownTurnIds: ReadonlySet<string> = new Set(),
+    analysisFromAt: number | null = null,
+    uiContext = "",
+  ): Promise<AnalyzerVerdict | null> {
     if (!this.execFn) return null;
     const file = this.findRollout(this.codexSessions, taskId);
     // Same rationale as ClaudeAnalyzer: keep the real opening goal available to
     // the condense step so long sessions don't collapse to their final PR/admin step.
-    const transcript = file
-      ? condenseTranscript(readCodexTranscript(file, Number.POSITIVE_INFINITY))
-      : "";
+    const messages = file ? readCodexTranscript(file, Number.POSITIVE_INFINITY) : [];
+    const transcript = condenseTranscript(messages);
+    const observedTurns = projectCollaborationTurns("codex", taskId, messages, analysisFromAt);
+    const pendingTurns = observedTurns
+      .filter((turn) => !knownTurnIds.has(turn.turnId))
+      .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
     const handle = this.execFn({
       cwd,
-      prompt: requestPrompt(transcript),
+      prompt: requestPrompt(transcript, pendingTurns, uiContext),
       resume: daemonId,
+      sandbox: "read-only",
     });
     let text = "";
-    for await (const ev of handle.events) {
-      for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
-    }
-    return parseAnalysis(text);
+    await consumeAnalyzerStream(
+      handle.events,
+      (ev) => {
+        for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
+      },
+      () => handle.kill(),
+    );
+    const analysis = parseAnalysis(text);
+    if (!analysis) return null;
+    return {
+      analysis,
+      observedTurns,
+      labels: parseCollaborationLabels(text, new Set(pendingTurns.map((turn) => turn.turnId))),
+    };
   }
 
-  async avoidancePrompt(daemonId: string, cwd: string, taskId: string): Promise<string | null> {
+  async avoidancePrompt(
+    daemonId: string,
+    cwd: string,
+    taskId: string,
+    uiContext = "",
+  ): Promise<string | null> {
     if (!this.execFn) return null;
     const file = this.findRollout(this.codexSessions, taskId);
     const transcript = file
@@ -86,13 +124,18 @@ export class CodexAnalyzer implements SessionAnalyzer {
       : "";
     const handle = this.execFn({
       cwd,
-      prompt: avoidancePromptRequest(transcript),
+      prompt: avoidancePromptRequest(transcript, uiContext),
       resume: daemonId,
+      sandbox: "read-only",
     });
     let text = "";
-    for await (const ev of handle.events) {
-      for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
-    }
+    await consumeAnalyzerStream(
+      handle.events,
+      (ev) => {
+        for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
+      },
+      () => handle.kill(),
+    );
     return parseAvoidancePrompt(text);
   }
 

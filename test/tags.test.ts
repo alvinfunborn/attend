@@ -60,6 +60,22 @@ describe("TagStore", () => {
     expect(store.tagsFor("s2")).toEqual([]);
   });
 
+  it("clears every session binding without deleting the global tag", () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+
+    const store = new TagStore(file);
+    store.setSessionTags("s1", ["work", "urgent"]);
+    store.setSessionTags("s2", ["urgent"]);
+    store.setSessionTags("scope-id:vault", ["urgent"]);
+
+    expect(store.clearSessionBindings("urgent")).toEqual(["work", "urgent"]);
+    expect(store.list()).toEqual(["work", "urgent"]);
+    expect(store.tagsFor("s1")).toEqual(["work"]);
+    expect(store.tagsFor("s2")).toEqual([]);
+    expect(store.tagsFor("scope-id:vault")).toEqual(["urgent"]);
+  });
+
   it("reorders global tags while preserving unmentioned tags in place", () => {
     const uniq = Math.random().toString(36).slice(2);
     const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);

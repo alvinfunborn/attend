@@ -9,6 +9,12 @@ export interface PreparedCodexInput {
   cleanup(): void;
 }
 
+export function validateCodexAttachments(attachments: ChatAttachment[]): string | null {
+  return attachments.some((attachment) => attachment.kind === "document")
+    ? "Codex chat does not support PDF attachments"
+    : null;
+}
+
 function sanitizeAttachmentName(name: string): string {
   const base = path.basename(name).trim();
   return base.replace(/[^A-Za-z0-9._-]+/g, "-") || "attachment";

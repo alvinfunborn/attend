@@ -1,5 +1,5 @@
-import fs from "node:fs";
-import path from "node:path";
+import { JsonFile, type JsonRepository } from "../json-file.js";
+import { SqliteDocument } from "../state-database.js";
 
 export interface DaemonEntry {
   /** the daemon's own session id (filtered out of the listing) */
@@ -19,54 +19,53 @@ export interface DaemonEntry {
  * filtered out of our product").
  */
 export class DaemonRegistry {
-  private map = new Map<string, DaemonEntry>();
-  private loaded = false;
+  private readonly data: JsonRepository<Record<string, DaemonEntry>>;
 
-  constructor(private readonly file: string) {}
-
-  private load(): void {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const obj = JSON.parse(fs.readFileSync(this.file, "utf-8")) as Record<string, DaemonEntry>;
-      for (const [k, v] of Object.entries(obj)) this.map.set(k, v);
-    } catch {
-      // missing/corrupt — start empty
-    }
+  constructor(file: string, databaseFile?: string) {
+    this.data = databaseFile
+      ? new SqliteDocument(databaseFile, "daemon-registry", file, normalizeEntries)
+      : new JsonFile(file, normalizeEntries);
   }
 
   get(taskId: string): DaemonEntry | undefined {
-    this.load();
-    return this.map.get(taskId);
+    return this.data.read()[taskId];
   }
 
   has(taskId: string): boolean {
-    this.load();
-    return this.map.has(taskId);
+    return Object.hasOwn(this.data.read(), taskId);
   }
 
   set(taskId: string, entry: DaemonEntry): void {
-    this.load();
-    this.map.set(taskId, entry);
-    this.persist();
+    this.data.update((entries) => {
+      entries[taskId] = entry;
+    });
   }
 
   /** Every daemon session id — used to filter daemons out of the listing. */
   daemonIds(): Set<string> {
-    this.load();
     const ids = new Set<string>();
-    for (const v of this.map.values()) ids.add(v.daemonId);
+    for (const v of Object.values(this.data.read())) ids.add(v.daemonId);
     return ids;
   }
+}
 
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      const obj: Record<string, DaemonEntry> = {};
-      for (const [k, v] of this.map) obj[k] = v;
-      fs.writeFileSync(this.file, JSON.stringify(obj, null, 2));
-    } catch {
-      // best-effort persistence
+function normalizeEntries(value: unknown): Record<string, DaemonEntry> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries: Record<string, DaemonEntry> = {};
+  for (const [taskId, raw] of Object.entries(value)) {
+    if (!raw || typeof raw !== "object") continue;
+    const candidate = raw as Partial<DaemonEntry>;
+    if (
+      typeof candidate.daemonId === "string" &&
+      typeof candidate.cwd === "string" &&
+      typeof candidate.vendor === "string"
+    ) {
+      entries[taskId] = {
+        daemonId: candidate.daemonId,
+        cwd: candidate.cwd,
+        vendor: candidate.vendor,
+      };
     }
   }
+  return entries;
 }

@@ -13,6 +13,25 @@ function jsonl(...lines: object[]): string {
 }
 
 describe("parseCodexTranscript (RolloutLine schema)", () => {
+  it("restores the latest turn's model and effort from turn_context", () => {
+    const raw = jsonl(
+      {
+        type: "turn_context",
+        payload: { model: "gpt-old", effort: "medium" },
+      },
+      {
+        type: "turn_context",
+        payload: { model: "gpt-current", effort: "xhigh", service_tier: "priority" },
+      },
+    );
+    expect(parseCodexTranscript("rollout.jsonl", raw).runConfig).toEqual({
+      source: "provider",
+      model: "gpt-current",
+      effort: "xhigh",
+      speed: "priority",
+    });
+  });
+
   it("reads cwd from session_meta, counts user prompts and tool-call actions", () => {
     const raw = jsonl(
       {
@@ -115,6 +134,25 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     expect(s.prompts).toBe(2); // only the two real prompts
     expect(s.title).toBe("investigate this call"); // first REAL prompt, not the env block
     expect(s.lastPrompt).toBe("now add the transcript");
+  });
+
+  it("reconstructs a typed slash command instead of dropping it as metadata", () => {
+    const raw = jsonl({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "<command-name>/review</command-name><command-args>src</command-args>",
+          },
+        ],
+      },
+    });
+    const session = parseCodexTranscript("r.jsonl", raw);
+    expect(session.prompts).toBe(1);
+    expect(session.title).toBe("/review src");
   });
 
   it("strips provider-fork context from title and latest prompt", () => {

@@ -2,10 +2,10 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
-  type Options,
-  type PermissionMode,
-  type SDKUserMessage,
+import type {
+  Options,
+  PermissionMode,
+  SDKUserMessage,
   query,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam, MessageParam, TextBlockParam } from "@anthropic-ai/sdk/resources";
@@ -18,7 +18,9 @@ import type {
   UserTurn,
 } from "../driver.js";
 import type { UiEvent } from "../events.js";
+import { providerErrorPayload } from "../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../runtime.js";
+import { classifyClaudeError } from "./errors.js";
 import { toUiEventsFromClaude } from "./events.js";
 
 /** Injectable so tests can drive the adapter without the real SDK or network. */
@@ -159,7 +161,7 @@ export interface ClaudeRun extends DriverRun {
   vendor: "claude";
   input: ClaudeInputQueue;
   done: boolean;
-  interrupt: (() => Promise<void>) | null;
+  interrupt: (() => Promise<unknown>) | null;
   awaitingQuestionToolUseId: string | null;
   stallTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -179,13 +181,14 @@ function isTurnEvent(event: UiEvent): boolean {
 /** Claude Agent SDK adapter: one long-lived SDK stream per live session. */
 export class ClaudeSdkDriver implements ChatDriver {
   readonly vendor = "claude";
+  readonly classifyError = classifyClaudeError;
   private readonly runtime = new DriverRuntime<ClaudeRun>({
     isActive: (run) => run.turnActive && !run.done,
     shouldReplay: (run) => run.turnActive || !!run.awaitingQuestionToolUseId,
   });
 
   constructor(
-    private readonly queryFn: QueryFn = query,
+    private readonly queryFn: QueryFn,
     private readonly stallTimeoutMs: number = STALL_TIMEOUT_MS,
   ) {}
 
@@ -200,7 +203,8 @@ export class ClaudeSdkDriver implements ChatDriver {
   }
 
   get(sessionId: string): ClaudeRun | undefined {
-    return this.runtime.get(sessionId);
+    const run = this.runtime.get(sessionId);
+    return run?.done ? undefined : run;
   }
 
   activeSessions(): string[] {
@@ -213,7 +217,10 @@ export class ClaudeSdkDriver implements ChatDriver {
 
   shutdown(): void {
     this.runtime.clearPending();
-    for (const run of new Set(this.runtime.values())) run.input.close();
+    for (const run of new Set(this.runtime.values())) {
+      run.input.close();
+      if (run.turnActive && run.interrupt) void run.interrupt().catch(() => {});
+    }
   }
 
   start(opts: StartOpts): Promise<string> {
@@ -251,6 +258,9 @@ export class ClaudeSdkDriver implements ChatDriver {
       permissionMode: mode,
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.effort ? { effort: opts.effort as Options["effort"] } : {}),
+      ...(opts.speed
+        ? { settings: { fastMode: opts.speed === "fast" } as NonNullable<Options["settings"]> }
+        : {}),
       ...(mode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       ...(opts.resume ? { resume: opts.resume } : {}),
       ...(opts.forkSession ? { forkSession: true } : {}),
@@ -280,18 +290,37 @@ export class ClaudeSdkDriver implements ChatDriver {
             });
           }
           for await (const message of stream) {
-            for (const event of toUiEventsFromClaude(message)) emit(event);
+            const events = toUiEventsFromClaude(message);
+            const knownFailure = events.reduce<ReturnType<typeof classifyClaudeError>>(
+              (known, event) =>
+                known ?? (event.kind === "error" ? this.classifyError(event.message) : null),
+              null,
+            );
+            for (const event of events) {
+              if (event.kind === "assistant_text" && knownFailure?.code.endsWith("_auth_required"))
+                continue;
+              if (event.kind === "error") {
+                Object.assign(event, providerErrorPayload(this.classifyError, event.message));
+              }
+              emit(event);
+            }
           }
         } catch (error) {
-          emit({ kind: "error", message: error instanceof Error ? error.message : String(error) });
-          if (!resolved) reject(error instanceof Error ? error : new Error(String(error)));
+          const failure = providerErrorPayload(this.classifyError, error);
+          emit({ kind: "error", ...failure });
+          if (!resolved) reject(new Error(failure.message, { cause: error }));
         } finally {
           run.input.cleanup();
           run.done = true;
           run.turnActive = false;
           this.scheduleStall(run);
           run.emitter.emit("done");
-          if (run.sessionId) settle(run.sessionId);
+          if (run.sessionId) {
+            settle(run.sessionId);
+            this.runtime.pruneInactive();
+          } else if (!resolved) {
+            reject(new Error("Claude stream ended before producing a session id"));
+          }
         }
       })();
     });
@@ -299,7 +328,7 @@ export class ClaudeSdkDriver implements ChatDriver {
 
   send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runtime.get(sessionId);
-    if (!run || run.done) return false;
+    if (!run || run.done || run.turnActive || run.awaitingQuestionToolUseId) return false;
     run.events = [];
     run.turnActive = true;
     run.turnStartedAt = Date.now();
@@ -322,8 +351,12 @@ export class ClaudeSdkDriver implements ChatDriver {
 
   async interrupt(sessionId: string): Promise<boolean> {
     const run = this.runtime.get(sessionId);
-    if (!run || run.done || !run.turnActive) return false;
-    if (run.interrupt) void run.interrupt().catch(() => {});
+    if (!run || run.done || !run.turnActive || !run.interrupt) return false;
+    try {
+      await withTimeout(run.interrupt(), 5_000, "Claude interrupt timed out");
+    } catch {
+      return false;
+    }
     this.emit(run, { kind: "result", ok: false, text: "interrupted" });
     return true;
   }
@@ -358,16 +391,36 @@ export class ClaudeSdkDriver implements ChatDriver {
       run.stallTimer = null;
     }
     if (run.done || !run.turnActive || this.stallTimeoutMs <= 0) return;
-    const timer = setTimeout(() => this.onStall(run), this.stallTimeoutMs);
+    const timer = setTimeout(() => void this.onStall(run), this.stallTimeoutMs);
     (timer as unknown as { unref?: () => void }).unref?.();
     run.stallTimer = timer;
   }
 
-  private onStall(run: ClaudeRun): void {
+  private async onStall(run: ClaudeRun): Promise<void> {
     run.stallTimer = null;
     if (run.done || !run.turnActive) return;
-    this.emit(run, { kind: "result", ok: false, text: "stalled" });
-    if (run.interrupt) void run.interrupt().catch(() => {});
+    if (!run.interrupt) return;
+    try {
+      await withTimeout(run.interrupt(), 5_000, "Claude interrupt timed out");
+      this.emit(run, { kind: "result", ok: false, text: "stalled" });
+    } catch {
+      this.scheduleStall(run);
+    }
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

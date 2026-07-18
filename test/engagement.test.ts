@@ -107,4 +107,15 @@ describe("EngagementStore", () => {
       lastViewedAt: 3210,
     });
   });
+
+  it("expires telemetry whose latest reliable timestamp is older than 180 days", () => {
+    const s = store();
+    const now = 200 * 86_400_000;
+    s.recordVisit("old", { viewedMs: 1_000, endedAt: 1 });
+    s.recordVisit("recent", { viewedMs: 1_000, endedAt: now - 10 * 86_400_000 });
+
+    expect(s.prune(now)).toBe(1);
+    expect(s.get("old")).toBeNull();
+    expect(s.get("recent")).not.toBeNull();
+  });
 });

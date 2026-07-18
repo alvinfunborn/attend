@@ -199,12 +199,12 @@ describe("DaemonOrchestrator", () => {
     expect(a?.priority).toBe(6);
   });
 
-  it("does not pin a special Codex daemon sandbox", async () => {
+  it("pins Codex daemon work to the read-only sandbox", async () => {
     const { orch, reg, cache } = make();
     cleanup.push(reg, cache);
     await orch.ensureDaemon("cx-1", "codex", os.tmpdir());
     expect(codexCalls[0]?.cwd).toBe(os.tmpdir());
-    expect(codexCalls[0]?.sandbox).toBeUndefined();
+    expect(codexCalls[0]?.sandbox).toBe("read-only");
   });
 
   it("spawns no daemon when Codex isn't installed (null exec → heuristic fallback)", async () => {

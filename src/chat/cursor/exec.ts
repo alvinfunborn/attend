@@ -76,8 +76,7 @@ function prepareInput(prompt: string, attachments: ChatAttachment[] = []): Prepa
 export function buildCursorArgs(req: ProcessTurnRequest): string[] {
   const args = ["--print", "--force", "--output-format", "stream-json", "--stream-partial-output"];
   if (req.resume) args.push(`--resume=${req.resume}`);
-  const model = req.effort?.includes("[") ? req.effort : req.model;
-  if (model) args.push("--model", model);
+  if (req.model) args.push("--model", req.model);
   args.push(req.prompt);
   return args;
 }
@@ -100,7 +99,13 @@ function toolShape(ev: CursorEvent): { name: string; body: { args?: unknown; res
 /** Convert Cursor stream-json into the compatibility protocol used by ProcessChatDriver. */
 export function cursorToProcessEvent(ev: CursorEvent): CodexEvent[] {
   if (ev.type === "system" && ev.subtype === "init" && ev.session_id) {
-    return [{ type: "thread.started", thread_id: ev.session_id }];
+    return [
+      {
+        type: "thread.started",
+        thread_id: ev.session_id,
+        ...(typeof ev.model === "string" && ev.model.trim() ? { model: ev.model.trim() } : {}),
+      },
+    ];
   }
   if (ev.type === "assistant") {
     const text = contentText(ev.message);
@@ -251,14 +256,26 @@ function spawnCursorExec(
         } catch {
           continue;
         }
-        const stored = transcriptLine(ev, req.cwd);
-        if (!transcript) pending.push(stored);
+        // Cursor's assistant events are cumulative snapshots under
+        // --stream-partial-output. Persisting every snapshot makes transcript
+        // size quadratic; keep only non-assistant protocol events and append one
+        // final assistant message when the turn terminates.
+        const finalAssistantLine =
+          ev.type === "result" && assistantText
+            ? transcriptLine(
+                { type: "assistant", message: { role: "assistant", content: assistantText } },
+                req.cwd,
+              )
+            : "";
+        const stored =
+          ev.type === "assistant" ? "" : finalAssistantLine + transcriptLine(ev, req.cwd);
+        if (!transcript && stored) pending.push(stored);
         if (!transcript && ev.session_id) {
           transcript = path.join(sessionsDir, `${ev.session_id}.jsonl`);
           if (pending.length) fs.appendFileSync(transcript, pending.join(""));
           pending.length = 0;
         } else if (transcript) {
-          fs.appendFileSync(transcript, stored);
+          if (stored) fs.appendFileSync(transcript, stored);
         }
         let normalizedAssistant: string | null = null;
         if (ev.type === "assistant") {

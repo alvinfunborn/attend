@@ -15,19 +15,19 @@ export interface ClaudeModelCatalogInspection {
 
 export type ClaudeModelQueryFactory = (cwd: string) => Query;
 export type ClaudeSettingsResolver = (cwd: string) => Promise<{
-  effective: { model?: unknown; effortLevel?: unknown };
+  effective: { model?: unknown; effortLevel?: unknown; fastMode?: unknown };
 }>;
 
 async function* emptyPrompt(): AsyncGenerator<SDKUserMessage> {}
 
-function createModelQuery(cwd: string, executable?: string | null): Query {
+function createModelQuery(cwd: string, executable: string): Query {
   return query({
     prompt: emptyPrompt(),
     options: {
       cwd,
       permissionMode: "plan",
       persistSession: false,
-      ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
+      pathToClaudeCodeExecutable: executable,
     },
   });
 }
@@ -65,7 +65,19 @@ function modelOptions(models: ModelInfo[]): ModelOption[] {
             typeof effort === "string" && effort.trim() && all.indexOf(effort) === index,
         )
       : [];
-    out.push({ value, label, ...(efforts.length ? { efforts } : {}) });
+    const supportsFastMode = model.supportsFastMode === true;
+    out.push({
+      value,
+      label,
+      ...(efforts.length ? { efforts } : {}),
+      ...(supportsFastMode
+        ? {
+            speeds: ["standard", "fast"],
+            defaultSpeed: "standard",
+            speedLabels: { standard: "Standard", fast: "Fast" },
+          }
+        : {}),
+    });
   }
   return out;
 }
@@ -82,7 +94,14 @@ export async function inspectClaudeModels(
   executable?: string | null,
   settingsResolver: ClaudeSettingsResolver = (settingsCwd) => resolveSettings({ cwd: settingsCwd }),
 ): Promise<ClaudeModelCatalogInspection> {
-  const modelQuery = createQuery ? createQuery(cwd) : createModelQuery(cwd, executable);
+  if (!createQuery && !executable) {
+    return {
+      models: [],
+      defaults: { model: "", effort: "", speed: "" },
+      warning: "Claude model discovery requires an installed system Claude CLI.",
+    };
+  }
+  const modelQuery = createQuery ? createQuery(cwd) : createModelQuery(cwd, executable as string);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const [models, settings] = await Promise.all([
@@ -103,11 +122,15 @@ export async function inspectClaudeModels(
     const configuredEffort = text(
       (settings?.effective as { effortLevel?: unknown } | undefined)?.effortLevel,
     );
+    const configuredFastMode = (settings?.effective as { fastMode?: unknown } | undefined)
+      ?.fastMode;
     return {
       models: options,
       defaults: {
         model: resolvedDefaultModel(models, configuredModel),
         effort: configuredEffort,
+        speed:
+          typeof configuredFastMode === "boolean" ? (configuredFastMode ? "fast" : "standard") : "",
       },
       warning: options.length
         ? null
@@ -116,7 +139,7 @@ export async function inspectClaudeModels(
   } catch {
     return {
       models: [],
-      defaults: { model: "", effort: "" },
+      defaults: { model: "", effort: "", speed: "" },
       warning: "Claude model discovery failed; Attend will use Claude's default model.",
     };
   } finally {

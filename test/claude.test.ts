@@ -6,6 +6,28 @@ function jsonl(...lines: object[]): string {
 }
 
 describe("parseClaudeTranscript", () => {
+  it("restores the latest real assistant model and speed", () => {
+    const raw = jsonl(
+      {
+        type: "assistant",
+        message: { model: "claude-old", usage: { speed: "standard" }, content: "old" },
+      },
+      {
+        type: "assistant",
+        message: { model: "claude-current", usage: { speed: "fast" }, content: "current" },
+      },
+      {
+        type: "assistant",
+        message: { model: "<synthetic>", content: "synthetic" },
+      },
+    );
+    expect(parseClaudeTranscript("s.jsonl", raw).runConfig).toEqual({
+      source: "provider",
+      model: "claude-current",
+      speed: "fast",
+    });
+  });
+
   it("counts user text prompts and assistant action tool uses; captures cwd + ts span", () => {
     const raw = jsonl(
       {
@@ -38,7 +60,7 @@ describe("parseClaudeTranscript", () => {
     ]);
   });
 
-  it("ignores command-like prompts (content starting with '<') and non-action tools", () => {
+  it("keeps typed slash commands but ignores provider metadata and non-action tools", () => {
     const raw = jsonl(
       { type: "user", message: { content: "<command-name>clear</command-name>" } },
       {
@@ -53,7 +75,8 @@ describe("parseClaudeTranscript", () => {
       { type: "assistant", message: { content: [{ type: "tool_use", name: "Read" }] } },
     );
     const s = parseClaudeTranscript("s.jsonl", raw);
-    expect(s.prompts).toBe(0);
+    expect(s.prompts).toBe(1);
+    expect(s.title).toBe("clear");
     expect(s.actions).toBe(0);
   });
 

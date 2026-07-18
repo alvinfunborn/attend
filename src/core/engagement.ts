@@ -1,5 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
+import { JsonFile, type JsonRepository } from "./json-file.js";
+import { TRANSIENT_SESSION_RETENTION_MS } from "./retention-policy.js";
+import { SqliteDocument } from "./state-database.js";
 
 export const REVIEW_MIN_DWELL_MS = 20_000;
 
@@ -57,84 +58,86 @@ function qualifiesReview(sample: EngagementVisitSample): boolean {
 }
 
 export class EngagementStore {
-  private bySession = new Map<string, EngagementRecord>();
-  private loaded = false;
+  private readonly data: JsonRepository<Required<EngagementFile>>;
 
-  constructor(private readonly file: string) {}
-
-  private load(): void {
-    if (this.loaded) return;
-    this.loaded = true;
-    try {
-      const raw = JSON.parse(fs.readFileSync(this.file, "utf-8")) as EngagementFile;
-      for (const [sessionId, value] of Object.entries(raw.sessions ?? {})) {
-        this.bySession.set(sessionId, normalizeRecord(value));
-      }
-    } catch {
-      // missing/corrupt — start empty
-    }
+  constructor(file: string, databaseFile?: string) {
+    this.data = databaseFile
+      ? new SqliteDocument(databaseFile, "engagement", file, normalizeFile)
+      : new JsonFile(file, normalizeFile);
   }
 
   get(sessionId: string): EngagementRecord | null {
-    this.load();
-    const found = this.bySession.get(sessionId);
+    const found = this.data.read().sessions[sessionId];
     return found ? { ...found } : null;
   }
 
   recordVisit(sessionId: string, sample: EngagementVisitSample): EngagementRecord {
-    this.load();
-    const prev = normalizeRecord(this.bySession.get(sessionId));
-    const viewedMs = clampMs(sample.viewedMs);
-    const endedAt = normalizeTs(sample.endedAt) ?? Date.now();
-    if (prev.lastUserMessageAt !== null && endedAt <= prev.lastUserMessageAt) {
-      return { ...prev };
-    }
-    const isReview = qualifiesReview(sample);
-    const next: EngagementRecord = {
-      opens: prev.opens + (viewedMs > 0 ? 1 : 0),
-      viewMs: prev.viewMs + viewedMs,
-      reviewVisits: prev.reviewVisits + (isReview ? 1 : 0),
-      reviewMs: prev.reviewMs + (isReview ? viewedMs : 0),
-      lastViewedAt: prev.lastViewedAt === null ? endedAt : Math.max(prev.lastViewedAt, endedAt),
-      lastUserMessageAt: prev.lastUserMessageAt,
-    };
-    this.bySession.set(sessionId, next);
-    this.persist();
-    return { ...next };
+    return this.data.update((data) => {
+      const prev = normalizeRecord(data.sessions[sessionId]);
+      const viewedMs = clampMs(sample.viewedMs);
+      const endedAt = normalizeTs(sample.endedAt) ?? Date.now();
+      if (prev.lastUserMessageAt !== null && endedAt <= prev.lastUserMessageAt) {
+        return { ...prev };
+      }
+      const isReview = qualifiesReview(sample);
+      const next: EngagementRecord = {
+        opens: prev.opens + (viewedMs > 0 ? 1 : 0),
+        viewMs: prev.viewMs + viewedMs,
+        reviewVisits: prev.reviewVisits + (isReview ? 1 : 0),
+        reviewMs: prev.reviewMs + (isReview ? viewedMs : 0),
+        lastViewedAt: prev.lastViewedAt === null ? endedAt : Math.max(prev.lastViewedAt, endedAt),
+        lastUserMessageAt: prev.lastUserMessageAt,
+      };
+      data.sessions[sessionId] = next;
+      return { ...next };
+    });
   }
 
   recordUserMessage(sessionId: string, sentAt = Date.now()): EngagementRecord {
-    this.load();
-    const prev = normalizeRecord(this.bySession.get(sessionId));
-    const lastUserMessageAt = Math.max(
-      prev.lastUserMessageAt ?? 0,
-      normalizeTs(sentAt) ?? Date.now(),
-    );
-    const next: EngagementRecord = {
-      opens: 0,
-      viewMs: 0,
-      reviewVisits: 0,
-      reviewMs: 0,
-      lastViewedAt:
-        prev.lastViewedAt !== null && prev.lastViewedAt > lastUserMessageAt
-          ? prev.lastViewedAt
-          : null,
-      lastUserMessageAt,
-    };
-    this.bySession.set(sessionId, next);
-    this.persist();
-    return { ...next };
+    return this.data.update((data) => {
+      const prev = normalizeRecord(data.sessions[sessionId]);
+      const lastUserMessageAt = Math.max(
+        prev.lastUserMessageAt ?? 0,
+        normalizeTs(sentAt) ?? Date.now(),
+      );
+      const next: EngagementRecord = {
+        opens: 0,
+        viewMs: 0,
+        reviewVisits: 0,
+        reviewMs: 0,
+        lastViewedAt:
+          prev.lastViewedAt !== null && prev.lastViewedAt > lastUserMessageAt
+            ? prev.lastViewedAt
+            : null,
+        lastUserMessageAt,
+      };
+      data.sessions[sessionId] = next;
+      return { ...next };
+    });
   }
 
-  private persist(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(
-        this.file,
-        JSON.stringify({ sessions: Object.fromEntries(this.bySession) }, null, 2),
-      );
-    } catch {
-      // best-effort persistence
-    }
+  /** Remove reconstructable telemetry only when its latest timestamp is definitively old. */
+  prune(now = Date.now()): number {
+    const cutoff = now - TRANSIENT_SESSION_RETENTION_MS;
+    return this.data.transact((data) => {
+      let removed = 0;
+      for (const [sessionId, record] of Object.entries(data.sessions)) {
+        const latest = Math.max(record.lastViewedAt ?? 0, record.lastUserMessageAt ?? 0);
+        if (latest > 0 && latest < cutoff) {
+          delete data.sessions[sessionId];
+          removed += 1;
+        }
+      }
+      return { result: removed, changed: removed > 0 };
+    });
   }
+}
+
+function normalizeFile(value: unknown): Required<EngagementFile> {
+  const input = value && typeof value === "object" ? (value as EngagementFile) : {};
+  const sessions: Record<string, EngagementRecord> = {};
+  for (const [sessionId, record] of Object.entries(input.sessions ?? {})) {
+    sessions[sessionId] = normalizeRecord(record);
+  }
+  return { sessions };
 }
