@@ -2,6 +2,13 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.1.2 — 2026-07-18
+
+### Fixed
+
+- Explicit Playwright Chromium and system-dependency provisioning on fresh GitHub Actions runners
+  before browser-backed tests execute.
+
 ## 1.1.1 — 2026-07-18
 
 ### Fixed
