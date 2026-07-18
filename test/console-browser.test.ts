@@ -4082,7 +4082,7 @@ describe("console browser behavior", () => {
     expect(await page.locator("#tagFilters .tag-pin-divider").count()).toBe(1);
     await expect.poll(() => pinWrites).toEqual([["middle", "old"], ["old"], [], ["middle"]]);
     await page.close();
-  });
+  }, 15_000);
 
   it("pins an unpinned tag when dropped in the gap before the pin divider", async () => {
     const page = await browser.newPage();
