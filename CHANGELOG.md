@@ -2,6 +2,13 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.1.5 — 2026-07-18
+
+### Fixed
+
+- Preserve the required `node:` prefix for the built-in SQLite module in the bundled CLI.
+- Install and launch the actual npm tarball during every release preflight and tagged publish.
+
 ## 1.1.4 — 2026-07-18
 
 ### Fixed

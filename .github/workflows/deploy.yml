@@ -43,6 +43,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Smoke-test packed CLI
+        run: npm run smoke:package
+
       - name: Publish package
         if: github.ref_type == 'tag'
         run: npm publish --access public --provenance
