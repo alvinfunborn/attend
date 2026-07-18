@@ -3935,13 +3935,6 @@ describe("console browser behavior", () => {
       await target.dispatchEvent("drop", point);
       await transfer.dispose();
     };
-    const nextPinWrite = () =>
-      page.waitForResponse((response) => {
-        if (new URL(response.url()).pathname !== "/vault/ui-state") return false;
-        const body = response.request().postDataJSON() as { pinnedTags?: string[] };
-        return Array.isArray(body.pinnedTags);
-      });
-
     expect(await userOrder()).toEqual(["old", "new", "middle"]);
     expect(await tag("old").getAttribute("class")).toContain("tag-pinned");
     expect(await page.locator("#tagFilters .tag-pin-divider").count()).toBe(1);
@@ -4018,26 +4011,23 @@ describe("console browser behavior", () => {
     expect(await userOrder()).toEqual(["old", "new", "middle"]);
     expect(orderWrites).toEqual([]);
 
-    const pinMiddle = nextPinWrite();
     await dropTagOn("middle", "old", "start");
-    await pinMiddle;
+    await expect.poll(() => pinWrites).toEqual([["middle", "old"]]);
     await expect.poll(() => userOrder()).toEqual(["middle", "old", "new"]);
     expect(await tag("middle").getAttribute("class")).toContain("tag-pinned");
     expect(await tag("middle").evaluate((chip) => chip.getBoundingClientRect().width)).toBe(
       unpinnedWidth,
     );
 
-    const unpinMiddle = nextPinWrite();
     await dropTagOn("middle", "new", "end");
-    await unpinMiddle;
+    await expect.poll(() => pinWrites).toEqual([["middle", "old"], ["old"]]);
     await expect.poll(() => userOrder()).toEqual(["old", "new", "middle"]);
     expect(await tag("middle").getAttribute("class")).not.toContain("tag-pinned");
     await expect.poll(() => pinWrites).toEqual([["middle", "old"], ["old"]]);
     expect(orderWrites).toEqual([]);
 
-    const unpinOld = nextPinWrite();
     await dropTagOn("old", "new", "end");
-    await unpinOld;
+    await expect.poll(() => pinWrites).toEqual([["middle", "old"], ["old"], []]);
     expect(await page.locator("#tagFilters .tag-pin-empty").textContent()).toBe("drag here to pin");
     expect(await page.locator("#tagFilters .tag-pin-divider").count()).toBe(1);
 
