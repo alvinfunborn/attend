@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,6 +28,7 @@ jobs:
         run: npm install --global npm@12.0.1
 
       - name: Verify tag matches package version
+        if: github.ref_type == 'tag'
         run: node -e "const p=require('./package.json'); const expected='v'+p.version; if(process.env.GITHUB_REF_NAME!==expected){ console.error('tag '+process.env.GITHUB_REF_NAME+' does not match '+expected); process.exit(1); }"
 
       - name: Install dependencies
@@ -42,6 +44,7 @@ jobs:
         run: npm test
 
       - name: Publish package
+        if: github.ref_type == 'tag'
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -2,6 +2,13 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.1.4 — 2026-07-18
+
+### Fixed
+
+- A manual Ubuntu release preflight that runs the exact clean-install and browser-test workflow
+  without publishing, plus serialized native drag assertions on slower browser runners.
+
 ## 1.1.3 — 2026-07-18
 
 ### Fixed

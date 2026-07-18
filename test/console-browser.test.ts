@@ -3914,6 +3914,12 @@ describe("console browser behavior", () => {
         .locator("#tagFilters .gtag[data-tag-value]")
         .evaluateAll((chips) => chips.map((chip) => chip.getAttribute("data-tag-value")));
     const tag = (name: string) => page.locator(`#tagFilters .gtag[data-tag-value="${name}"]`);
+    const nextPinWrite = () =>
+      page.waitForResponse((response) => {
+        if (new URL(response.url()).pathname !== "/vault/ui-state") return false;
+        const body = response.request().postDataJSON() as { pinnedTags?: string[] };
+        return Array.isArray(body.pinnedTags);
+      });
 
     expect(await userOrder()).toEqual(["old", "new", "middle"]);
     expect(await tag("old").getAttribute("class")).toContain("tag-pinned");
@@ -3993,9 +3999,11 @@ describe("console browser behavior", () => {
 
     const oldBox = await tag("old").boundingBox();
     if (!oldBox) throw new Error("missing old tag bounds");
+    const pinMiddle = nextPinWrite();
     await tag("middle").dragTo(tag("old"), {
       targetPosition: { x: 1, y: oldBox.height / 2 },
     });
+    await pinMiddle;
     await expect.poll(() => userOrder()).toEqual(["middle", "old", "new"]);
     expect(await tag("middle").getAttribute("class")).toContain("tag-pinned");
     expect(await tag("middle").evaluate((chip) => chip.getBoundingClientRect().width)).toBe(
@@ -4004,9 +4012,11 @@ describe("console browser behavior", () => {
 
     const nextNewBox = await tag("new").boundingBox();
     if (!nextNewBox) throw new Error("missing new tag bounds after pin");
+    const unpinMiddle = nextPinWrite();
     await tag("middle").dragTo(tag("new"), {
       targetPosition: { x: nextNewBox.width - 2, y: nextNewBox.height / 2 },
     });
+    await unpinMiddle;
     await expect.poll(() => userOrder()).toEqual(["old", "new", "middle"]);
     expect(await tag("middle").getAttribute("class")).not.toContain("tag-pinned");
     await expect.poll(() => pinWrites).toEqual([["middle", "old"], ["old"]]);
@@ -4014,9 +4024,11 @@ describe("console browser behavior", () => {
 
     const finalNewBox = await tag("new").boundingBox();
     if (!finalNewBox) throw new Error("missing new tag bounds before clearing pins");
+    const unpinOld = nextPinWrite();
     await tag("old").dragTo(tag("new"), {
       targetPosition: { x: finalNewBox.width - 2, y: finalNewBox.height / 2 },
     });
+    await unpinOld;
     expect(await page.locator("#tagFilters .tag-pin-empty").textContent()).toBe("drag here to pin");
     expect(await page.locator("#tagFilters .tag-pin-divider").count()).toBe(1);
 
