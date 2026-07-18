@@ -2216,6 +2216,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var globalTagEditing = false;
   var globalTagDraft = '';
   var draggedGlobalTag = null;
+  var globalTagDragToken = 0;
   var globalTagDropPlaceholder = null;
   var globalTagDragSize = null;
   var globalTagDropGeometry = null;
@@ -4927,7 +4928,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var previousActivity=Number(previous&&previous.lastUserMessageAt||0);
     var next=Object.assign({},previous||{},thread);
     var incomingActivity=Number(thread.lastUserMessageAt||0);
-    if(previous && incomingActivity && incomingActivity<previousActivity){
+    if(previous && previousActivity && (!incomingActivity || incomingActivity<previousActivity)){
       next.lastUserMessageAt=previous.lastUserMessageAt;
       next.status=previous.status;
       next.messageCount=Math.max(Number(previous.messageCount)||0,Number(next.messageCount)||0);
@@ -8332,6 +8333,13 @@ window.__CHANGELOG__ = ${changelogJson};
       });
     }
   }
+  function finishGlobalTagDrag(token){
+    if(token!=null && globalTagDragToken!==token) return;
+    globalTagDragToken++;
+    draggedGlobalTag=null;
+    suppressTagClickUntil=Date.now()+350;
+    clearGlobalTagDragState();
+  }
   function captureGlobalTagDropGeometry(wrap, source, sourceChip){
     if(!wrap) return null;
     var temporarilyHidden=sourceChip&&!sourceChip.classList.contains('drag-layout-source');
@@ -8491,10 +8499,12 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function bindGlobalTagDrag(chip, def){
     if(!def || def.kind!=='user') return;
+    var chipDragToken=0;
     chip.setAttribute('data-tag-value', def.value);
     chip.setAttribute('data-tag-label', def.label);
     chip.draggable=true;
     chip.addEventListener('dragstart', function(ev){
+      chipDragToken=++globalTagDragToken;
       draggedGlobalTag=def.value;
       suppressTagClickUntil=Date.now()+350;
       var rect=chip.getBoundingClientRect();
@@ -8507,13 +8517,13 @@ window.__CHANGELOG__ = ${changelogJson};
       chip.classList.add('dragging');
       // Let the browser capture its native drag image before removing the source
       // chip from flex layout. The ghost then becomes the sole occupied slot.
-      window.setTimeout(function(){ if(draggedGlobalTag===def.value) chip.classList.add('drag-layout-source'); },0);
+      window.setTimeout(function(){ if(globalTagDragToken===chipDragToken && draggedGlobalTag===def.value) chip.classList.add('drag-layout-source'); },0);
     });
     chip.addEventListener('dragend', function(){
+      var endedToken=chipDragToken;
       suppressTagClickUntil=Date.now()+350;
       window.setTimeout(function(){
-        draggedGlobalTag=null;
-        clearGlobalTagDragState();
+        finishGlobalTagDrag(endedToken);
       }, 0);
     });
   }
@@ -8547,18 +8557,14 @@ window.__CHANGELOG__ = ${changelogJson};
       if(position && position.kind==='hide' && !sourceHidden && !hideArmed) position=globalTagDropPosition(wrap,ev,source,true);
       var target=position&&position.target, after=!!(position&&position.after);
       if(!target){
-        draggedGlobalTag=null;
-        suppressTagClickUntil=Date.now()+350;
-        clearGlobalTagDragState();
+        finishGlobalTagDrag();
         if(!sourceHidden) unpinGlobalTag(source);
         return;
       }
       var kind=position.kind;
       var targetTag=target.getAttribute('data-tag-value')||'';
       var first=orderedUserTags().filter(function(tag){ return normalizeTag(tag)!==source; })[0];
-      draggedGlobalTag=null;
-      suppressTagClickUntil=Date.now()+350;
-      clearGlobalTagDragState();
+      finishGlobalTagDrag();
       if(kind==='front'){
         if(sourceHidden) setGlobalTagHidden(source,false);
         pinGlobalTagAtFront(source);

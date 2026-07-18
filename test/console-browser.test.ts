@@ -3947,6 +3947,38 @@ describe("console browser behavior", () => {
         .count(),
     ).toBe(0);
     await page.locator("#newClose").click();
+
+    // A delayed dragend cleanup from one operation must not clear a new drag of
+    // the same chip that starts before the old zero-delay callback runs.
+    await tag("middle").evaluate((chip) => {
+      const browserWindow = chip.ownerDocument.defaultView;
+      if (!browserWindow) throw new Error("missing browser window");
+      const firstTransfer = new browserWindow.DataTransfer();
+      chip.dispatchEvent(
+        new browserWindow.DragEvent("dragstart", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: firstTransfer,
+        }),
+      );
+      chip.dispatchEvent(new browserWindow.DragEvent("dragend", { bubbles: true }));
+      const secondTransfer = new browserWindow.DataTransfer();
+      chip.dispatchEvent(
+        new browserWindow.DragEvent("dragstart", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: secondTransfer,
+        }),
+      );
+    });
+    await expect
+      .poll(async () => (await tag("middle").getAttribute("class"))?.includes("drag-layout-source"))
+      .toBe(true);
+    await tag("middle").dispatchEvent("dragend");
+    await expect
+      .poll(async () => (await tag("middle").getAttribute("class"))?.includes("dragging"))
+      .toBe(false);
+
     const unpinnedWidth = await tag("middle").evaluate(
       (chip) => chip.getBoundingClientRect().width,
     );

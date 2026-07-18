@@ -2,6 +2,15 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.1.3 — 2026-07-18
+
+### Fixed
+
+- Generation-scoped tag drag cleanup so a delayed `dragend` from one operation cannot cancel an
+  immediate second pin or unpin of the same tag.
+- Monotonic comment-thread merging so stale history responses cannot replace newer live tool blocks
+  or regress an actively generating thread.
+
 ## 1.1.2 — 2026-07-18
 
 ### Fixed
