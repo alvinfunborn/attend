@@ -2,6 +2,13 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.1.1 — 2026-07-18
+
+### Fixed
+
+- npm 12 lockfile metadata for deterministic clean installs in the publish workflow, with the
+  workflow pinned to the npm version used to generate and validate the lockfile.
+
 ## 1.1.0 — 2026-07-18
 
 This release turns Attend's first public console into a durable multi-session workspace with
