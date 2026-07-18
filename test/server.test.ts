@@ -2120,6 +2120,7 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       }),
       codex,
       config,
+      orchestrator,
     };
   }
 
@@ -3296,6 +3297,22 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(readStateDocument(config.workEvents, "overrides")).toEqual({
       "cx-turn": { priority: 8 },
     });
+  });
+
+  it("discards the previous analyzer drafts at the next turn start", () => {
+    const { codex, orchestrator } = appWithCodexSpy();
+    const discard = vi.spyOn(orchestrator, "discardTurnDrafts");
+
+    codex.emitEvent("cx-turn", { kind: "user_turn_started", text: "continue" });
+    codex.emitEvent("cx-turn", {
+      kind: "queued_turn_started",
+      queueId: "q1",
+      text: "run tests",
+      attachments: [],
+    });
+
+    expect(discard).toHaveBeenNthCalledWith(1, "cx-turn");
+    expect(discard).toHaveBeenNthCalledWith(2, "cx-turn");
   });
 
   it("advances a persisted queue on turn-end while no browser session is selected", async () => {

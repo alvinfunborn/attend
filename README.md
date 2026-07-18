@@ -10,54 +10,60 @@ When AI coding work spreads across many sessions, finding a session by project o
 
 Attend keeps those signals next to the actual conversations, so organizing work and advancing it happen in the same local interface. The server binds to `127.0.0.1` by default.
 
-## From tags to attention management
+## Core capabilities
 
-- **Organize with tags.** Add tags to sessions, filter by any or all selected tags, and save reusable **Focus** views for recurring contexts.
-- **See what needs attention.** Switch between **All**, **Active**, and **Unread**; track `generating`, `new reply`, `in progress`, and `read`; archive seen work in the current view.
-- **Keep enough context to re-enter.** Search session metadata and transcripts, keep shortcuts, notes, todos, and Goals beside the composer, explicitly reference pinned context, and use analyzer signals as a compact handoff.
-- **Separate work without losing its origin.** Fork sessions into related branches, view them as a fork tree, or start a comment thread on one response and promote that discussion into a regular session when it becomes a task of its own.
-- **Advance work where it is tracked.** Continue conversations, answer provider questions, attach files, stop turns, and queue, edit, or fork follow-up messages without leaving the attention view.
-- **Review the shape of the workload.** Inspect local statistics for sessions, prompts, conversation volume, generation overlap, and session breadth.
+- Organize sessions across projects with tags, search, and Focus views, while distinguishing work
+  that is generating, unread, waiting for follow-up, or handled.
+- Start or continue Claude Code, Codex/ChatGPT, and Cursor CLI sessions in the browser, with
+  attachments, interactive questions, stopping, and durable message queues.
+- Keep shortcuts, notes, todos, and Goals beside the composer; pin messages and use `@` to carry
+  selected context into the next turn.
+- Fork sessions, comment on a response, or promote a side discussion into its own task without
+  losing its relationship to the original work.
+- Edit titles and attention signals, review recent work statistics, and switch between light and
+  dark themes.
+- Attend state stays local, while original transcripts remain under each vendor CLI's management.
 
-## Features
+## Feature reference
 
-The detailed feature list follows the controls and tooltips in the current UI.
+- Browse sessions under one or more project directories; search metadata and transcripts with
+  terms, phrases, exclusions, `OR`, or bounded `%regex%` expressions.
+- Switch between **All**, **Active**, **Unread**, and saved **Focus** views; optionally open a
+  filter-driven middle chats panel on desktop.
+- Add, pin, hide, and reorder tags; filter by any or all selected tags and by priority.
+- Track `generating`, `new reply`, `in progress`, and `read`; change status manually or archive seen
+  sessions in the current view.
+- Start or continue supported provider sessions; choose discovered model, effort, and speed settings
+  that Attend remembers per session when available.
+- Attach or paste files and images, answer provider questions and forms, stop turns, and queue,
+  edit, send, fork, or delete durable follow-up messages.
+- Edit a session title, state, priority, and estimated re-entry time.
+- Manage machine-wide shortcuts and session notes or todos beside the composer; arm supported Goals
+  and accept analyzer-drafted messages.
+- Comment on a response, including while it is generating; continue in an isolated side session,
+  queue replies, or promote the discussion with its parent configuration and context.
+- Pin messages and reference them with `@`; include a pin's text-only comment thread, exclude tool
+  blocks, and snapshot referenced context for queued turns.
+- Collapse completed turns, refresh from the provider transcript, preview attachments and diagrams,
+  and reveal referenced local paths.
+- Fork from the current draft or a queued turn, keep or switch providers, preserve run settings and
+  relevant notes or todos, and inspect the resulting fork tree.
+- Review local statistics for recent sessions, prompts, conversation volume, and session breadth.
+- Switch between light and dark themes; Attend-owned session metadata and UI preferences stay local.
 
-- Browse sessions under one or more project directories. Search session metadata and transcript content with plain terms, phrases, exclusions, `OR`, or bounded `%regex%` terms.
-- Switch between **All**, **Active**, **Unread**, and reusable **Focus** views, with an optional filter-driven middle chats panel on desktop.
-- Add, pin, hide, and reorder session tags; filter by any or all selected tags and narrow the list by priority.
-- Track attention with four statuses: `generating`, `new reply`, `in progress`, and `read`. Statuses can be changed from the session list, and seen sessions in the current view can be archived together.
-- Start or continue sessions from an available vendor in the browser. Choose its discovered model, effort, and speed for the next action; Attend remembers exact per-session selections when the provider exposes them.
-- Attach or paste images and files, answer interactive provider questions and forms, stop a running turn, and queue, edit, send, fork, or delete follow-up messages. Queues are server-owned and survive tabs, browser reloads, and Attend restarts.
-- Edit a session title and adjust its state, priority, or estimated re-entry time.
-- Keep machine-wide shortcuts and session-scoped notes and todos in the composer rail. Where the provider supports it, arm the next message as a Goal; analyzer-drafted next steps can fill the composer but never send automatically.
-- Comment on an AI response, including one that is still generating. Comments continue in an isolated side session, accept queued replies, and can be promoted into regular sessions with the parent configuration and working context. The first comment pins the response, and later replies can be opened from the response or its pin.
-- Pin messages and type `@` in the main composer to reference a pin. If that pin owns a comment thread, Attend includes the full text-only thread; tool blocks are deliberately excluded. Queued turns snapshot their referenced context when they are enqueued.
-- Collapse completed turns, refresh a chat from its transcript, preview attachments and diagrams, and reveal referenced local paths.
-- Fork a session using the current draft or a queued turn as the opening message. Forks may keep the same provider or switch providers; the branch keeps its selected run configuration and copies the relevant notes and todos. Related sessions can be viewed as a fork tree.
-- View local work statistics for recent sessions, prompts, conversation volume, and session breadth.
-- Use light or dark theme. UI preferences and Attend-owned session metadata are stored locally.
+### Analyzer suggestions
 
-Some sessions also show analyzer-provided fields:
+Supported sessions created by Attend receive a short `brief`, `state`, `priority`, `etaMin`, and
+`reason` after each turn. The analyzer may also provide two editable messages:
 
-- `brief`: a short description of the current thread.
-- `state`: the suggested next handoff, such as `needs_input`, `needs_review`, or `done`.
-- `priority`: relative priority within the current vault.
-- `etaMin`: estimated minutes needed to re-enter the thread.
-- `reason`: a short explanation for the current signals.
-- `nextStep`: an optional ready-to-edit draft for an obvious mechanical next action.
+- `nextStep`: predicts the most likely next user message. With an empty, focused composer, it
+  appears as ghost text that Tab accepts.
+- `probe`: questions, explains, or verifies something specific in the latest turn. It appears beside
+  `todo` and fills the composer when clicked.
 
-These fields are editable where the UI provides a control. `nextStep` only fills the composer and
-never sends on its own. Older or externally created sessions may use local heuristics instead of an
-analyzer.
-
-### Composer context
-
-Shortcuts are shared across the Attend installation; notes and todos belong to a session. Comment
-threads stay out of the parent session by default. To carry one into a later main-session turn, pin
-its anchor and choose that pin from the composer's `@` picker. The server resolves the reference at
-send time (or snapshots it when queued), sends it as hidden provider context, and keeps that context
-out of the visible transcript.
+The two suggestions are independent and either may be absent. They only fill a draft, never send
+automatically, and are discarded when the next user turn starts. Older or externally created
+sessions may use local heuristics instead.
 
 ## Quick Start
 

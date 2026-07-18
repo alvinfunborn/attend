@@ -10,52 +10,42 @@ Attend 最初来自一个很简单的需求：**给任务加 tag**。
 
 Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向和继续推进对话放在同一个本地界面里。Server 默认只绑定 `127.0.0.1`。
 
-## 从 tag 到注意力管理
+## 主要能力
 
-- **用 tag 组织任务。** 给 session 添加 tag，按任意或全部已选 tag 过滤，并把常用筛选保存成可复用的 **Focus** 视图。
-- **看清哪里需要注意力。** 在 **All**、**Active**、**Unread** 之间切换，用 `generating`、`new reply`、`in progress`、`read` 跟踪状态，并批量 archive 当前视图里已经看过的任务。
-- **保留重新进入任务所需的上下文。** 搜索 session 信息和 transcript，把 shortcuts、notes、todos 和 Goal 放在 composer 旁，显式引用 pin 的上下文，并用 analyzer 信号完成紧凑交接。
-- **拆分任务，同时保留来路。** 把 session fork 成相关分支并在 fork tree 中查看；也可以针对某条回复展开 comment thread，在讨论成长为独立任务时将它升级为普通 session。
-- **在管理注意力的地方直接推进工作。** 继续对话、回答 provider 提问、添加附件、停止 turn，以及排队、编辑或 fork 后续消息，不必离开当前视图。
-- **回看工作负载的形态。** 查看本地 session、prompt、对话量、生成重叠和 session breadth 等统计。
+- 用 tag、搜索和 Focus 视图组织多个项目里的 session，并区分正在生成、未读、待继续和已处理的任务。
+- 直接在网页里新建或继续 Claude Code、Codex/ChatGPT 与 Cursor CLI 会话，支持附件、交互提问、停止和持久消息队列。
+- 在 composer 旁保存 shortcuts、notes、todos 和 Goal；也可以 pin 消息，并用 `@` 把需要的上下文带入下一轮。
+- Fork session、评论某条回复，或把旁支讨论升级成独立任务，同时保留它与原任务的关系。
+- 编辑标题和注意力信号，查看近期工作统计，并在明暗主题之间切换。
+- 所有 Attend 状态保存在本机；原始对话仍由各 vendor CLI 管理。
 
-## 功能
+## 功能速览
 
-下面是按当前界面控件和 tooltip 整理的完整功能列表。
+- 浏览一个或多个项目目录下的 session；用普通词、短语、排除词、`OR` 或受限的 `%regex%` 搜索元数据和 transcript。
+- 在 **All**、**Active**、**Unread** 和已保存的 **Focus** 视图之间切换；桌面端可选由筛选驱动的中间 chats 面板。
+- 添加、置顶、隐藏和拖动排序 tag；按任意或全部已选 tag 以及 priority 过滤。
+- 跟踪 `generating`、`new reply`、`in progress` 和 `read`；手动切换状态或批量 archive 当前视图中已查看的 session。
+- 新建或继续受支持的 provider session；选择动态发现的 model、effort 和 speed，并在 provider 支持时按 session 记住设置。
+- 添加或粘贴文件和图片，回答 provider 提问与表单，停止 turn，以及排队、编辑、发送、fork 或删除持久化的后续消息。
+- 编辑 session 标题、state、priority 和预计重新进入时间。
+- 在 composer 旁管理机器级 shortcuts 与 session 级 notes、todos；设置受支持的 Goal，并接受 analyzer 生成的消息 draft。
+- 评论某条回复，包括它仍在生成时；在隔离的 side session 中继续、排队回复，或带着父配置和上下文升级讨论。
+- Pin 消息并用 `@` 引用；可包含 pin 下的纯文本 comment thread、排除 tool block，并为 queued turn 固化引用上下文。
+- 折叠已完成的 turn、从 provider transcript 刷新、预览附件与 diagram，以及定位引用的本地路径。
+- 从当前 draft 或 queued turn fork，沿用或切换 provider，保留运行设置和相关 notes、todos，并查看 fork tree。
+- 查看近期 session、prompt、对话量和 session breadth 等本地统计。
+- 切换明暗主题；Attend 管理的 session 元数据和界面偏好保存在本机。
 
-- 浏览一个或多个项目目录下的 session；用普通词、短语、排除词、`OR` 或受限的 `%regex%` 搜索 session 信息和 transcript 内容。
-- 在 **All**、**Active**、**Unread** 和可复用的 **Focus** 视图之间切换；桌面端还可以打开由当前筛选驱动的中间 chats 面板。
-- 添加、置顶、隐藏和拖动排序 session tag；按任意或全部已选 tag 过滤，并按 priority 收窄列表。
-- 用 `generating`、`new reply`、`in progress`、`read` 四种状态跟踪注意力；可以直接在列表中切换状态，也可以批量 archive 当前视图里已经看过的 session。
-- 在浏览器里新建或继续已接入 vendor 的 session，为下一次操作选择动态发现的 model、effort 和 speed；provider 能提供精确值时，Attend 会按 session 记住选择。
-- 添加或粘贴图片及文件，回答 provider 的交互式问题和表单，停止正在运行的 turn；后续消息可以排队、编辑、立即发送、直接 fork 或删除。队列由 server 持久维护，可跨 tab、浏览器刷新和 Attend 重启恢复。
-- 编辑 session 标题，手动调整 state、priority 和预计重新接手时间。
-- 在 composer 固定栏维护机器级 shortcuts 与 session 级 notes、todos；provider 支持时，可以把下一条消息设为 Goal。Analyzer 给出的 next step 只会填入 composer，绝不会自动发送。
-- 评论 AI 回复，包括仍在生成的回复。评论在隔离的 side session 中继续，支持排队追加，并可带着父 session 的配置和工作上下文升级为普通 session；第一次评论会 pin 原文，后续可以从原文或对应的 pin 打开。
-- pin 消息，并在主 composer 输入 `@` 引用某个 pin。若该 pin 带有 comment thread，Attend 会附带整个纯文本 thread；tool 内容块会被明确排除。排队时会冻结当时引用的上下文。
-- 折叠已完成的 turn、从 transcript 刷新对话、预览附件和 diagram，以及在文件管理器中定位本地路径。
-- 用当前 draft 或 queued turn 作为第一条消息 fork session；fork 可以沿用或切换 provider，分支会保留所选运行配置并复制相关 notes 和 todos，相关 session 可以在 fork tree 中查看。
-- 查看近期 session 数、prompt 数、对话量和 session breadth 等本地工作统计。
-- 切换明暗主题；Attend 自己维护的 session 信息和大部分界面偏好保存在本机。
+### Analyzer 建议
 
-部分 session 还会显示 analyzer 给出的字段：
+Attend 创建的受支持 session 会在每轮结束后得到简短的 `brief`、`state`、`priority`、`etaMin` 和
+`reason`。Analyzer 还可能提供两种可编辑消息：
 
-- `brief`：当前线程的简短描述。
-- `state`：建议的下一步交接状态，例如 `needs_input`、`needs_review` 或 `done`。
-- `priority`：session 在当前 vault 内的相对优先级。
-- `etaMin`：预计重新进入上下文需要的分钟数。
-- `reason`：对当前信号的简短说明。
-- `nextStep`：为明显的机械性下一步准备的可编辑 draft。
+- `nextStep`：预测最可能的下一条用户消息。主输入框为空且聚焦时，它显示为 ghost，按 Tab 填入。
+- `probe`：针对最新一轮的具体质疑、解释或验证请求，显示在 todo 右侧，点击后填入输入框。
 
-界面提供入口的字段可以手动修改。`nextStep` 只负责填充 composer，不会自行发送。历史 session
-或从 Attend 外部创建的 session 可能使用本地启发式分析。
-
-### Composer 上下文
-
-Shortcuts 在整套 Attend 安装中共享；notes 和 todos 属于具体 session。Comment thread 默认不会进入
-父 session 的后续聊天。需要带入时，先 pin 它的 anchor，再从主 composer 的 `@` picker 选择该 pin。
-Server 会在发送时解析引用（排队时则立即冻结），作为隐藏的 provider context 发送，同时不让这段
-上下文污染可见 transcript。
+两者彼此独立，也都可能留空；它们只填充 draft，不会自动发送，并在下一条用户消息开始时丢弃。
+历史或从 Attend 外部创建的 session 可能使用本地启发式分析。
 
 ## 快速开始
 

@@ -2,6 +2,20 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.1.6 — 2026-07-18
+
+### Added
+
+- Analyzer-drafted scrutiny probes that question, explain, or verify something specific in the
+  latest turn and fill the composer without sending.
+
+### Changed
+
+- Analyzer `nextStep` drafts now appear as Tab-completable ghost text in an empty, focused composer
+  instead of occupying the composer rail.
+- `nextStep` and `probe` drafts are discarded when the next user turn starts, including across
+  queued turns, refreshes, and late analyzer results.
+
 ## 1.1.5 — 2026-07-18
 
 ### Fixed

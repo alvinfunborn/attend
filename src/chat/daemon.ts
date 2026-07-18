@@ -16,6 +16,7 @@ export class DaemonOrchestrator {
   private readonly analyzing = new Set<string>();
   private readonly analyzeAgain = new Map<string, { cwd: string; uiContext: string }>();
   private readonly prompting = new Set<string>();
+  private readonly analysisEpoch = new Map<string, number>();
   private readonly analysisOwner = crypto.randomUUID();
 
   constructor(
@@ -43,6 +44,14 @@ export class DaemonOrchestrator {
 
   analysis(taskId: string): Analysis | null {
     return this.cache.get(taskId);
+  }
+
+  /** A new user turn makes the previous turn's message drafts unusable. Bump the
+   *  epoch as well as clearing the cache so an older in-flight analysis cannot
+   *  repopulate them after the session has already advanced. */
+  discardTurnDrafts(taskId: string): Analysis | null {
+    this.analysisEpoch.set(taskId, (this.analysisEpoch.get(taskId) ?? 0) + 1);
+    return this.cache.discardTurnDrafts(taskId);
   }
 
   /** Spawn a daemon for a product-created task session via its vendor's analyzer
@@ -91,6 +100,7 @@ export class DaemonOrchestrator {
       !this.collaboration.claimAnalysis(entry.vendor, taskId, this.analysisOwner)
     )
       return this.cache.get(taskId);
+    const analysisEpoch = this.analysisEpoch.get(taskId) ?? 0;
     this.analyzing.add(taskId);
     try {
       const collaborationState = this.collaboration?.analysisState(entry.vendor, taskId);
@@ -115,6 +125,9 @@ export class DaemonOrchestrator {
         } catch {
           // Collaboration history is additive telemetry; session handoff analysis still wins.
         }
+        // The daemon read the transcript before a newer user turn started. Its
+        // whole verdict is stale; the next turn-end will schedule a fresh run.
+        if ((this.analysisEpoch.get(taskId) ?? 0) !== analysisEpoch) return null;
         const prev = this.cache.get(taskId);
         const next =
           parsed.avoidancePrompt === undefined && prev?.avoidancePrompt !== undefined

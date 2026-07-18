@@ -38,6 +38,8 @@ export function parseAnalysis(text: string): Analysis | null {
   // nextStep is part of the regular verdict (same shorten/empty→null shape); when
   // the daemon emits "" (a decision is needed) this stores null so the UI hides it.
   if ("nextStep" in obj) out.nextStep = parseAvoidancePromptValue(obj.nextStep);
+  // probe is the scrutiny-lane counterpart to nextStep — same shape, independent.
+  if ("probe" in obj) out.probe = parseAvoidancePromptValue(obj.probe);
   return out;
 }
 

@@ -48,6 +48,9 @@ export interface SessionView {
   /** daemon-drafted ready-to-send user message when the next move is obvious; null
    *  when a decision is needed (composer shows nothing rather than a nudge) */
   nextStep?: string | null;
+  /** daemon-drafted scrutiny-lane message (question / explain / verify THIS turn);
+   *  null when nothing warrants it. Independent of nextStep. */
+  probe?: string | null;
   /** daemon-classified handoff state; null until a new-format analysis exists */
   state: AnalysisState | null;
   /** true when the state is a manual override */
@@ -1023,18 +1026,21 @@ const STYLE = `
   #railTodos.rail-has-count .railbtn-value, #railTodos.rail-has-count .railbtn-count { color: var(--todo-fg); }
   .railbtn-count { min-width: 1rem; padding: 0.02rem 0.28rem; border-radius: 999px; background: var(--surface-2); color: var(--ink-3); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.61rem; font-weight: 760; text-align: center; }
   /* Daemon's suggested next message — a click drops it into the composer (fill, not send). */
-  .rail-nextstep { max-width: 20rem; color: var(--ink-2); border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--accent-soft); }
-  .rail-nextstep:hover:not(:disabled) { color: var(--ink); border-color: color-mix(in srgb, var(--accent) 42%, transparent); background: var(--accent-soft); }
-  .rail-nextstep .railbtn-value { max-width: 17rem; }
-  .rail-nextstep-ico { flex-shrink: 0; color: var(--accent); font-size: 0.72rem; }
-  .rail-nextstep[hidden] { display: none; }
-  /* When a next-step suggestion is present, the rail spans the composer width and the
-     pill grows to fill whatever space the control buttons leave — the suggestion, not
-     the controls, is the thing to read here. */
+  /* Lane B — the daemon's scrutiny probe: a muted, read-only-looking text that fills
+     the rail's remaining width; click fills it into the composer (never sends). */
+  .rail-probe { max-width: none; color: var(--ink-3); border-color: transparent; background: transparent; font-style: italic; }
+  .rail-probe:hover:not(:disabled) { color: var(--ink-2); border-color: transparent; background: color-mix(in srgb, var(--surface-2) 75%, transparent); }
+  .rail-probe .railbtn-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .rail-probe-ico { flex-shrink: 0; color: var(--ink-4); font-size: 0.72rem; font-style: normal; }
+  .rail-probe[hidden] { display: none; }
+  /* When a probe is present, the rail spans the composer width and the probe grows to
+     fill whatever space the control buttons leave, ellipsizing at the composer edge. */
   .composerrail.rail-full { width: 100%; }
   .composerrail.rail-full .composerrail-controls { width: 100%; }
-  .composerrail.rail-full .rail-nextstep { flex: 1 1 0; min-width: 0; max-width: none; justify-content: flex-start; }
-  .composerrail.rail-full .rail-nextstep .railbtn-value { flex: 1 1 auto; max-width: none; text-align: left; }
+  .composerrail.rail-full .rail-probe { flex: 1 1 0; min-width: 0; max-width: none; justify-content: flex-start; }
+  .composerrail.rail-full .rail-probe .railbtn-value { flex: 1 1 auto; max-width: none; text-align: left; }
+  /* Hide the native placeholder while the empty composer shows the nextStep ghost (Lane A). */
+  #input.nextstep-ghosting::placeholder { color: transparent; }
   .railpop { position: absolute; left: 0; bottom: calc(100% + 0.55rem); z-index: 60; width: min(20rem, calc(100vw - 1.25rem)); max-height: min(42vh, 20rem); display: flex; flex-direction: column; gap: 0.22rem; overflow: visible; border: 0; border-radius: 0; background: transparent; color: var(--ink); box-shadow: none; pointer-events: none; }
   .railpop > * { pointer-events: auto; }
   .railpop[hidden] { display: none; }
@@ -1734,7 +1740,7 @@ export function renderConsole(v: ConsoleView): string {
             <button class="railbtn" id="railShortcuts" type="button" aria-expanded="false"><span class="railbtn-value">shortcuts</span><span class="railbtn-count" hidden>0</span></button>
             <button class="railbtn" id="railNotes" type="button" aria-expanded="false"><span class="railbtn-value">notes</span><span class="railbtn-count" hidden>0</span></button>
             <button class="railbtn" id="railTodos" type="button" aria-expanded="false"><span class="railbtn-value">todo</span><span class="railbtn-count" hidden>0</span></button>
-            <button class="railbtn rail-nextstep" id="railNextStep" type="button" title="Insert this suggested next message into the composer" hidden><span class="rail-nextstep-ico" aria-hidden="true">➜</span><span class="railbtn-value">—</span></button>
+            <button class="railbtn rail-probe" id="railProbe" type="button" title="Insert this probe into the composer" hidden><span class="rail-probe-ico" aria-hidden="true">?</span><span class="railbtn-value">—</span></button>
           </div>
           <section class="railpop" id="composerRailPop" role="dialog" aria-label="Composer controls" hidden></section>
         </div>
@@ -4155,7 +4161,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var preserveRecentOrder=options.source==='status'||options.source==='engagement';
     var s=findSessionById(next.sessionId);
     if(!s) return;
-    ['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','state','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','userPromptTs','model','effort','speed'].forEach(function(k){
+    ['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','probe','state','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','userPromptTs','model','effort','speed'].forEach(function(k){
       if(options.source==='status' && k!=='unread' && k!=='seen') return;
       var derivedAvoidance=k==='pattern'||k==='patternReason'||k==='patternData'||k==='avoidancePrompt';
       if(options.source==='engagement' && !derivedAvoidance) return;
@@ -6734,37 +6740,43 @@ window.__CHANGELOG__ = ${changelogJson};
     setRailButton('railShortcuts','shortcuts',composerTextItems('shortcuts',cur).length,{kind:'shortcuts',disabled:!cur});
     setRailButton('railNotes','notes',composerTextItems('notes',cur).length,{kind:'notes',disabled:!cur});
     setRailButton('railTodos','todo',openTodoCount(cur),{kind:'todo',disabled:!cur});
-    renderNextStepPill();
+    renderRailProbe();
+    syncComposerShortcutGhost();
     var pop=byId('composerRailPop');
     if(!composerRailKind){ if(pop) pop.hidden=true; return; }
     renderComposerRailPanel();
   }
-  // The daemon's suggested next message sits to the right of "todo". Shown only
-  // when the daemon judged the next move obvious (it emits nextStep only for
-  // continue_ready/followup_suggested); a click fills the composer (never sends).
+  // Lane A — the daemon's most-likely next message. Surfaced as a Tab-completable
+  // ghost in the EMPTY composer (composerCompletionMatch), never as a rail pill.
   function nextStepText(s){ return s && !s.generating && s.nextStep ? String(s.nextStep).trim() : ''; }
-  function renderNextStepPill(){
-    var btn=byId('railNextStep');
+  // Lane B — the daemon's scrutiny probe (question / explain / verify THIS turn).
+  // Sits to the right of "todo", filling the rail width; a click replaces the draft
+  // (never sends). Shown independently of nextStep, whenever the daemon emitted one.
+  function probeText(s){ return s && !s.generating && s.probe ? String(s.probe).trim() : ''; }
+  function renderRailProbe(){
+    var btn=byId('railProbe');
     if(!btn) return;
     var rail=byId('composerRail');
-    var text=nextStepText(cur);
+    var text=probeText(cur);
     if(!text){ btn.hidden=true; btn.disabled=true; if(rail) rail.classList.remove('rail-full'); return; }
     btn.hidden=false; btn.disabled=false;
     if(rail) rail.classList.add('rail-full');
     var value=btn.querySelector('.railbtn-value');
     if(value) value.textContent=text;
-    btn.title='Insert into composer: '+text;
+    // Full text on hover — the rail truncates at the composer edge.
+    btn.title=text;
   }
-  function fillNextStep(){
-    var text=nextStepText(cur);
+  function fillProbe(){
+    var text=probeText(cur);
     if(!text) return;
     closeSignalMenu();
     resetComposerHistoryNavigation();
     var input=byId('input');
     if(input){
-      input.value=text;
+      input.value=text;               // replace the draft (fill-not-send)
       setDraftForSession(cur, text);
       syncComposerHeight();
+      syncComposerShortcutGhost();
       input.focus();
       input.select();
     }
@@ -6887,6 +6899,16 @@ window.__CHANGELOG__ = ${changelogJson};
     return best;
   }
   function composerShortcutMatch(input){ return shortcutMatch(input,composerShortcutComposing); }
+  // The composer's Tab-completion pool: a shortcut prefix match wins while you type;
+  // an EMPTY composer instead offers the daemon's nextStep (Lane A) as the ghost.
+  function composerCompletionMatch(input){
+    var sc=composerShortcutMatch(input);
+    if(sc) return sc;
+    if(!input || document.activeElement!==input || composerShortcutComposing) return null;
+    if(String(input.value||'')!=='') return null;
+    var text=nextStepText(cur);
+    return text ? {text:text,length:0} : null;
+  }
   function commentShortcutMatch(input){ return shortcutMatch(input,commentShortcutComposing); }
   function newShortcutMatch(input){ return shortcutMatch(input,newShortcutComposing,true); }
   function syncShortcutGhost(input,ghost,prefix,suffix,match){
@@ -6901,7 +6923,11 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function syncComposerShortcutGhost(){
     var input=byId('input'),ghost=byId('composerShortcutGhost');
-    syncShortcutGhost(input,ghost,byId('composerShortcutGhostPrefix'),byId('composerShortcutGhostSuffix'),pinReferencePicker.open?null:composerShortcutMatch(input));
+    var match=pinReferencePicker.open?null:composerCompletionMatch(input);
+    syncShortcutGhost(input,ghost,byId('composerShortcutGhostPrefix'),byId('composerShortcutGhostSuffix'),match);
+    // Hide the native placeholder while the empty composer shows the nextStep ghost,
+    // so the ghost text and the "message …" hint don't overlap.
+    if(input) input.classList.toggle('nextstep-ghosting', !!(match && String(input.value||'')===''));
   }
   function syncCommentShortcutGhost(){
     var input=byId('commentInput'),ghost=byId('commentShortcutGhost');
@@ -6927,7 +6953,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     return true;
   }
-  function completeComposerShortcut(input){ return completeShortcut(input,composerShortcutMatch(input)); }
+  function completeComposerShortcut(input){ return completeShortcut(input,composerCompletionMatch(input)); }
   function completeCommentShortcut(input){ return completeShortcut(input,commentShortcutMatch(input)); }
   function completeNewShortcut(input){ return completeShortcut(input,newShortcutMatch(input)); }
   function startRailItemEdit(kind,id){
@@ -9750,7 +9776,11 @@ window.__CHANGELOG__ = ${changelogJson};
     s.etaset=false;
     s.state=null;
     s.stateset=false;
-    if(cur&&cur.sessionId===s.sessionId) headerSig(s);
+    // Both analyzer drafts belong to the assistant turn that just ended. Once a
+    // user/queued turn starts they must not survive locally or reappear at turn-end.
+    s.nextStep=null;
+    s.probe=null;
+    if(cur&&cur.sessionId===s.sessionId){ headerSig(s); renderComposerRail(); }
   }
   // Build a clickable priority/ETA badge (used in both the sidebar and the header).
   function priBadge(s, cls){
@@ -9848,6 +9878,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!s.priorityset) s.score=a.priority;
     if(!s.etaset) s.etaMin=a.etaMin;
     s.nextStep=a.nextStep||null;
+    s.probe=a.probe||null;
     s.analysisPending=false;
     var t=s.sessionId&&titleEls[s.sessionId];
     if(t) renderSessionTitle(t, s, 'it-title');
@@ -9861,6 +9892,7 @@ window.__CHANGELOG__ = ${changelogJson};
       (!s.stateset && (a.state||null)!==(s.state||null)) ||
       a.reason!==s.reason ||
       String(a.nextStep||'')!==String(s.nextStep||'') ||
+      String(a.probe||'')!==String(s.probe||'') ||
       (!s.priorityset && Number(a.priority)!==Number(s.score)) ||
       (!s.etaset && Number(a.etaMin)!==Number(s.etaMin));
   }
@@ -13227,7 +13259,7 @@ window.__CHANGELOG__ = ${changelogJson};
   [['railVendor','vendor'],['railModel','model'],['railEffort','effort'],['railSpeed','speed'],['railShortcuts','shortcuts'],['railNotes','notes'],['railTodos','todo']].forEach(function(entry){
     byId(entry[0]).onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); openComposerRail(entry[1]); };
   });
-  byId('railNextStep').onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); fillNextStep(); };
+  byId('railProbe').onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); fillProbe(); };
   byId('forkBtn').onclick=fork;
   byId('goalToggle').onclick=toggleGoal;
   byId('newGoalToggle').onclick=toggleNewGoal;
@@ -13558,6 +13590,7 @@ window.__CHANGELOG__ = ${changelogJson};
   byId('input').addEventListener('input',function(){
     syncComposerHeight();
     syncPinReferencePicker();
+    syncComposerShortcutGhost();
     if(!cur) return;
     var historyNav=composerHistoryNav;
     if(historyNav&&historyNav.sessionKey===draftKey(cur)&&historyNav.index<historyNav.entries.length){
@@ -13583,6 +13616,7 @@ window.__CHANGELOG__ = ${changelogJson};
   });
   byId('input').addEventListener('blur',function(){
     var ghost=byId('composerShortcutGhost'); if(ghost) ghost.hidden=true;
+    this.classList.remove('nextstep-ghosting');
     renderSidebar();
     syncOpenHeader();
   });

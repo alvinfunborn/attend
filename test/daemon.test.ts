@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ClaudeAnalyzer } from "../src/chat/analyzer/claude.js";
 import { CodexAnalyzer } from "../src/chat/analyzer/codex.js";
+import type { AnalyzerVerdict, SessionAnalyzer } from "../src/chat/analyzer/index.js";
 import type { CodexExecFn } from "../src/chat/codex/exec.js";
 import { DaemonOrchestrator } from "../src/chat/daemon.js";
 import type { QueryFn } from "../src/chat/engine.js";
@@ -44,7 +45,7 @@ const fakeQuery = ((args: {
           content: [
             {
               type: "text",
-              text: '{"brief":"refactor parser","state":"needs_decision","priority":7,"etaMin":12,"reason":"two questions, no edits"}',
+              text: '{"brief":"refactor parser","state":"needs_decision","priority":7,"etaMin":12,"reason":"two questions, no edits","nextStep":"pick option two","probe":"show the parser diff"}',
             },
           ],
         },
@@ -151,6 +152,78 @@ describe("DaemonOrchestrator", () => {
     expect(a?.state).toBe("needs_decision");
     expect(a?.priority).toBe(7);
     expect(orch.analysis("task-1")?.brief).toBe("refactor parser");
+  });
+
+  it("discards the previous turn drafts when the session advances", async () => {
+    const { orch, reg, cache } = make();
+    cleanup.push(reg, cache);
+    await orch.ensureDaemon("task-1", "claude", os.tmpdir());
+    await orch.analyzeTask("task-1", os.tmpdir());
+    expect(orch.analysis("task-1")).toMatchObject({
+      nextStep: "pick option two",
+      probe: "show the parser diff",
+    });
+
+    const kept = orch.discardTurnDrafts("task-1");
+    expect(kept).toMatchObject({
+      brief: "refactor parser",
+      state: "needs_decision",
+      nextStep: null,
+      probe: null,
+    });
+    expect(orch.analysis("task-1")).toMatchObject({ nextStep: null, probe: null });
+  });
+
+  it("drops an in-flight verdict that finishes after a newer user turn starts", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const reg = path.join(os.tmpdir(), `attend-daemons-stale-${uniq}.json`);
+    const cacheFile = path.join(os.tmpdir(), `attend-analysis-stale-${uniq}.json`);
+    cleanup.push(reg, cacheFile);
+    let release!: (value: AnalyzerVerdict | null) => void;
+    const verdict = new Promise<AnalyzerVerdict | null>((resolve) => {
+      release = resolve;
+    });
+    const analyzer: SessionAnalyzer = {
+      vendor: "slow",
+      spawn: () => Promise.resolve("daemon-slow"),
+      analyze: () => verdict,
+    };
+    const analysisCache = new AnalysisCache(cacheFile);
+    analysisCache.set("task-slow", {
+      brief: "old",
+      state: "continue_ready",
+      priority: 4,
+      etaMin: 2,
+      reason: "old turn",
+      nextStep: "continue old work",
+      probe: "question old work",
+    });
+    const orch = new DaemonOrchestrator(new DaemonRegistry(reg), analysisCache, [analyzer]);
+    await orch.ensureDaemon("task-slow", "slow", os.tmpdir());
+    const pending = orch.analyzeTask("task-slow", os.tmpdir());
+    await Promise.resolve();
+
+    orch.discardTurnDrafts("task-slow");
+    release({
+      analysis: {
+        brief: "stale",
+        state: "done",
+        priority: 1,
+        etaMin: 0,
+        reason: "late result",
+        nextStep: "stale next",
+        probe: "stale probe",
+      },
+      observedTurns: [],
+      labels: [],
+    });
+
+    await expect(pending).resolves.toBeNull();
+    expect(orch.analysis("task-slow")).toMatchObject({
+      brief: "old",
+      nextStep: null,
+      probe: null,
+    });
   });
 
   it("generates and caches an avoidance prompt only when requested", async () => {

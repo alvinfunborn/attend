@@ -308,3 +308,27 @@ UI: one pill `#railNextStep` (`ui/console.ts`) in the composer rail, right of `t
 What holds: pull-not-push (fill, never send — the pill is an offer the human triggers and edits), vendor-neutral data behind the analyzer seam (both Claude and Codex daemons emit `nextStep`), single localhost surface. Two bends, both recorded: (a) invariant 3 is relaxed for `nextStep` — the daemon now drafts the most likely next message even for decision turns (fork #3), justified by prediction-not-decision + fill-not-send; (b) the same v2.3 cost bend — a hidden LLM does slightly more work per turn, now also drafting `nextStep`; marginal, since it's folded into the existing turn-end call.
 
 **Follow-up fix — the verdict now pushes over SSE instead of racing a poll window.** After shipping `nextStep`, a live Codex session sat on "analyzing" for minutes with nothing surfacing. Root cause was a pre-existing timing bug, not the new field: the daemon verdict *was* produced and cached correctly (the on-disk cache showed the right `brief`/`state`/`nextStep`), but the console only learned about it through `refreshAnalysis`'s fixed poll — 4 tries over ~15.5s (`3.5s + 4×4s`). Measured Codex daemon latency (turn-end → cached verdict) is **~24–32s** (a fresh `codex exec` cold-start per analyze), so the verdict always landed *after* polling gave up; the client left `analysisPending` set and the "analyzing" badge hung until a manual reload re-fetched the session view. Claude was affected too, just less often. Fix: the server now **pushes the verdict over the existing live bus** the moment it's cached — a new `{kind:"analysis"}` `LiveBusMessage` broadcast from `analyzeAndRecordState` (buffered like `session_event`, so a reconnect replays it), applied client-side by `onBusAnalysisEvent` → `applyAnalysis` with no `analysisChanged` gate. The poll stays as a fallback only, widened to ~40s and made to **clear `analysisPending` on give-up** so the badge can never hang again (even a `null`/unparseable verdict is broadcast, purely to clear the flag). Verified by a server test that opens `/chat/live-stream`, ends a turn, and asserts the `analysis` message (with `brief` + `nextStep`) arrives on the bus.
+
+## v2.9: next-message completion and a separate scrutiny lane (2026-07-18)
+
+The single next-step pill became two independent analyzer lanes. `nextStep` remains the daemon's
+prediction of the most likely next user message, including a likely choice when a decision is
+pending. It now appears as a ghost completion only while the main composer is empty and focused;
+Tab accepts it. A typed shortcut prefix takes precedence, and no suggestion appears while the
+session is generating.
+
+`probe?: string | null` is a separate verdict field for scrutinizing the latest turn: it must name a
+specific claim, assumption, command, or evidence gap and draft a ready-to-send user request to
+question, explain, or verify it. The daemon must leave it empty rather than manufacture generic
+skepticism. A non-empty probe appears in the composer rail to the right of `todo`; clicking it
+replaces the current draft but never sends. Empty strings normalize to `null`, and `nextStep` and
+`probe` may appear independently, together, or not at all.
+
+Both fields ride the existing turn-end analyzer verdict, cache, initial session view, and live-bus
+update path, so the second lane adds no extra model call. This supersedes v2.8's `#railNextStep`
+pill UI while preserving the fill-not-send boundary.
+
+Both drafts are scoped to the latest completed assistant turn. An accepted `user_turn_started` or
+`queued_turn_started` clears them in the client and persisted analysis cache. The orchestrator also
+bumps an analysis epoch, so a verdict that began before that user turn but finishes afterward is
+discarded instead of repopulating stale drafts. The next turn-end produces the next usable pair.

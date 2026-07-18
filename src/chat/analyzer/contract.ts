@@ -14,6 +14,7 @@ export const RESPONSE_SHAPE = `{"brief":"<≤8 word title of what this session i
  "etaMin":<estimated minutes to re-engage: re-read the last turn + reply>,
  "reason":"<one short current observation explaining the state, priority, or immediate step>",
  "nextStep":"<the single most likely next USER message that moves this session forward, ready to send; empty only if none can be inferred>",
+ "probe":"<a ready-to-send USER message that questions, verifies, or asks the assistant to explain something SPECIFIC about THIS latest turn before letting it continue; empty when nothing genuinely warrants scrutiny>",
  "turns":[{"turnId":"<exact supplied turnId>",
    "intent":"<ask|learn|inspect_code|research|design|implement|debug|verify|operate|decide>",
    "researchSource":"<official|community|repository|other, only for research>",
@@ -42,7 +43,9 @@ export const REQUEST_RULES = `- "brief" is the best glance label for a crowded s
 - "reason" must be a neutral observation, never second-person pressure or a verdict.
 - "nextStep" is your single best PREDICTION of the message the human will most likely send next to move this session forward, drafted so they can send it verbatim (or lightly edit) instead of typing. Write it in the session's dominant language, ≤30 words, imperative, ready to send with no placeholders.
 - ALWAYS fill "nextStep" with the most probable next message, INCLUDING when a decision is pending — draft the most likely choice as an editable starting point (for "needs_decision"/"needs_input"/"blocked"/"needs_review", pick the option or answer the transcript makes most probable and phrase it as the human's reply). You are predicting the human's next move, not deciding for them: it is fill-not-send, so they confirm or edit before it is sent. Leave it an empty string only when no next message can reasonably be inferred (the task is finished, or there is no transcript yet).
-- When the human's own notes/todos/shortcuts are supplied below, use them to make "nextStep" concrete (for example point at the next open todo), but never invent tasks that are not grounded in the transcript or that context.`;
+- When the human's own notes/todos/shortcuts are supplied below, use them to make "nextStep" concrete (for example point at the next open todo), but never invent tasks that are not grounded in the transcript or that context.
+- "probe" is a DIFFERENT lane from "nextStep": where "nextStep" moves forward, "probe" pauses to scrutinise THIS latest turn — a message asking the assistant to explain a choice, justify a claim, show evidence/a diff before acting, recheck a questionable assumption, or investigate a gap you noticed in its work. Same format as "nextStep" (session's dominant language, ≤30 words, imperative, ready to send with no placeholders).
+- "probe" must cite something SPECIFIC in this turn (the actual assumption, claim, command, or gap), never a generic "explain more". Leave it an empty string when the turn contains nothing that genuinely warrants questioning — do NOT manufacture scrutiny. "probe" is independent of "nextStep": either, both, or neither may be present.`;
 
 /** The per-turn analyze prompt. Identical across vendors. */
 export function requestPrompt(

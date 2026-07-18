@@ -572,7 +572,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function syncActivitySortTs(s, ts)");
     expect(html).toContain("function syncActivityLastTs(s, ts)");
     expect(html).toContain(
-      "['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','state','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','userPromptTs','model','effort','speed']",
+      "['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','probe','state','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','userPromptTs','model','effort','speed']",
     );
     expect(html).toContain(
       "var preserveRecentOrder=options.source==='status'||options.source==='engagement';",
@@ -583,6 +583,14 @@ describe("renderConsole", () => {
     expect(html).toContain("syncActivitySortTs(s, s.lastTs);");
     expect(html).toContain("syncActivityLastTs(s, found.lastTs);");
     expect(html).toContain("if(attentionRank(next) > attentionRank(prev)) touchSession(s);");
+  });
+
+  it("discards analyzer message drafts when the next user turn starts", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("s.nextStep=null;\n    s.probe=null;");
+    expect(html).toContain(
+      "if(cur&&cur.sessionId===s.sessionId){ headerSig(s); renderComposerRail(); }",
+    );
   });
 
   it("routes every session through one ordered global SSE event bus", () => {
@@ -1848,7 +1856,7 @@ describe("renderConsole", () => {
     expect(html).toContain("padding: 0.3rem 0.35rem 2.55rem;");
     expect(html).toContain("function syncComposerHeight()");
     expect(html).toContain(
-      "syncComposerHeight();\n    syncPinReferencePicker();\n    if(!cur) return;",
+      "syncComposerHeight();\n    syncPinReferencePicker();\n    syncComposerShortcutGhost();\n    if(!cur) return;",
     );
     expect(html).toContain(".foot button.runbtn.dirty:hover:not(:disabled)");
     expect(html).toContain('button.fork-action[data-vendor="claude"]');

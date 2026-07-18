@@ -24,9 +24,12 @@ export interface Analysis {
   reason: string;
   /** editable user message that lowers the friction to resume an avoidance session */
   avoidancePrompt?: string | null;
-  /** ready-to-send user message when the next move is obvious/mechanical; null/absent
-   *  when the human must decide (so the console shows nothing rather than a nudge) */
+  /** predicted next user message for the latest completed assistant turn; discarded
+   *  as soon as another user turn starts */
   nextStep?: string | null;
+  /** scrutiny-lane counterpart to nextStep: a ready-to-send message that questions or
+   *  asks the assistant to explain THIS turn; discarded on the next user turn */
+  probe?: string | null;
 }
 
 /**
@@ -52,6 +55,20 @@ export class AnalysisCache {
     this.data.update((analyses) => {
       analyses[taskId] = a;
     });
+  }
+
+  /** `nextStep` and `probe` describe only the latest completed assistant turn.
+   *  Keep the durable handoff fields, but invalidate both drafts once the human
+   *  advances the session so a refresh cannot resurrect stale suggestions. */
+  discardTurnDrafts(taskId: string): Analysis | null {
+    let next: Analysis | null = null;
+    this.data.update((analyses) => {
+      const current = analyses[taskId];
+      if (!current) return;
+      next = { ...current, nextStep: null, probe: null };
+      analyses[taskId] = next;
+    });
+    return next;
   }
 }
 

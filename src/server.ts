@@ -1028,6 +1028,7 @@ function toSessionViews(
         patternData: pattern === "avoidance" ? avoidanceEvidenceData(tel) : null,
         avoidancePrompt: pattern === "avoidance" ? (a?.avoidancePrompt ?? null) : null,
         nextStep: externalGenerating ? null : (a?.nextStep ?? null),
+        probe: externalGenerating ? null : (a?.probe ?? null),
         state: ov?.state ?? a?.state ?? null,
         score: ov?.priority ?? baseScore,
         reason: reason,
@@ -1844,7 +1845,7 @@ export function createApp(
         event: UiEvent;
       }
     // Pushed when a daemon verdict is cached, so the console applies brief/state/
-    // priority/eta/nextStep immediately instead of racing a fixed poll window —
+    // priority/eta/nextStep/probe immediately instead of racing a fixed poll window —
     // Codex daemons routinely reply ~25-35s after turn-end, past the old ~15s poll.
     | { kind: "analysis"; sessionId: string; analysis: Analysis | null };
   const liveSubscribers = new Set<(message: LiveBusMessage, eventId?: number) => void>();
@@ -1883,6 +1884,7 @@ export function createApp(
       (event.kind === "user_turn_started" || event.kind === "queued_turn_started")
     ) {
       clearTurnScopedOverrides(sessionId);
+      orchestrator.discardTurnDrafts(sessionId);
     }
     if (
       !isComment &&
