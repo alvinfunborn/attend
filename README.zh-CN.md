@@ -10,6 +10,11 @@ Attend 最初来自一个很简单的需求：**给任务加 tag**。
 
 Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向和继续推进对话放在同一个本地界面里。Server 默认只绑定 `127.0.0.1`。
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend 大规模多项目 demo vault：tag、session 卡片、chat 与 queued scheduled work">
+</p>
+<p align="center"><sub>纯合成 demo vault：12 个项目、240 个 session、约 4,800 轮生成对话。</sub></p>
+
 ## 主要能力
 
 - 用 tag、搜索和 Focus 视图组织多个项目里的 session，并区分正在生成、未读、待继续和已处理的任务。
@@ -144,6 +149,14 @@ cd attend
 npm install
 npm run dev
 ```
+
+如需截图或进行大数据量视觉测试，可以启动纯合成 demo vault：
+
+```bash
+npm run demo:readme
+```
+
+它会在 `http://127.0.0.1:5099` 提供 demo，不会读取或修改真实的 Attend 状态。
 
 检查：
 

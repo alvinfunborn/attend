@@ -41,6 +41,7 @@
     "build": "tsup",
     "dev": "tsx src/cli.ts",
     "dev:watch": "tsx watch src/cli.ts",
+    "demo:readme": "tsx scripts/readme-vault.ts",
     "start": "node dist/cli.js",
     "prepare": "tsup",
     "test": "vitest run",

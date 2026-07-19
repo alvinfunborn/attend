@@ -10,6 +10,11 @@ When AI coding work spreads across many sessions, finding a session by project o
 
 Attend keeps those signals next to the actual conversations, so organizing work and advancing it happen in the same local interface. The server binds to `127.0.0.1` by default.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend managing a large multi-project demo vault with tags, session cards, chat, and queued scheduled work">
+</p>
+<p align="center"><sub>Synthetic demo vault: 240 sessions across 12 projects, with about 4,800 generated conversation turns.</sub></p>
+
 ## Core capabilities
 
 - Organize sessions across projects with tags, search, and Focus views, while distinguishing work
@@ -166,6 +171,14 @@ cd attend
 npm install
 npm run dev
 ```
+
+To open a large synthetic vault for screenshots and visual testing:
+
+```bash
+npm run demo:readme
+```
+
+It serves the demo at `http://127.0.0.1:5099` without reading or modifying your real Attend state.
 
 Checks:
 
