@@ -52,6 +52,14 @@ import {
   evaluatePriority,
   patternScoreNudge,
 } from "./core/priority.js";
+import {
+  type SchedulePayload,
+  ScheduleStore,
+  type ScheduledCommentPayload,
+  type ScheduledItem,
+  type ScheduledMessagePayload,
+  type ScheduledSessionPayload,
+} from "./core/schedules.js";
 import { pathWithinScope, scopeIdForRoots } from "./core/scope.js";
 import {
   type SessionRunConfig,
@@ -101,6 +109,7 @@ import { ScanCache } from "./core/vendor/scan-cache.js";
 import { migrateWorkspaceState } from "./core/workspace-state-migration.js";
 
 const LIVE_SNAPSHOT_INTERVAL_MS = 60_000;
+const SCHEDULE_TICK_INTERVAL_MS = 15_000;
 const WORK_PROMPT_SYNC_LOCK_TIMEOUT_MS = 100;
 import { WorkEventStore, WorkEventStoreBusyError } from "./core/work-events.js";
 import { buildWorkStats, trailingPromptActivity } from "./core/work-stats.js";
@@ -108,6 +117,15 @@ import { type ConsoleView, type SessionView, renderConsole } from "./ui/console.
 
 const DAY_MS = 86_400_000;
 const EXTERNAL_ACTIVE_STALE_MS = 2 * 60 * 60 * 1000;
+
+interface AppScheduleRuntime {
+  start(): void;
+  close(): void;
+  wake(): void;
+  runNow(id: string): Promise<ScheduledItem | null>;
+}
+
+const appScheduleRuntimes = new WeakMap<Hono, AppScheduleRuntime>();
 const IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const EXCEL_MEDIA_BY_EXT: ReadonlyMap<string, FileAttachmentMediaType> = new Map([
   ["xls", "application/vnd.ms-excel"],
@@ -1289,9 +1307,12 @@ export function createApp(
     return next;
   };
   const chatQueue = new ChatQueueStore(config.chatQueue, config.workEvents);
+  const schedules = new ScheduleStore(config.workEvents);
+  let scheduleRuntime: AppScheduleRuntime | null = null;
   const workEvents = new WorkEventStore(config.workEvents);
   try {
     const now = Date.now();
+    schedules.markExpiredClaimsUncertain(now);
     if (claimStateMaintenance(config.workEvents, now)) {
       sessionStatus.prune(now);
       engagement.prune(now);
@@ -1315,6 +1336,22 @@ export function createApp(
       return parentSessionId ? { ...event, sessionId: parentSessionId } : event;
     });
   };
+  const scheduleInScope = (item: ScheduledItem): boolean =>
+    config.scopeRoots.length === 0 ||
+    config.scopeRoots.some((root) => pathWithinScope(item.payload.cwd, root));
+  const publicSchedule = (item: ScheduledItem): ScheduledItem => {
+    const payload = { ...item.payload } as SchedulePayload & {
+      referenceContext?: string;
+      contextMessages?: unknown[];
+    };
+    payload.referenceContext = undefined;
+    // A pending fork card needs its frozen visible prefix in order to look like
+    // the branch it will become. Comment context remains implementation-only.
+    if (payload.kind !== "session") payload.contextMessages = undefined;
+    return { ...item, payload };
+  };
+  const visibleSchedules = (): ScheduledItem[] =>
+    schedules.list({ includeRecentlyDispatched: true }).filter(scheduleInScope).map(publicSchedule);
   // A provider transcript can be left without a terminal event when Attend
   // interrupts its owner process (notably during restart). Persisted live
   // turn_finished events let a fresh Attend process distinguish that dead turn
@@ -1715,6 +1752,7 @@ export function createApp(
         vaultState.sessionRunConfigs,
         daemonUiContext,
       ),
+      schedules: visibleSchedules(),
       knownDirs: dirs,
       scopeRoots: config.scopeRoots,
       defaultNewDir: defaultNewSessionDir(config.scopeRoots, dirs),
@@ -1744,6 +1782,7 @@ export function createApp(
 
   const lockedConsoleView = (): ConsoleView => ({
     sessions: [],
+    schedules: [],
     knownDirs: [],
     scopeRoots: [],
     defaultNewDir: "",
@@ -1830,6 +1869,7 @@ export function createApp(
           .map((s) => [s.sessionId, s.clientSessionId as string]),
       ),
       queues: chatQueue.summary(),
+      schedules: visibleSchedules(),
       stats: throughputSnapshot(),
     };
   };
@@ -2718,20 +2758,24 @@ export function createApp(
       return c.json({ ok: false, error: "invalid comment anchor" }, 400);
     const allThreads = commentThreads();
     const requestedThread = requestedId ? allThreads[requestedId] : undefined;
-    const existing =
+    const matchedThread =
       (requestedThread?.parentSessionId === parentSessionId ? requestedThread : undefined) ??
       Object.values(allThreads).find(
         (thread) => thread.parentSessionId === parentSessionId && thread.anchorKey === anchorKey,
       );
+    // A scheduled first comment persists its anchor immediately, before a hidden
+    // provider session exists. At dispatch it follows the ordinary new-thread path.
+    const existing = matchedThread?.providerSessionId ? matchedThread : undefined;
     const parent =
       visibleSessions().find((session) => session.sessionId === parentSessionId) ??
       freshVisibleSessions().find((session) => session.sessionId === parentSessionId) ??
       null;
-    if (!existing && !parent) return c.json({ ok: false, error: "parent session not ready" }, 409);
-    const vendor = chatVendor(existing?.vendor ?? parent?.vendor);
+    if (!matchedThread && !parent)
+      return c.json({ ok: false, error: "parent session not ready" }, 409);
+    const vendor = chatVendor(matchedThread?.vendor ?? parent?.vendor);
     const unavailable = unavailableVendorResponse(c, vendor);
     if (unavailable) return unavailable;
-    const cwd = existing?.cwd ?? parent?.cwd ?? "";
+    const cwd = matchedThread?.cwd ?? parent?.cwd ?? "";
     if (!cwd || !fs.existsSync(cwd))
       return c.json({ ok: false, error: "directory not found" }, 400);
     const driver = driverFor(vendor);
@@ -2842,7 +2886,7 @@ export function createApp(
         providerSessionId,
         vendor,
         cwd,
-        createdAt: Date.now(),
+        createdAt: matchedThread?.createdAt ?? Date.now(),
         lastUserMessageAt: startedAt,
         ...(body.createdWhileGenerating ? { createdWhileGenerating: true } : {}),
         status: driver.activeSessions().includes(providerSessionId) ? "generating" : "unread",
@@ -3028,7 +3072,11 @@ export function createApp(
       text?: string;
       attachments?: unknown;
       references?: unknown;
+      resolvedReferenceContext?: unknown;
       goal?: unknown;
+      scheduleRunId?: unknown;
+      scheduledAt?: unknown;
+      dispatchIfReady?: unknown;
     };
     const text = body.text?.trim() ?? "";
     const attachments = parseChatAttachments(body.attachments);
@@ -3044,7 +3092,15 @@ export function createApp(
       return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
     const validationError = attachmentError(driverFor(vendor), attachments);
     if (validationError) return c.json({ ok: false, error: validationError }, 400);
-    const pinContext = resolvePinReferenceContext(id, references);
+    const frozenReferenceContext =
+      c.req.header("x-attend-e2ee-internal") === "1" &&
+      typeof body.resolvedReferenceContext === "string"
+        ? body.resolvedReferenceContext
+        : undefined;
+    const pinContext =
+      frozenReferenceContext === undefined
+        ? resolvePinReferenceContext(id, references)
+        : { context: frozenReferenceContext, missing: [] };
     if (pinContext.missing.length)
       return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
     const item = chatQueue.enqueue(id, {
@@ -3055,6 +3111,12 @@ export function createApp(
       references,
       referenceContext: pinContext.context,
       ...(goalRequested ? { goal: true } : {}),
+      ...(typeof body.scheduleRunId === "string" && body.scheduleRunId
+        ? { scheduleRunId: body.scheduleRunId }
+        : {}),
+      ...(Number.isFinite(Number(body.scheduledAt))
+        ? { scheduledAt: Number(body.scheduledAt) }
+        : {}),
     });
     workEvents.record({
       kind: "queue_enqueued",
@@ -3064,6 +3126,13 @@ export function createApp(
       queueId: item.id,
       source: "live",
     });
+    const dispatchIfReady =
+      c.req.header("x-attend-e2ee-internal") === "1" && body.dispatchIfReady === true;
+    const isQueueHead = chatQueue.peek(id)?.id === item.id;
+    if (dispatchIfReady && isQueueHead && !driverFor(vendor).activeSessions().includes(id)) {
+      await drainQueuedTurn(id);
+      return c.json({ ok: true, item: publicQueueItem(item), ...queueResponse(id) });
+    }
     broadcastLive();
     if (!driverFor(vendor).activeSessions().includes(id))
       setTimeout(() => void drainQueuedTurn(id), 0);
@@ -3765,6 +3834,554 @@ export function createApp(
     return response;
   });
 
+  const scheduleResponse = () => ({ ok: true, schedules: visibleSchedules() });
+  const scheduleHeaders = {
+    "content-type": "application/json",
+    "x-attend-e2ee-internal": "1",
+  };
+
+  app.get("/schedules", () => Response.json(scheduleResponse()));
+
+  app.post("/schedules", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      kind?: unknown;
+      runAt?: unknown;
+      timezone?: unknown;
+      payload?: Record<string, unknown>;
+    };
+    const kind = body.kind;
+    const runAt = Number(body.runAt);
+    const timezone =
+      typeof body.timezone === "string" && body.timezone.trim()
+        ? body.timezone.trim().slice(0, 100)
+        : "UTC";
+    const raw = body.payload && typeof body.payload === "object" ? body.payload : {};
+    if (kind !== "message" && kind !== "session" && kind !== "comment")
+      return c.json({ ok: false, error: "unknown schedule kind" }, 400);
+    if (!Number.isFinite(runAt) || runAt <= Date.now())
+      return c.json({ ok: false, error: "scheduled time must be in the future" }, 400);
+
+    let payload: SchedulePayload;
+    if (kind === "message") {
+      const sessionId = typeof raw.sessionId === "string" ? raw.sessionId.trim() : "";
+      const session =
+        visibleSessions().find((candidate) => candidate.sessionId === sessionId) ??
+        freshVisibleSessions().find((candidate) => candidate.sessionId === sessionId) ??
+        null;
+      if (!session?.sessionId || !session.cwd)
+        return c.json({ ok: false, error: "session not found" }, 404);
+      const vendor = chatVendor(session.vendor);
+      const unavailable = unavailableVendorResponse(c, vendor);
+      if (unavailable) return unavailable;
+      const text = typeof raw.text === "string" ? raw.text.trim() : "";
+      const attachments = parseChatAttachments(raw.attachments);
+      const references = parseChatReferences(raw.references);
+      if (!text && !attachments.length) return c.json({ ok: false, error: "empty message" }, 400);
+      const goalRequested = raw.goal === true;
+      if (goalRequested && !text)
+        return c.json({ ok: false, error: "Goal requires an objective" }, 400);
+      if (goalRequested && vendor === "cursor")
+        return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+      const validationError = attachmentError(driverFor(vendor), attachments);
+      if (validationError) return c.json({ ok: false, error: validationError }, 400);
+      const pinContext = resolvePinReferenceContext(session.sessionId, references);
+      if (pinContext.missing.length)
+        return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
+      payload = {
+        kind,
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        vendor,
+        text,
+        attachments,
+        references,
+        referenceContext: pinContext.context,
+        ...(goalRequested ? { goal: true } : {}),
+      } satisfies ScheduledMessagePayload;
+    } else if (kind === "session") {
+      const mode = raw.mode === "fork" ? "fork" : "new";
+      const parentSessionId =
+        mode === "fork" && typeof raw.parentSessionId === "string"
+          ? raw.parentSessionId.trim()
+          : "";
+      const parent = parentSessionId
+        ? (visibleSessions().find((candidate) => candidate.sessionId === parentSessionId) ??
+          freshVisibleSessions().find((candidate) => candidate.sessionId === parentSessionId) ??
+          null)
+        : null;
+      if (mode === "fork" && (!parent?.sessionId || !parent.cwd))
+        return c.json({ ok: false, error: "parent session not ready" }, 409);
+      const cwd = resolveProjectDir(
+        mode === "fork" ? (parent?.cwd ?? "") : typeof raw.cwd === "string" ? raw.cwd : "",
+        config.scopeRoots,
+      );
+      if (!cwd || !fs.existsSync(cwd))
+        return c.json({ ok: false, error: "directory not found" }, 400);
+      const vendor = chatVendor(typeof raw.vendor === "string" ? raw.vendor : undefined);
+      const unavailable = unavailableVendorResponse(c, vendor);
+      if (unavailable) return unavailable;
+      const status = vendorStatus(vendor);
+      if (status.chat === false)
+        return c.json({ ok: false, error: "terminal-only vendors cannot be scheduled" }, 400);
+      const text = typeof raw.text === "string" ? raw.text.trim() : "";
+      const attachments = parseChatAttachments(raw.attachments);
+      const references = mode === "fork" ? parseChatReferences(raw.references) : [];
+      if (!text && !attachments.length)
+        return c.json({ ok: false, error: "scheduled sessions need a first message" }, 400);
+      const model = normalizeModel(raw.model);
+      const effort = normalizeEffort(raw.effort);
+      const speed = normalizeSpeed(raw.speed);
+      if (!resolveRunOptions(vendor, model, effort, speed))
+        return c.json(
+          { ok: false, error: "Cursor did not advertise that model configuration" },
+          400,
+        );
+      const validationError = attachmentError(driverFor(vendor), attachments);
+      if (validationError) return c.json({ ok: false, error: validationError }, 400);
+      const goalRequested = raw.goal === true;
+      if (goalRequested && !text)
+        return c.json({ ok: false, error: "Goal requires an objective" }, 400);
+      if (goalRequested && vendor === "cursor")
+        return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+      if (goalRequested && mode === "fork")
+        return c.json({ ok: false, error: "Scheduled Fork does not support Goal" }, 400);
+      const pinContext =
+        mode === "fork"
+          ? resolvePinReferenceContext(parentSessionId, references)
+          : { context: undefined, missing: [] as string[] };
+      if (pinContext.missing.length)
+        return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
+      const requestedClientId =
+        typeof raw.clientSessionId === "string" ? raw.clientSessionId.trim() : "";
+      const clientSessionId = /^[A-Za-z0-9_-]{1,128}$/.test(requestedClientId)
+        ? requestedClientId
+        : `scheduled-${crypto.randomUUID()}`;
+      const scheduledTags = Array.isArray(raw.tags)
+        ? raw.tags
+            .filter((tag): tag is string => typeof tag === "string")
+            .map(normalizeTagName)
+            .filter(Boolean)
+        : [];
+      payload = {
+        kind,
+        mode,
+        clientSessionId,
+        cwd,
+        vendor,
+        text,
+        attachments,
+        ...(mode === "fork"
+          ? {
+              parentSessionId,
+              parentVendor: chatVendor(parent?.vendor),
+              references,
+              referenceContext: pinContext.context,
+              contextMessages: parseForkContextMessages(raw.contextMessages),
+            }
+          : {}),
+        model,
+        effort,
+        speed,
+        ...(goalRequested ? { goal: true } : {}),
+        ...(scheduledTags.length ? { tags: [...new Set(scheduledTags)] } : {}),
+      } satisfies ScheduledSessionPayload;
+    } else {
+      const parentSessionId =
+        typeof raw.parentSessionId === "string" ? raw.parentSessionId.trim() : "";
+      const parent =
+        visibleSessions().find((candidate) => candidate.sessionId === parentSessionId) ??
+        freshVisibleSessions().find((candidate) => candidate.sessionId === parentSessionId) ??
+        null;
+      if (!parent?.sessionId || !parent.cwd)
+        return c.json({ ok: false, error: "parent session not ready" }, 409);
+      const question = typeof raw.text === "string" ? raw.text.trim() : "";
+      const anchorKey = typeof raw.anchorKey === "string" ? raw.anchorKey.trim() : "";
+      if (!question || !/^[A-Za-z0-9:_-]{1,160}$/.test(anchorKey))
+        return c.json({ ok: false, error: "missing comment context" }, 400);
+      const requestedThreadId = typeof raw.threadId === "string" ? raw.threadId.trim() : "";
+      const matched = Object.values(commentThreads()).find(
+        (thread) =>
+          (requestedThreadId && thread.id === requestedThreadId) ||
+          (thread.parentSessionId === parentSessionId && thread.anchorKey === anchorKey),
+      );
+      const threadId = /^[A-Za-z0-9_-]{1,160}$/.test(matched?.id ?? requestedThreadId)
+        ? (matched?.id ?? requestedThreadId)
+        : `comment-${crypto.randomUUID()}`;
+      const vendor = chatVendor(matched?.vendor ?? parent.vendor);
+      const unavailable = unavailableVendorResponse(c, vendor);
+      if (unavailable) return unavailable;
+      const anchorText = typeof raw.anchorText === "string" ? raw.anchorText.slice(0, 20_000) : "";
+      const anchorData =
+        raw.anchorData && typeof raw.anchorData === "object"
+          ? (raw.anchorData as CommentAnchorData)
+          : undefined;
+      const model = normalizeModel(raw.model);
+      const effort = normalizeEffort(raw.effort);
+      const speed = normalizeSpeed(raw.speed);
+      payload = {
+        kind,
+        threadId,
+        parentSessionId,
+        anchorKey,
+        anchorText,
+        ...(anchorData ? { anchorData } : {}),
+        contextMessages: parseForkContextMessages(raw.contextMessages),
+        createdWhileGenerating: raw.createdWhileGenerating === true,
+        cwd: matched?.cwd ?? parent.cwd,
+        vendor,
+        text: question,
+        model,
+        effort,
+        speed,
+      } satisfies ScheduledCommentPayload;
+      if (!matched) {
+        saveCommentThread({
+          id: threadId,
+          parentSessionId,
+          anchorKey,
+          anchorText,
+          ...(anchorData ? { anchorData } : {}),
+          providerSessionId: "",
+          vendor,
+          cwd: parent.cwd,
+          createdAt: Date.now(),
+          status: "scheduled",
+          messageCount: 0,
+        });
+      }
+    }
+
+    const item = schedules.create(payload, runAt, timezone);
+    broadcastLive();
+    scheduleRuntime?.wake();
+    return c.json({ ...scheduleResponse(), item: publicSchedule(item) });
+  });
+
+  app.patch("/schedules", async (c) => {
+    const id = c.req.query("id") ?? "";
+    const body = (await c.req.json().catch(() => ({}))) as { runAt?: unknown; text?: unknown };
+    const runAt = body.runAt === undefined ? undefined : Number(body.runAt);
+    const text = body.text === undefined ? undefined : String(body.text).trim();
+    if (!id) return c.json({ ok: false, error: "missing scheduled item" }, 400);
+    if (runAt !== undefined && (!Number.isFinite(runAt) || runAt <= Date.now()))
+      return c.json({ ok: false, error: "scheduled time must be in the future" }, 400);
+    if (text !== undefined && !text) return c.json({ ok: false, error: "empty message" }, 400);
+    const item = schedules.update(id, { runAt, text });
+    if (!item) return c.json({ ok: false, error: "scheduled item cannot be edited" }, 409);
+    broadcastLive();
+    scheduleRuntime?.wake();
+    return c.json({ ...scheduleResponse(), item: publicSchedule(item) });
+  });
+
+  app.delete("/schedules", (c) => {
+    const id = c.req.query("id") ?? "";
+    const current = schedules.get(id);
+    const item = id ? schedules.cancel(id) : null;
+    if (!item) return c.json({ ok: false, error: "scheduled item cannot be cancelled" }, 409);
+    const commentPayload = current?.payload.kind === "comment" ? current.payload : null;
+    if (commentPayload) {
+      const thread = commentThreads()[commentPayload.threadId];
+      const hasOther = schedules
+        .list()
+        .some(
+          (candidate) =>
+            candidate.id !== id &&
+            candidate.payload.kind === "comment" &&
+            candidate.payload.threadId === commentPayload.threadId,
+        );
+      if (thread && !thread.providerSessionId && !hasOther)
+        uiState.patch({ commentThreads: { [thread.id]: null } });
+    }
+    broadcastLive();
+    return c.json(scheduleResponse());
+  });
+
+  app.post("/schedules/materialize", async (c) => {
+    const id = c.req.query("id") ?? "";
+    const body = (await c.req.json().catch(() => ({}))) as {
+      text?: unknown;
+      attachments?: unknown;
+      references?: unknown;
+      goal?: unknown;
+    };
+    if (!id) return c.json({ ok: false, error: "missing scheduled item" }, 400);
+    const owner = `${scheduleOwner}:materialize:${crypto.randomUUID()}`;
+    const item = schedules.claimForMaterialization(id, owner);
+    if (!item || item.payload.kind !== "session")
+      return c.json({ ok: false, error: "scheduled session is no longer waiting" }, 409);
+
+    const payload = item.payload;
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    const attachments = parseChatAttachments(body.attachments);
+    const references = parseChatReferences(body.references);
+    if (!text && !attachments.length) {
+      schedules.releaseMaterialization(id, owner);
+      return c.json({ ok: false, error: "empty message" }, 400);
+    }
+    const target =
+      payload.mode === "fork" && payload.parentSessionId
+        ? `/chat/fork?session=${encodeURIComponent(payload.parentSessionId)}` +
+          `&cwd=${encodeURIComponent(payload.cwd)}` +
+          `&vendor=${encodeURIComponent(payload.vendor)}`
+        : `/chat/new?cwd=${encodeURIComponent(payload.cwd)}` +
+          `&vendor=${encodeURIComponent(payload.vendor)}`;
+    const immediateBody = {
+      text,
+      attachments,
+      references,
+      model: payload.model,
+      effort: payload.effort,
+      speed: payload.speed,
+      clientSessionId: payload.clientSessionId,
+      ...(payload.mode === "fork"
+        ? {
+            contextMessages: payload.contextMessages ?? [],
+            parentVendor: payload.parentVendor,
+          }
+        : {}),
+      ...(body.goal === true ? { goal: true } : {}),
+    };
+
+    let response: Response;
+    let result: Record<string, unknown>;
+    try {
+      response = await app.request(target, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(immediateBody),
+      });
+      result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    } catch (error) {
+      schedules.releaseMaterialization(id, owner);
+      broadcastLive();
+      return internalError(c, error);
+    }
+    if (!response.ok || result.ok !== true || typeof result.session !== "string") {
+      schedules.releaseMaterialization(id, owner);
+      broadcastLive();
+      return c.json(
+        {
+          ok: false,
+          error: typeof result.error === "string" ? result.error : "session could not start",
+          schedules: visibleSchedules(),
+        },
+        response.status === 409 ? 409 : 400,
+      );
+    }
+
+    const sessionId = result.session;
+    let retargeted: ScheduledItem | null = null;
+    try {
+      retargeted = schedules.retargetMaterializedSession(id, owner, sessionId);
+    } catch (error) {
+      schedules.block(
+        id,
+        owner,
+        error instanceof Error ? error.message : "scheduled message could not be retargeted",
+      );
+    }
+    if (!retargeted) {
+      schedules.block(id, owner, "scheduled message could not be retargeted");
+      broadcastLive();
+      return c.json(
+        {
+          ok: false,
+          error: "Session started, but its scheduled message needs review.",
+          session: sessionId,
+          clientSessionId: payload.clientSessionId,
+          schedules: visibleSchedules(),
+        },
+        500,
+      );
+    }
+    if (payload.tags?.length) {
+      tags.setSessionTags(sessionId, payload.tags);
+      for (const tag of payload.tags)
+        rememberScopeTag(tags, config.scopeRoots, config.scopeId, tag, payload.cwd);
+    }
+    broadcastLive();
+    scheduleRuntime?.wake();
+    return c.json({
+      ...result,
+      item: publicSchedule(retargeted),
+      schedules: visibleSchedules(),
+    });
+  });
+
+  app.post("/schedules/run", async (c) => {
+    const id = c.req.query("id") ?? "";
+    const item = id && scheduleRuntime ? await scheduleRuntime.runNow(id) : null;
+    if (!item) return c.json({ ok: false, error: "scheduled item cannot run now" }, 409);
+    return c.json({ ...scheduleResponse(), item: publicSchedule(item) });
+  });
+
+  const executeScheduledItem = async (item: ScheduledItem): Promise<void> => {
+    let target = "";
+    let body: Record<string, unknown>;
+    if (item.payload.kind === "message") {
+      target =
+        `/chat/queue?session=${encodeURIComponent(item.payload.sessionId)}` +
+        `&cwd=${encodeURIComponent(item.payload.cwd)}` +
+        `&vendor=${encodeURIComponent(item.payload.vendor)}`;
+      body = {
+        text: item.payload.text,
+        attachments: item.payload.attachments ?? [],
+        references: item.payload.references ?? [],
+        resolvedReferenceContext: item.payload.referenceContext,
+        goal: item.payload.goal === true,
+        scheduleRunId: item.id,
+        scheduledAt: item.runAt,
+        dispatchIfReady: true,
+      };
+    } else if (item.payload.kind === "session") {
+      const scheduledFork = item.payload.mode === "fork" && Boolean(item.payload.parentSessionId);
+      target = scheduledFork
+        ? `/chat/fork?session=${encodeURIComponent(item.payload.parentSessionId ?? "")}` +
+          `&cwd=${encodeURIComponent(item.payload.cwd)}` +
+          `&vendor=${encodeURIComponent(item.payload.vendor)}`
+        : `/chat/new?cwd=${encodeURIComponent(item.payload.cwd)}` +
+          `&vendor=${encodeURIComponent(item.payload.vendor)}`;
+      body = {
+        text: item.payload.text,
+        attachments: item.payload.attachments ?? [],
+        references: item.payload.references ?? [],
+        resolvedReferenceContext: item.payload.referenceContext,
+        contextMessages: item.payload.contextMessages,
+        parentVendor: item.payload.parentVendor,
+        model: item.payload.model,
+        effort: item.payload.effort,
+        speed: item.payload.speed,
+        goal: item.payload.goal === true,
+        clientSessionId: item.payload.clientSessionId,
+      };
+    } else {
+      target = "/comments/send";
+      body = {
+        threadId: item.payload.threadId,
+        parentSessionId: item.payload.parentSessionId,
+        anchorKey: item.payload.anchorKey,
+        anchorText: item.payload.anchorText,
+        anchorData: item.payload.anchorData,
+        question: item.payload.text,
+        contextMessages: item.payload.contextMessages ?? [],
+        createdWhileGenerating: item.payload.createdWhileGenerating,
+        model: item.payload.model,
+        effort: item.payload.effort,
+        speed: item.payload.speed,
+      };
+    }
+
+    let result: Record<string, unknown> = {};
+    try {
+      const response = await app.request(target, {
+        method: "POST",
+        headers: scheduleHeaders,
+        body: JSON.stringify(body),
+      });
+      result = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok || result.ok !== true) {
+        const error = typeof result.error === "string" ? result.error : "scheduled action failed";
+        schedules.block(item.id, scheduleOwner, error);
+        broadcastLive();
+        return;
+      }
+      const dispatchId =
+        item.payload.kind === "message"
+          ? String((result.item as { id?: unknown } | undefined)?.id ?? "")
+          : item.payload.kind === "session"
+            ? String(result.session ?? "")
+            : String(
+                (result.thread as { providerSessionId?: unknown } | undefined)?.providerSessionId ??
+                  "",
+              );
+      if (item.payload.kind === "session" && dispatchId && item.payload.tags?.length) {
+        tags.setSessionTags(dispatchId, item.payload.tags);
+        for (const tag of item.payload.tags)
+          rememberScopeTag(tags, config.scopeRoots, config.scopeId, tag, item.payload.cwd);
+      }
+      schedules.complete(item.id, scheduleOwner, dispatchId || undefined);
+      broadcastLive();
+    } catch (error) {
+      schedules.block(
+        item.id,
+        scheduleOwner,
+        error instanceof Error ? error.message : "scheduled action failed",
+      );
+      broadcastLive();
+    }
+  };
+
+  const scheduleOwner = crypto.randomUUID();
+  let scheduleTimer: NodeJS.Timeout | null = null;
+  let scheduleWakeTimer: NodeJS.Timeout | null = null;
+  let scheduleRunning = false;
+  let scheduleDirectRuns = 0;
+  let scheduleClosed = false;
+  let scheduleStoreClosed = false;
+  const closeScheduleStore = () => {
+    if (scheduleStoreClosed) return;
+    scheduleStoreClosed = true;
+    schedules.close();
+  };
+  const tickSchedules = async (): Promise<void> => {
+    if (scheduleRunning || scheduleClosed) return;
+    scheduleRunning = true;
+    try {
+      schedules.markExpiredClaimsUncertain();
+      for (let count = 0; count < 50; count += 1) {
+        const item = schedules.claimDue(scheduleOwner, scheduleInScope);
+        if (!item) break;
+        await executeScheduledItem(item);
+      }
+    } finally {
+      scheduleRunning = false;
+      if (scheduleClosed && scheduleDirectRuns === 0) closeScheduleStore();
+    }
+  };
+  scheduleRuntime = {
+    start() {
+      if (scheduleClosed || scheduleTimer) return;
+      void tickSchedules();
+      scheduleTimer = setInterval(() => void tickSchedules(), SCHEDULE_TICK_INTERVAL_MS);
+      scheduleTimer.unref?.();
+    },
+    wake() {
+      if (scheduleClosed || scheduleWakeTimer) return;
+      scheduleWakeTimer = setTimeout(() => {
+        scheduleWakeTimer = null;
+        void tickSchedules();
+      }, 0);
+      scheduleWakeTimer.unref?.();
+    },
+    async runNow(id) {
+      if (scheduleClosed) return null;
+      const current = schedules.get(id);
+      if (!current || !scheduleInScope(current)) return null;
+      const updated = schedules.update(id, { runAt: Date.now() });
+      if (!updated) return null;
+      const claimed = schedules.claim(id, scheduleOwner);
+      if (!claimed) return null;
+      scheduleDirectRuns += 1;
+      broadcastLive();
+      try {
+        await executeScheduledItem(claimed);
+        return schedules.get(id);
+      } finally {
+        scheduleDirectRuns -= 1;
+        if (scheduleClosed && !scheduleRunning && scheduleDirectRuns === 0) closeScheduleStore();
+      }
+    },
+    close() {
+      scheduleClosed = true;
+      if (scheduleTimer) clearInterval(scheduleTimer);
+      if (scheduleWakeTimer) clearTimeout(scheduleWakeTimer);
+      scheduleTimer = null;
+      scheduleWakeTimer = null;
+      if (!scheduleRunning && scheduleDirectRuns === 0) closeScheduleStore();
+    },
+  };
+  appScheduleRuntimes.set(app, scheduleRuntime);
+
   // Launch a vendor action in a terminal: resume / fork an existing session, or start a new one.
   app.post("/launch", (c) => {
     const action = c.req.query("action");
@@ -3940,9 +4557,11 @@ export function startServer(
   }
   const appDeps = deps ?? createDefaultAppDeps(config);
   const app = createApp(config, appDeps);
+  const scheduleRuntime = appScheduleRuntimes.get(app);
   const listen = (port: number, attemptsLeft: number): Promise<RunningServer> =>
     new Promise((resolve, reject) => {
       const server = serve({ fetch: app.fetch, hostname: config.host, port }, () => {
+        scheduleRuntime?.start();
         let closing = false;
         const close = () => {
           if (closing) return;
@@ -3954,6 +4573,7 @@ export function startServer(
           appDeps.engine.shutdown?.();
           appDeps.codex?.shutdown?.();
           appDeps.cursor?.shutdown?.();
+          scheduleRuntime?.close();
           const httpServer = server as {
             closeIdleConnections?: () => void;
             closeAllConnections?: () => void;

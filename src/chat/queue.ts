@@ -10,6 +10,9 @@ export interface QueuedChatTurn extends UserTurn {
   vendor: string;
   goal?: boolean;
   createdAt: number;
+  /** Present when this turn entered the queue through the durable scheduler. */
+  scheduleRunId?: string;
+  scheduledAt?: number;
   attachments?: ChatAttachment[];
   /** Resolved at enqueue time so later unpinning cannot change an already-submitted turn. */
   referenceContext?: string;
@@ -97,6 +100,8 @@ export class ChatQueueStore {
       references?: ChatReference[];
       referenceContext?: string;
       goal?: boolean;
+      scheduleRunId?: string;
+      scheduledAt?: number;
     },
   ): QueuedChatTurn {
     return this.data.update((data) => {
@@ -115,6 +120,8 @@ export class ChatQueueStore {
         references: input.references?.map((reference) => ({ ...reference })),
         ...(input.referenceContext ? { referenceContext: input.referenceContext } : {}),
         ...(input.goal === true ? { goal: true } : {}),
+        ...(input.scheduleRunId ? { scheduleRunId: input.scheduleRunId } : {}),
+        ...(Number.isFinite(input.scheduledAt) ? { scheduledAt: input.scheduledAt } : {}),
         createdAt: Date.now(),
       };
       queue.items.push(item);

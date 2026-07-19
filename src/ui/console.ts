@@ -1,5 +1,6 @@
 import type { AnalysisState } from "../core/daemon/cache.js";
 import type { ModelDefaults, ModelOption } from "../core/model-options.js";
+import type { ScheduledItem } from "../core/schedules.js";
 import type { Pattern } from "../core/types.js";
 import type { VaultUiState } from "../core/ui-state.js";
 import type { VendorAvailability } from "../core/vendor/detect.js";
@@ -100,6 +101,8 @@ export interface SessionView {
 
 export interface ConsoleView {
   sessions: SessionView[];
+  /** Active one-shot jobs projected into session cards and the existing queue surfaces. */
+  schedules?: ScheduledItem[];
   knownDirs: string[];
   scopeRoots: string[];
   /** Most recently used directory for a new session, with a scope/launch-root fallback. */
@@ -474,6 +477,7 @@ const STYLE = `
   .vendor-portal .chooser-opt.selected, .vendor-portal .chooser-opt.selected:hover, .vendor-portal .chooser-opt.selected.on { background: var(--accent-soft); }
   .vendor-portal .chooser-opt.unavailable:hover, .vendor-portal .chooser-opt.unavailable.on { background: var(--warning-soft); }
   .newactions { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 0.65rem; min-height: 2rem; }
+  .newaction-end { display: flex; align-items: center; flex-shrink: 0; }
   .newtagpick { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem; }
   .newtags { display: contents; }
   .newtagchip { display: inline-flex; align-items: center; gap: 0.15rem; max-width: 8rem; padding: 0.12rem 0.2rem 0.12rem 0.48rem; border: 1px solid rgba(13,148,136,0.35); border-radius: var(--radius-pill); color: #0f766e; background: var(--surface); font-size: 0.68rem; }
@@ -806,6 +810,8 @@ const STYLE = `
   .commentanchor-content > .toolc { max-width: 100%; }
   .commenttopstack { margin: 0.55rem 0.9rem 0; }
   .commentmsgs { --msg-float-actions-space: 3rem; flex: 1; min-height: 0; overflow-y: auto; padding: 0.8rem 0.9rem calc(var(--comment-composer-overlay-height) + var(--comment-queue-overlay-height) + 0.8rem); display: flex; flex-direction: column; gap: 0.6rem; }
+  #commentQueue { position: absolute; left: 0; right: 0; bottom: var(--comment-composer-overlay-height); z-index: 21; display: flex; flex-direction: column; gap: 0.3rem; max-height: 30vh; overflow-y: auto; padding: 0.4rem 0.9rem 0; }
+  #commentQueue:empty { display: none; }
   .commentfoot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 20; padding: 0 0.9rem 0.75rem; border-top: 0; background: transparent; }
   .commentcomposer { width: 100%; box-sizing: border-box; }
   .commentcomposer .composerrow { min-height: 2.15rem; }
@@ -819,11 +825,12 @@ const STYLE = `
   .comment-scrollbottom { right: 1.35rem; bottom: calc(var(--comment-composer-overlay-height) + var(--comment-queue-overlay-height) + 0.55rem); }
   .msg.editing .inline-edit { width: 100%; }
   /* shared in-place editor (sent-message resend + queued-draft edit) */
-  .inline-edit { position: relative; width: 100%; --inline-edit-actions-space: 7.2rem; }
+  .inline-edit { position: relative; width: 100%; --inline-edit-actions-space: 9rem; }
   .inline-edit-ta { display: block; width: 100%; box-sizing: border-box; resize: none; min-height: 2.2rem; font: inherit; font-size: 0.86rem; line-height: 1.5; padding: 0.5rem var(--inline-edit-actions-space) 0.5rem 0.65rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink); box-shadow: 0 0 0 3px var(--accent-ring); }
   .inline-edit.single-line .inline-edit-ta { min-height: calc(1.55em + 1.1rem); font-size: 0.88rem; line-height: 1.55; padding: calc(0.55rem - 1px) var(--inline-edit-actions-space) calc(0.55rem - 1px) 0.8rem; border-radius: 12px; border-bottom-right-radius: 4px; }
   .inline-edit-bar { position: absolute; right: 0.45rem; top: 50%; transform: translateY(-50%); display: flex; gap: 0.35rem; align-items: center; justify-content: flex-end; max-width: calc(100% - 0.9rem); }
   .inline-edit .inline-edit-save { height: 1.62rem; min-height: 1.62rem; padding: 0 0.58rem; font-size: 0.78rem; line-height: 1; white-space: nowrap; box-shadow: var(--shadow-sm); }
+  .inline-edit .schedulebtn { width: 1.62rem; height: 1.62rem; min-height: 1.62rem; flex-basis: 1.62rem; }
   .inline-edit .inline-edit-save { color: var(--primary-fg); background: var(--primary-bg); border-color: var(--primary-bg); font-weight: 600; }
   .inline-edit .inline-edit-save:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); box-shadow: 0 4px 14px var(--accent-ring); }
   .msg .bubble { min-width: 0; max-width: 76%; padding: 0.55rem 0.8rem; border-radius: 12px; font-size: 0.88rem; line-height: 1.55; white-space: normal; word-break: break-word; overflow-wrap: anywhere; box-shadow: var(--shadow-sm); }
@@ -1106,6 +1113,59 @@ const STYLE = `
   .composer textarea:focus { box-shadow: none; }
   .composeractions { position: absolute; left: 0.35rem; right: 0.35rem; bottom: 0.18rem; z-index: 2; display: flex; justify-content: flex-end; align-items: center; gap: 0.32rem; min-width: 0; pointer-events: none; }
   .composeractions > * { pointer-events: auto; }
+  .actiongroup { flex: 0 0 auto; display: inline-flex; align-items: stretch; gap: 0; }
+  .actiongroup > button { margin: 0; border-radius: 0; }
+  .actiongroup > button + button { margin-left: -1px; }
+  .actiongroup > button:first-child { border-top-left-radius: var(--radius-sm); border-bottom-left-radius: var(--radius-sm); }
+  .actiongroup > button:last-child { border-top-right-radius: var(--radius-sm); border-bottom-right-radius: var(--radius-sm); }
+  .actiongroup .splitbtn-ico { margin-left: 0.18rem; }
+  .schedulebtn { width: 1.8rem; height: 1.8rem; min-height: 1.8rem; flex: 0 0 1.8rem; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: var(--line-2); background: var(--surface); color: var(--ink-3); box-shadow: var(--shadow-sm); }
+  .schedulebtn:hover:not(:disabled), .schedulebtn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); box-shadow: none; z-index: 1; }
+  .schedulebtn svg { width: 0.88rem; height: 0.88rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .schedulepop { position: fixed; z-index: 180; width: min(22.5rem, calc(100vw - 1.5rem)); box-sizing: border-box; padding: 0.55rem; border: 1px solid color-mix(in srgb, var(--line-2) 72%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--surface) 97%, transparent); color: var(--ink); box-shadow: var(--shadow-pop); backdrop-filter: blur(14px) saturate(1.08); }
+  .schedulepop[hidden] { display: none; }
+  .schedulepop-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0.05rem 0.1rem 0.48rem; }
+  .schedulepop-title { font-size: 0.75rem; font-weight: 750; color: var(--ink); }
+  .schedulepop-zone { font-size: 0.64rem; color: var(--ink-4); }
+  .scheduleactions { flex: 0 0 auto; display: flex; justify-content: flex-end; align-items: center; gap: 0.32rem; }
+  .scheduleactions:empty { display: none; }
+  .scheduleaction { flex: 0 0 auto; min-height: 1.9rem; padding: 0 0.7rem; font-size: 0.72rem; }
+  .scheduleaction.primary { color: var(--primary-fg); border-color: var(--primary-bg); background: var(--primary-bg); font-weight: 650; }
+  .scheduleaction.primary:hover:not(:disabled) { border-color: var(--primary-hover); background: var(--primary-hover); }
+  .schedulerow { display: flex; align-items: center; gap: 0.38rem; }
+  .scheduledatetime { flex: 1 1 auto; min-width: 8.6rem; height: 2rem; display: inline-flex; align-items: center; gap: 0.34rem; padding-left: 0.52rem; overflow: hidden; border: 1px solid var(--line-2); border-radius: 8px; background: var(--input-bg); color: var(--ink-3); }
+  .scheduledatetime:hover, .scheduledatetime:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); color: var(--ink); }
+  .scheduledatetime svg { width: 0.82rem; height: 0.82rem; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .scheduledatetime input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; background: transparent; box-shadow: none; color: var(--ink); font: inherit; font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+  .scheduledatetime input:focus { border: 0; box-shadow: none; }
+  .scheduledatetime-toggle { width: 1.7rem; height: 100%; flex-shrink: 0; padding: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; color: var(--ink-4); }
+  .scheduledatetime-toggle:hover, .scheduledatetime-toggle[aria-expanded="true"] { border-color: var(--line); background: var(--button-hover); color: var(--ink); }
+  .schedulepicker { margin-top: 0.48rem; padding: 0.42rem; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+  .schedulepicker[hidden] { display: none; }
+  .schedulepicker-head { display: grid; grid-template-columns: 1.8rem minmax(0,1fr) 1.8rem; align-items: center; margin-bottom: 0.28rem; }
+  .schedulepicker-nav { width: 1.8rem; height: 1.7rem; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: var(--ink-3); font-size: 1.05rem; }
+  .schedulepicker-nav:hover { border-color: transparent; background: var(--button-hover); color: var(--ink); }
+  .schedulepicker-month { text-align: center; color: var(--ink); font-size: 0.72rem; font-weight: 700; }
+  .schedulepicker-week, .schedulepicker-days { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: 0.12rem; }
+  .schedulepicker-week span { padding: 0.18rem 0; color: var(--ink-4); font-size: 0.58rem; font-weight: 650; text-align: center; }
+  .schedulepicker-day { min-width: 0; height: 1.72rem; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: var(--ink-2); font-size: 0.68rem; }
+  .schedulepicker-day:hover:not(:disabled) { border-color: transparent; background: var(--button-hover); color: var(--ink); }
+  .schedulepicker-day.today { color: var(--accent); font-weight: 750; }
+  .schedulepicker-day.selected { border-color: var(--accent); background: var(--accent); color: white; font-weight: 750; }
+  .schedulepicker-day:disabled { opacity: 0.22; }
+  .schedulepicker-empty { height: 1.72rem; }
+  .scheduletime { display: flex; align-items: center; justify-content: center; gap: 0.24rem; margin-top: 0.38rem; padding-top: 0.42rem; border-top: 1px solid var(--line); }
+  .scheduletime-label { margin-right: 0.25rem; color: var(--ink-4); font-size: 0.64rem; }
+  .scheduletime input { width: 2.35rem; height: 1.72rem; padding: 0.18rem 0.28rem; border: 1px solid var(--line-2); border-radius: 6px; background: var(--input-bg); color: var(--ink); font: inherit; font-size: 0.72rem; font-variant-numeric: tabular-nums; text-align: center; }
+  .scheduletime-sep { color: var(--ink-4); font-size: 0.72rem; }
+  .scheduletime-choices { display: grid; grid-template-columns: minmax(0,1fr) 5.8rem; gap: 0.45rem; margin-top: 0.42rem; }
+  .scheduletime-choice-label { display: block; margin-bottom: 0.2rem; color: var(--ink-4); font-size: 0.58rem; font-weight: 650; }
+  .scheduletime-hours { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 0.1rem; }
+  .scheduletime-minutes { display: grid; grid-template-columns: minmax(0,1fr); gap: 0.1rem; }
+  .scheduletime-option { min-width: 0; height: 1.42rem; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: var(--ink-3); font-size: 0.61rem; font-variant-numeric: tabular-nums; }
+  .scheduletime-option:hover:not(:disabled) { border-color: transparent; background: var(--button-hover); color: var(--ink); }
+  .scheduletime-option.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 750; }
+  .schedulemsg { min-height: 0.9rem; margin: 0.35rem 0.1rem 0; color: var(--warning); font-size: 0.66rem; }
   /* attachments live as chips in the input's bottom-left corner; click a chip to preview it */
   .composeractions .attachtray { flex: 1 1 auto; min-width: 0; margin: 0; justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
   .composeractions .attachtray::-webkit-scrollbar { display: none; }
@@ -1307,6 +1367,9 @@ const STYLE = `
   .qitem button { flex-shrink: 0; }
   .qitem .qdispatch { width: 3.4rem; box-sizing: border-box; flex-shrink: 0; font-size: 0.72rem; text-align: center; }
   .qitem .qwaiting { color: #6366f1; font-weight: 650; }
+  .qitem.scheduled { background: color-mix(in srgb, var(--surface) 78%, #eef2ff); }
+  .qitem.blocked { border-color: var(--warning); background: var(--warning-soft); }
+  .qitem .qtime { flex-shrink: 0; color: var(--ink-4); font-size: 0.68rem; font-variant-numeric: tabular-nums; }
   .qitem button.qsend { padding: 0.1rem 0.45rem; color: var(--primary-fg); background: var(--primary-bg); border-color: var(--primary-bg); font-weight: 600; }
   .qitem button.qsend:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
   .qaction { width: 1.7rem; height: 1.7rem; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: #6366f1; }
@@ -1316,11 +1379,6 @@ const STYLE = `
   button.qdel:hover { color: #b91c1c; background: #fef2f2; }
   .qitem.editing .qeditbox { width: 100%; min-width: 0; display: flex; align-items: center; gap: 0.45rem; }
   .qitem.editing .qeditta { flex: 1; min-width: 0; height: 1.7rem; box-sizing: border-box; font: inherit; font-size: 0.82rem; line-height: 1.2; padding: 0.22rem 0.45rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink); box-shadow: 0 0 0 2px var(--accent-ring); }
-  button.fork-action[data-vendor="claude"] { --fork-action-fg: var(--vendor-claude-fg); --fork-action-bg: var(--vendor-claude-bg); --fork-action-border: var(--vendor-claude-border); --fork-action-hover-bg: var(--vendor-claude-hover-bg); --fork-action-hover-border: var(--vendor-claude-hover-border); }
-  button.fork-action[data-vendor="codex"] { --fork-action-fg: var(--vendor-codex-fg); --fork-action-bg: var(--vendor-codex-bg); --fork-action-border: var(--vendor-codex-border); --fork-action-hover-bg: var(--vendor-codex-hover-bg); --fork-action-hover-border: var(--vendor-codex-hover-border); }
-  button.fork-action[data-vendor="cursor"] { --fork-action-fg: var(--vendor-cursor-fg); --fork-action-bg: var(--vendor-cursor-bg); --fork-action-border: var(--vendor-cursor-border); --fork-action-hover-bg: var(--vendor-cursor-hover-bg); --fork-action-hover-border: var(--vendor-cursor-hover-border); }
-  .foot button.fork-action, .inline-edit button.fork-action { color: var(--fork-action-fg); border-color: var(--fork-action-border); background: var(--fork-action-bg); }
-  .foot button.fork-action:hover:not(:disabled), .inline-edit button.fork-action:hover:not(:disabled) { color: var(--fork-action-fg); border-color: var(--fork-action-hover-border); background: var(--fork-action-hover-bg); box-shadow: 0 0 0 2px color-mix(in srgb, var(--fork-action-border) 22%, transparent); }
   .foot button.splitbtn { height: 1.8rem; min-height: 1.8rem; padding: 0 0.68rem; }
   .splitbtn-ico { width: 0.82rem; height: 0.82rem; margin-left: 0.22rem; stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.15em; }
   .forkpop { position: absolute; right: 1.1rem; bottom: calc(100% + 0.55rem); z-index: 55; width: min(390px, calc(100vw - 2rem)); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.55rem; }
@@ -1494,6 +1552,7 @@ function compactThroughput(value: number): string {
 
 export function renderConsole(v: ConsoleView): string {
   const sessJson = JSON.stringify(v.sessions).replace(/</g, "\\u003c");
+  const schedulesJson = JSON.stringify(v.schedules ?? []).replace(/</g, "\\u003c");
   const dirsJson = JSON.stringify(v.knownDirs).replace(/</g, "\\u003c");
   const rootsJson = JSON.stringify(v.scopeRoots).replace(/</g, "\\u003c");
   const defaultNewDirJson = JSON.stringify(v.defaultNewDir).replace(/</g, "\\u003c");
@@ -1640,7 +1699,12 @@ export function renderConsole(v: ConsoleView): string {
           <div id="newTagSug" class="newtagsug"></div>
         </div>
       </div>
-      <button id="nbtn" class="send nbtn-primary">start session ▸</button>
+      <div class="newaction-end">
+        <div class="actiongroup">
+          <button id="scheduleNew" class="schedulebtn" type="button" aria-label="schedule new session" aria-expanded="false"></button>
+          <button id="nbtn" class="send nbtn-primary">start session ▸</button>
+        </div>
+      </div>
     </div>
     <div class="nmsg" id="nmsg"></div>
   </div>
@@ -1758,8 +1822,11 @@ export function renderConsole(v: ConsoleView): string {
             </button>
             <input id="file" type="file" multiple hidden>
             <button class="railbtn goal-toggle" id="goalToggle" type="button" aria-pressed="false" title="Use the next message as a Goal"><svg class="goal-ico" viewBox="0 0 16 16" aria-hidden="true"><circle class="goal-ring" cx="8" cy="8" r="5.4"></circle><circle class="goal-dot" cx="8" cy="8" r="2.2"></circle></svg><span>goal</span></button>
-            <button class="splitbtn" id="forkBtn" title="branch this session into a fork (uses your draft as the opening turn)" disabled>fork<svg class="splitbtn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 12h2"></path><path d="M9 12c4 0 4-5 8-5"></path><path d="M9 12c4 0 4 5 8 5"></path><circle cx="5" cy="12" r="2"></circle><circle cx="19" cy="7" r="2"></circle><circle cx="19" cy="17" r="2"></circle></svg></button>
-            <button class="send" id="send">send</button>
+            <div class="actiongroup" id="chatActionGroup">
+              <button id="scheduleChat" class="schedulebtn" type="button" aria-label="schedule action" aria-expanded="false"></button>
+              <button class="splitbtn" id="forkBtn" title="branch this session into a fork (uses your draft as the opening turn)" disabled>fork<svg class="splitbtn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 12h2"></path><path d="M9 12c4 0 4-5 8-5"></path><path d="M9 12c4 0 4 5 8 5"></path><circle cx="5" cy="12" r="2"></circle><circle cx="19" cy="7" r="2"></circle><circle cx="19" cy="17" r="2"></circle></svg></button>
+              <button class="send" id="send">send</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1791,6 +1858,7 @@ export function renderConsole(v: ConsoleView): string {
     <div class="msg-float-actions comment-msg-float-actions" id="commentMsgFloatActions" aria-hidden="true">
       <button id="commentMsgFloatPin" type="button" aria-label="Pin this comment message"></button>
     </div>
+    <div id="commentQueue"></div>
     <button class="scrollbottom comment-scrollbottom" id="commentScrollBottom" type="button" aria-label="scroll comments to bottom" title="Scroll to bottom" hidden></button>
     <div class="commentfoot">
       <div class="composer commentcomposer">
@@ -1799,7 +1867,10 @@ export function renderConsole(v: ConsoleView): string {
             <div class="composer-shortcut-ghost" id="commentShortcutGhost" aria-hidden="true" hidden><span id="commentShortcutGhostPrefix"></span><span class="composer-shortcut-ghost-suffix" id="commentShortcutGhostSuffix"></span><span class="composer-shortcut-ghost-key">Tab</span></div>
             <textarea id="commentInput" rows="1" aria-autocomplete="inline" aria-keyshortcuts="Tab Enter Shift+Enter Escape" placeholder="message"></textarea>
             <div class="composeractions">
-              <button class="send commentsend" id="commentSend" type="button">send</button>
+              <div class="actiongroup">
+                <button id="scheduleComment" class="schedulebtn" type="button" aria-label="schedule comment" aria-expanded="false"></button>
+                <button class="send commentsend" id="commentSend" type="button">send</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1874,6 +1945,21 @@ export function renderConsole(v: ConsoleView): string {
   </section>
 </div>
 <div class="toast-host" id="toastHost" aria-live="polite" aria-atomic="true"></div>
+<section class="schedulepop" id="schedulePop" role="dialog" aria-label="Schedule once" hidden>
+  <div class="schedulepop-head"><span class="schedulepop-title">Schedule once</span><span class="schedulepop-zone" id="scheduleZone"></span></div>
+  <div class="schedulerow">
+    <div class="scheduledatetime" id="scheduleDateTime"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5v5l3.3 2"></path></svg><input id="scheduleDateTimeInput" autocomplete="off" spellcheck="false" placeholder="YYYY-MM-DD HH:mm" aria-label="Scheduled date and time"><button class="scheduledatetime-toggle" id="schedulePickerToggle" type="button" aria-label="Open calendar and time options" aria-expanded="false">▾</button></div>
+    <div class="scheduleactions" id="scheduleActions"></div>
+  </div>
+  <div class="schedulepicker" id="schedulePicker" hidden>
+    <div class="schedulepicker-head"><button class="schedulepicker-nav" id="schedulePrevMonth" type="button" aria-label="Previous month">‹</button><div class="schedulepicker-month" id="scheduleMonth"></div><button class="schedulepicker-nav" id="scheduleNextMonth" type="button" aria-label="Next month">›</button></div>
+    <div class="schedulepicker-week" aria-hidden="true"><span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span></div>
+    <div class="schedulepicker-days" id="scheduleDays"></div>
+    <div class="scheduletime"><span class="scheduletime-label">Time</span><input id="scheduleHour" inputmode="numeric" maxlength="2" aria-label="Hour"><span class="scheduletime-sep">:</span><input id="scheduleMinute" inputmode="numeric" maxlength="2" aria-label="Minute"></div>
+    <div class="scheduletime-choices"><div><span class="scheduletime-choice-label">Hour</span><div class="scheduletime-hours" id="scheduleHourOptions"></div></div><div><span class="scheduletime-choice-label">Minute</span><div class="scheduletime-minutes" id="scheduleMinuteOptions"></div></div></div>
+  </div>
+  <div class="schedulemsg" id="scheduleMsg"></div>
+</section>
 <div class="unlock" id="unlock" ${v.e2ee?.enabled ? "" : "hidden"}>
   <form class="unlock-panel" id="unlockForm">
     <div class="unlock-title">Unlock Attend</div>
@@ -1887,6 +1973,7 @@ export function renderConsole(v: ConsoleView): string {
 </div>
 <script>
 window.__SESSIONS__ = ${sessJson};
+window.__SCHEDULES__ = ${schedulesJson};
 window.__DIRS__ = ${dirsJson};
 window.__ROOTS__ = ${rootsJson};
 window.__DEFAULT_NEW_DIR__ = ${defaultNewDirJson};
@@ -1905,6 +1992,7 @@ window.__CHANGELOG__ = ${changelogJson};
 <script>
 (function(){
   var SESS = window.__SESSIONS__ || [];
+  var SCHEDULES = window.__SCHEDULES__ || [];
   var DIRS = window.__DIRS__ || [];
   var ROOTS = window.__ROOTS__ || [];
   var DEFAULT_NEW_DIR = window.__DEFAULT_NEW_DIR__ || '';
@@ -2006,6 +2094,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function applyBootstrap(view){
     view = view || {};
     SESS = view.sessions || [];
+    SCHEDULES = view.schedules || [];
     DIRS = view.knownDirs || [];
     ROOTS = view.scopeRoots || [];
     DEFAULT_NEW_DIR = view.defaultNewDir || '';
@@ -2300,8 +2389,10 @@ window.__CHANGELOG__ = ${changelogJson};
   // naturally-finished turn advance into it automatically. Stopping a turn keeps
   // the queue intact.
   var pendingQueue = [];
+  var schedulePopoverState = null;
   var forkingQueueItems = {};
   var editingQueueIdx = -1; // which queued draft is open in its inline editor (-1 = none)
+  var editingScheduleId = ''; // scheduled queue row whose text is being edited
   var stopRequested = false;
   var sessionDrafts = {};
   var sessionAttachments = {};
@@ -2416,6 +2507,9 @@ window.__CHANGELOG__ = ${changelogJson};
       path('M9 12c4 0 4-5 8-5');
       path('M9 12c4 0 4 5 8 5');
       circle(5,12,2); circle(19,7,2); circle(19,17,2);
+    } else if(name==='clock'){
+      circle(12,12,8.5);
+      path('M12 7.5v5l3.3 2');
     } else if(name==='up'){
       path('M6 15l6-6 6 6');
     } else if(name==='down'){
@@ -2705,18 +2799,498 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function syncCommentOverlayOffsets(){
     commentOverlayLayoutRaf=0;
-    var panel=document.querySelector('.commentpanel'), foot=document.querySelector('.commentfoot');
+    var panel=document.querySelector('.commentpanel'), foot=document.querySelector('.commentfoot'), queue=byId('commentQueue');
     if(!panel||!foot) return;
     panel.style.setProperty('--comment-composer-overlay-height',(overlayHeight(foot)||64)+'px');
-    // Queued comment turns render inside the scrollable message stream today.
-    // Keep a separate variable so a future pinned queue can participate in the
-    // same spacing contract without changing composer/button positioning.
-    panel.style.setProperty('--comment-queue-overlay-height','0px');
+    panel.style.setProperty('--comment-queue-overlay-height',((queue&&queue.childElementCount)?overlayHeight(queue):0)+'px');
     if(commentStick){ var host=byId('commentMsgs'); if(host) host.scrollTop=host.scrollHeight; }
   }
   function scheduleCommentOverlayOffsets(){
     if(commentOverlayLayoutRaf) return;
     commentOverlayLayoutRaf=requestAnimationFrame(syncCommentOverlayOffsets);
+  }
+  function scheduleIsPending(item){
+    return !!(item && item.status!=='dispatched' && item.status!=='cancelled');
+  }
+  function scheduledItemsForSession(s){
+    if(!s) return [];
+    var provider=providerSessionId(s), client=String(s.clientBranchId||s.sessionId||'');
+    return SCHEDULES.filter(function(item){
+      if(!scheduleIsPending(item)||!item.payload) return false;
+      return item.kind==='message'
+        ? String(item.payload.sessionId||'')===String(provider||s.sessionId||'')
+        : item.kind==='session' && String(item.payload.clientSessionId||'')===client;
+    });
+  }
+  function scheduledCommentsForThread(threadId){
+    return SCHEDULES.filter(function(item){
+      return scheduleIsPending(item)&&item.kind==='comment'&&item.payload&&String(item.payload.threadId||'')===String(threadId||'');
+    });
+  }
+  function scheduleDateLabel(at){
+    var date=new Date(Number(at)||0), now=new Date(), tomorrow=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1);
+    var time=date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    if(date.toDateString()===now.toDateString()) return 'today '+time;
+    if(date.toDateString()===tomorrow.toDateString()) return 'tomorrow '+time;
+    return date.toLocaleDateString([],{month:'short',day:'numeric'})+' '+time;
+  }
+  function schedulePad(n){ return String(n).padStart(2,'0'); }
+  function scheduleDateTimeText(at){
+    var d=new Date(Number(at)||Date.now());
+    return d.getFullYear()+'-'+schedulePad(d.getMonth()+1)+'-'+schedulePad(d.getDate())+' '+schedulePad(d.getHours())+':'+schedulePad(d.getMinutes());
+  }
+  function defaultScheduleAt(){
+    var d=new Date();
+    d.setHours(d.getHours()+1,0,0,0);
+    return d.getTime();
+  }
+  function closeSchedulePopover(){
+    var pop=byId('schedulePop'), picker=byId('schedulePicker'), toggle=byId('schedulePickerToggle');
+    if(pop) pop.hidden=true;
+    if(picker) picker.hidden=true; if(toggle) toggle.setAttribute('aria-expanded','false');
+    if(schedulePopoverState&&schedulePopoverState.button) schedulePopoverState.button.setAttribute('aria-expanded','false');
+    schedulePopoverState=null;
+  }
+  function positionSchedulePopover(button){
+    var pop=byId('schedulePop'); if(!pop||!button) return;
+    var rect=button.getBoundingClientRect(), width=Math.min(360,window.innerWidth-24);
+    pop.style.width=width+'px';
+    var left=Math.max(12,Math.min(window.innerWidth-width-12,rect.right-width));
+    pop.style.left=left+'px';
+    pop.style.top='auto'; pop.style.bottom='auto';
+    var height=pop.getBoundingClientRect().height||150;
+    if(rect.top>height+16) pop.style.top=Math.max(8,rect.top-height-8)+'px';
+    else pop.style.top=Math.min(window.innerHeight-height-8,rect.bottom+8)+'px';
+  }
+  function scheduleActionList(actions){
+    if(typeof actions==='function') return [{id:'schedule',label:'Schedule',submit:actions}];
+    return (Array.isArray(actions)?actions:[]).filter(function(action){ return action&&typeof action.submit==='function'; });
+  }
+  function defaultScheduleAction(){
+    if(!schedulePopoverState) return null;
+    var actions=schedulePopoverState.actions||[];
+    return actions.find(function(action){ return action.id===schedulePopoverState.defaultActionId; }) || actions[0] || null;
+  }
+  function syncScheduleDateTime(){
+    if(!schedulePopoverState) return;
+    var d=new Date(schedulePopoverState.selectedAt), direct=byId('scheduleDateTimeInput'), hour=byId('scheduleHour'), minute=byId('scheduleMinute');
+    if(direct) direct.value=scheduleDateTimeText(d.getTime());
+    if(hour) hour.value=schedulePad(d.getHours());
+    if(minute) minute.value=schedulePad(d.getMinutes());
+  }
+  function applyScheduleDirectInput(showError){
+    if(!schedulePopoverState) return false;
+    var input=byId('scheduleDateTimeInput'), msg=byId('scheduleMsg'), raw=String(input&&input.value||'').trim();
+    var match=raw.match(/^(\\d{4})[-\\/](\\d{1,2})[-\\/](\\d{1,2})[ T](\\d{1,2}):(\\d{1,2})$/);
+    if(!match){ if(showError&&msg) msg.textContent='Use YYYY-MM-DD HH:mm.'; return false; }
+    var year=Number(match[1]), month=Number(match[2])-1, day=Number(match[3]), hour=Number(match[4]), minute=Number(match[5]);
+    var date=new Date(year,month,day,hour,minute,0,0), valid=date.getFullYear()===year&&date.getMonth()===month&&date.getDate()===day&&date.getHours()===hour&&date.getMinutes()===minute;
+    if(!valid){ if(showError&&msg) msg.textContent='Enter a valid date and time.'; return false; }
+    schedulePopoverState.selectedAt=date.getTime(); schedulePopoverState.calendarMonth=new Date(year,month,1).getTime();
+    // Keep blur parsing side-effect free for the picker DOM. Re-rendering here
+    // replaces an option between pointerdown and click when the direct input
+    // loses focus, which makes the user's hour/minute click disappear.
+    if(msg) msg.textContent=''; syncScheduleDateTime(); return true;
+  }
+  function renderSchedulePicker(){
+    if(!schedulePopoverState) return;
+    var state=schedulePopoverState, selected=new Date(state.selectedAt), monthDate=new Date(state.calendarMonth), host=byId('scheduleDays'), title=byId('scheduleMonth');
+    if(!host||!title) return;
+    var year=monthDate.getFullYear(), month=monthDate.getMonth(), first=new Date(year,month,1), count=new Date(year,month+1,0).getDate();
+    var today=new Date(); today.setHours(0,0,0,0);
+    title.textContent=first.toLocaleDateString([],{month:'long',year:'numeric'}); host.innerHTML='';
+    for(var blank=0;blank<first.getDay();blank++) host.appendChild(el('span','schedulepicker-empty'));
+    for(var day=1;day<=count;day++) (function(dayNumber){
+      var date=new Date(year,month,dayNumber), button=el('button','schedulepicker-day',String(dayNumber)); button.type='button';
+      var isToday=date.getTime()===today.getTime(), isSelected=selected.getFullYear()===year&&selected.getMonth()===month&&selected.getDate()===dayNumber;
+      button.classList.toggle('today',isToday); button.classList.toggle('selected',isSelected); button.disabled=date.getTime()<today.getTime()||!!state.busy;
+      button.setAttribute('aria-label',date.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric',year:'numeric'}));
+      if(isSelected) button.setAttribute('aria-current','date');
+      button.onclick=function(){
+        var next=new Date(state.selectedAt); next.setFullYear(year,month,dayNumber); state.selectedAt=next.getTime(); syncScheduleDateTime(); renderSchedulePicker();
+      };
+      host.appendChild(button);
+    })(day);
+    syncScheduleDateTime(); renderScheduleTimeOptions();
+  }
+  function renderScheduleTimeOptions(){
+    if(!schedulePopoverState) return;
+    var state=schedulePopoverState, selected=new Date(state.selectedAt), hourHost=byId('scheduleHourOptions'), minuteHost=byId('scheduleMinuteOptions');
+    if(!hourHost||!minuteHost) return;
+    hourHost.innerHTML=''; minuteHost.innerHTML='';
+    for(var hourValue=0;hourValue<24;hourValue++) (function(value){
+      var button=el('button','scheduletime-option',schedulePad(value)); button.type='button'; button.disabled=!!state.busy; button.classList.toggle('selected',selected.getHours()===value);
+      button.onclick=function(){ var next=new Date(state.selectedAt); next.setHours(value,selected.getMinutes(),0,0); state.selectedAt=next.getTime(); syncScheduleDateTime(); renderScheduleTimeOptions(); };
+      hourHost.appendChild(button);
+    })(hourValue);
+    [0,15,30,45].forEach(function(value){
+      var button=el('button','scheduletime-option',schedulePad(value)); button.type='button'; button.disabled=!!state.busy; button.classList.toggle('selected',selected.getMinutes()===value);
+      button.onclick=function(){ var next=new Date(state.selectedAt); next.setMinutes(value,0,0); state.selectedAt=next.getTime(); syncScheduleDateTime(); renderScheduleTimeOptions(); };
+      minuteHost.appendChild(button);
+    });
+  }
+  function applyScheduleTimeParts(){
+    if(!schedulePopoverState) return;
+    var state=schedulePopoverState, d=new Date(state.selectedAt), hour=byId('scheduleHour'), minute=byId('scheduleMinute');
+    var rawHour=String(hour&&hour.value||'').trim(), rawMinute=String(minute&&minute.value||'').trim();
+    var h=rawHour===''?NaN:Number(rawHour), m=rawMinute===''?NaN:Number(rawMinute);
+    h=Number.isFinite(h)?Math.max(0,Math.min(23,Math.floor(h))):d.getHours();
+    m=Number.isFinite(m)?Math.max(0,Math.min(59,Math.floor(m))):d.getMinutes();
+    d.setHours(h,m,0,0); state.selectedAt=d.getTime(); syncScheduleDateTime(); renderScheduleTimeOptions();
+  }
+  function toggleSchedulePicker(force){
+    if(!schedulePopoverState) return;
+    var picker=byId('schedulePicker'), button=byId('schedulePickerToggle'); if(!picker||!button) return;
+    var open=force===undefined?picker.hidden:!!force; picker.hidden=!open; button.setAttribute('aria-expanded',open?'true':'false');
+    if(open){ renderSchedulePicker(); requestAnimationFrame(function(){ if(schedulePopoverState) positionSchedulePopover(schedulePopoverState.button); }); }
+    else positionSchedulePopover(schedulePopoverState.button);
+  }
+  function renderScheduleActions(){
+    var host=byId('scheduleActions');
+    if(!host) return;
+    var state=schedulePopoverState, actions=state&&state.actions||[], direct=byId('scheduleDateTimeInput'), toggle=byId('schedulePickerToggle'), hour=byId('scheduleHour'), minute=byId('scheduleMinute');
+    if(direct) direct.disabled=!!(state&&state.busy); if(toggle) toggle.disabled=!!(state&&state.busy); if(hour) hour.disabled=!!(state&&state.busy); if(minute) minute.disabled=!!(state&&state.busy);
+    host.innerHTML='';
+    actions.forEach(function(action){
+      var button=el('button','scheduleaction'+(action.primary?' primary':'')+(action.id==='fork'?' splitbtn':''),action.label||action.id); button.type='button'; button.disabled=!!(state&&state.busy);
+      if(action.id==='fork') setForkButtonLabel(button,action.label||'Fork');
+      button.onclick=function(){ submitScheduleAction(action); };
+      host.appendChild(button);
+    });
+  }
+  function openSchedulePopover(button,actions,initialAt,defaultActionId){
+    var pop=byId('schedulePop'), picker=byId('schedulePicker'), direct=byId('scheduleDateTimeInput'), toggle=byId('schedulePickerToggle'), msg=byId('scheduleMsg');
+    if(!pop||!direct||!toggle||!button) return;
+    if(schedulePopoverState&&schedulePopoverState.button===button){ closeSchedulePopover(); return; }
+    closeSchedulePopover();
+    actions=scheduleActionList(actions);
+    if(!actions.length) return;
+    var selected=actions.some(function(action){ return action.id===defaultActionId; }) ? defaultActionId : actions[0].id;
+    var at=Number(initialAt)||defaultScheduleAt(), initialDate=new Date(at);
+    schedulePopoverState={button:button,actions:actions,defaultActionId:selected,busy:false,selectedAt:at,calendarMonth:new Date(initialDate.getFullYear(),initialDate.getMonth(),1).getTime()};
+    button.setAttribute('aria-expanded','true');
+    toggle.setAttribute('aria-expanded','false'); if(picker) picker.hidden=true; syncScheduleDateTime();
+    if(msg) msg.textContent='';
+    var zone=byId('scheduleZone'); if(zone) zone.textContent=Intl.DateTimeFormat().resolvedOptions().timeZone||'local time';
+    renderScheduleActions(); pop.hidden=false; positionSchedulePopover(button);
+    setTimeout(function(){ direct.focus(); direct.select(); },0);
+  }
+  function submitScheduleAction(action){
+    if(!schedulePopoverState) return;
+    if(!applyScheduleDirectInput(true)) return;
+    applyScheduleTimeParts();
+    var msg=byId('scheduleMsg'), at=Number(schedulePopoverState.selectedAt)||0;
+    if(!Number.isFinite(at)||at<=Date.now()){ if(msg) msg.textContent='Choose a future time.'; return; }
+    var state=schedulePopoverState;
+    if(!action){ if(msg) msg.textContent='Choose an action.'; return; }
+    state.busy=true; renderScheduleActions(); renderSchedulePicker();
+    var result;
+    try{ result=action.submit(at); }catch(error){ result=Promise.reject(error); }
+    Promise.resolve(result).then(function(ok){
+      if(ok!==false){ closeSchedulePopover(); return; }
+      if(schedulePopoverState===state){ state.busy=false; renderScheduleActions(); renderSchedulePicker(); }
+    }).catch(function(error){
+      if(schedulePopoverState!==state) return;
+      state.busy=false; renderScheduleActions(); renderSchedulePicker();
+      if(msg) msg.textContent=error&&error.message?error.message:'Could not schedule.';
+    });
+  }
+  function scheduleRequest(path,options){
+    return fetch(path,options).then(function(r){ return r.json(); }).then(function(res){
+      if(!res.ok) throw new Error(res.error||'Could not update schedule.');
+      syncSchedules(res.schedules||[]);
+      return res;
+    });
+  }
+  function createSchedule(kind,runAt,payload){
+    return scheduleRequest('/schedules',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:kind,runAt:runAt,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',payload:payload})});
+  }
+  function scheduleMessageFor(runAt,target,turn,goalRequested){
+    if(!target||target.pendingNew||!providerSessionId(target)) throw new Error(target&&target.pendingScheduled?'This session is already waiting to start.':'Session is not ready.');
+    if(!turn.text&&!turn.attachments.length) throw new Error('Write a message first.');
+    if(goalRequested&&!turn.text) throw new Error('Goal requires an objective.');
+    return createSchedule('message',runAt,{sessionId:providerSessionId(target),text:turn.text,attachments:turn.attachments,references:pinReferencePayload(turn.references),goal:goalRequested===true});
+  }
+  function scheduleCurrentMessage(runAt){
+    if(!cur||cur.pendingNew){ throw new Error(cur&&cur.pendingScheduled?'This session is already waiting to start.':'Session is not ready.'); }
+    if(composerVendorChanged()) throw new Error('Use the current session vendor before scheduling.');
+    var turn=currentComposerTurn();
+    var target=cur, goalRequested=goalArmed;
+    return scheduleMessageFor(runAt,target,turn,goalRequested).then(function(res){
+      if(cur===target){ clearComposer(); if(goalRequested){ goalArmed=false; refreshGoalToggle(); } }
+      return res;
+    });
+  }
+  function scheduleForkFor(runAt,target,turn,prefixHistory,opts){
+    opts=opts||{};
+    if(!target) throw new Error('Session is not ready to fork.');
+    var parentId=providerSessionId(target);
+    if(!parentId||target.pendingNew||target.pendingFork) throw new Error('Session is not ready to fork.');
+    if(!turn.text&&!turn.attachments.length) throw new Error('A scheduled fork needs a first message.');
+    if(goalArmed) throw new Error('Scheduled Fork does not support Goal yet.');
+    var config=currentForkDefaults(), info=vendorInfo(config.vendor);
+    if(!info) throw new Error('Unknown vendor: '+config.vendor);
+    if(!info.available||info.chat===false) throw new Error(info.message||config.vendor+' is not available for in-browser forks.');
+    var shown=shownTurnText(turn);
+    var context=prefixHistory!==undefined
+      ? cloneTranscriptMsgs(prefixHistory||[])
+      : forkBaseHistory(cachedTranscriptFor(target)||[],shown);
+    var clientSessionId=makeClientBranchId();
+    return createSchedule('session',runAt,{
+      mode:'fork',clientSessionId:clientSessionId,parentSessionId:parentId,parentVendor:target.vendor,
+      cwd:target.cwd||'',vendor:config.vendor,text:turn.text,attachments:turn.attachments||[],
+      references:pinReferencePayload(turn.references),contextMessages:context,
+      model:config.model||undefined,effort:config.effort||undefined,speed:config.speed||undefined,
+      tags:(target.tags||[]).slice()
+    }).then(function(res){
+      var item=res.item, card=item&&findSessionByClientId(item.payload&&item.payload.clientSessionId);
+      if(card){ inheritSessionTextCollections(target,card); if(opts.selectCard) select(card); }
+      return res;
+    });
+  }
+  function scheduleCurrentFork(runAt){
+    if(!cur) throw new Error('Pick a session before scheduling a fork.');
+    var target=cur, turn=currentComposerTurn();
+    return scheduleForkFor(runAt,target,turn,undefined,{selectCard:false}).then(function(res){
+      if(cur===target) clearComposer();
+      return res;
+    });
+  }
+  function scheduleNewSession(runAt){
+    if(newSessionPending) throw new Error('New session form is busy.');
+    var dir=String((byId('ndir')||{}).value||'').trim(), text=String((byId('np')||{}).value||'').trim();
+    var vendor=String((byId('nvendor')||{}).value||'').trim().toLowerCase();
+    var attachments=newAttachments.map(function(att){ return Object.assign({},att); });
+    if(!dir) throw new Error('Pick or type a directory.');
+    if(!vendor) throw new Error('Pick a vendor.');
+    var info=vendorInfo(vendor);
+    if(!info) throw new Error('Unknown vendor: '+vendor);
+    if(!info.available) throw new Error(info.message||vendor+' CLI is unavailable.');
+    if(info.chat===false) throw new Error('Terminal-only sessions cannot be scheduled.');
+    if(!text&&!attachments.length) throw new Error('A scheduled session needs a first message.');
+    if(newGoalArmed&&!text) throw new Error('Goal requires an objective.');
+    var clientSessionId=makeClientSessionId('scheduled'), model=selectedNewModel(), effort=selectedNewEffort(), speed=selectedNewSpeed();
+    var tags=newSessionTags.slice(), goalRequested=newGoalArmed;
+    return createSchedule('session',runAt,{clientSessionId:clientSessionId,cwd:dir,vendor:vendor,text:text,attachments:attachments,model:model||undefined,effort:effort||undefined,speed:speed||undefined,goal:goalRequested===true,tags:tags}).then(function(res){
+      rememberNewSessionPrefs(vendor,model,effort,speed); rememberRecentDir(dir);
+      byId('np').value=''; newAttachments=[]; newGoalArmed=false; newSessionTags=[];
+      renderAttachments('new'); refreshNewGoalToggle(); renderNewTagPicker(); resetNewSessionDir(dir); closeNewBox();
+      var item=res.item, card=item&&findSessionByClientId(item.payload&&item.payload.clientSessionId);
+      if(card) select(card);
+      return res;
+    });
+  }
+  function scheduledSessionBaseHistory(item){
+    var payload=item&&item.payload||{};
+    return payload.mode==='fork' ? cloneTranscriptMsgs(payload.contextMessages||[]) : [];
+  }
+  function projectScheduledSessionTranscript(session,item){
+    if(!session||!item||!item.payload||item.kind!=='session') return;
+    if(session.materializingScheduled) return;
+    var payload=item.payload, history=scheduledSessionBaseHistory(item);
+    var opening=shownTurnText({text:String(payload.text||''),attachments:Array.isArray(payload.attachments)?payload.attachments:[]});
+    if(opening) history.push({role:'user',text:opening,attachments:cloneAttachments(payload.attachments),references:clonePinReferences(payload.references),tools:[]});
+    cacheTranscript(session,history);
+    if(cur===session) renderPersistedAndPending(history,null);
+  }
+  function materializeScheduledSession(target){
+    if(!target||!target.pendingScheduled||target.materializingScheduled) return;
+    var item=SCHEDULES.find(function(candidate){ return candidate&&candidate.id===target.scheduleRunId&&candidate.kind==='session'; });
+    if(!item){ showToast('This scheduled session is no longer waiting.','warn'); return; }
+    if(composerVendorChanged()) return;
+    var availability=vendorInfo(target.vendor);
+    if(availability&&!availability.available){ showToast(availability.message||target.vendor+' CLI is unavailable.','warn'); return; }
+    var turn=currentComposerTurn();
+    if(!turn.text&&!turn.attachments.length) return;
+    if(goalArmed&&!turn.text){ showToast('Goal requires an objective','warn'); return; }
+    var goalRequested=goalArmed, shown=shownTurnText(turn), base=scheduledSessionBaseHistory(item);
+    target.materializingScheduled=true;
+    clearComposer();
+    if(goalRequested){ goalArmed=false; refreshGoalToggle(); }
+    cacheTranscript(target,base);
+    if(base.length) renderPersistedAndPending(base,null); else { var host=byId('msgs'); if(host) host.innerHTML=''; }
+    rememberPendingUserMsg(target.sessionId,shown,turn.attachments,turn.references);
+    noteUserTurn(target,shown); cacheTranscriptUserMsg(target,shown,turn.attachments,turn.references);
+    addMsg('user',shown,true,turn.attachments,turn.references); assistantEl=null;
+    markVisitSend(); beginTurn(); expectSessionRun(target,genStart);
+    var runEpoch=Number(target._runEpoch)||0;
+    fetch('/schedules/materialize?id='+encodeURIComponent(item.id),{
+      method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({text:turn.text,attachments:turn.attachments||[],references:pinReferencePayload(turn.references),goal:goalRequested===true})
+    }).then(function(r){ return r.json().then(function(res){ res._status=r.status; return res; }); }).then(function(res){
+      var providerId=String(res.session||'');
+      if(!res.ok||!providerId) throw Object.assign(new Error(res.error||'Session could not start.'),{response:res});
+      if(!sessionRunWasAcknowledged(target,runEpoch)) acknowledgeSessionRun(target,Date.now());
+      bindProviderSessionId(target,providerId);
+      target.pendingNew=false; target.pendingScheduled=false; target.materializingScheduled=false; target.scheduleRunId=null;
+      target.generating=res.generating!==false; target.generatingStartedAt=target.generating ? (target.generatingStartedAt||Date.now()) : null;
+      if(item.payload.mode==='fork'&&item.payload.parentSessionId){ target.forkParentId=String(item.payload.parentSessionId); rememberForkRelation(providerId,target.forkParentId); }
+      if(res.goal) applyGoalState(target,res.goal);
+      flushPendingSessionTags(target); syncSchedules(res.schedules||[]); drainOrphanBusEvents(target);
+      if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);
+      syncOpenHeader(); refreshForkButton(); refreshRunConfigButton(); renderSidebar(); renderQueue();
+      warmTranscriptCache(target);
+    }).catch(function(error){
+      var res=error&&error.response;
+      target.materializingScheduled=false; target._awaitingLiveStart=false; target._awaitingLiveStartAt=null;
+      if(res&&Array.isArray(res.schedules)) syncSchedules(res.schedules);
+      forgetPendingUserMsg(target.sessionId,shown);
+      projectScheduledSessionTranscript(target,item);
+      setDraftForSession(target,turn.text||''); restoreComposerDraft(target);
+      draftAttachments=cloneAttachments(turn.attachments); draftPinReferences=clonePinReferences(turn.references);
+      stashAttachmentState(target); stashPinReferenceState(target); renderAttachments();
+      if(goalRequested){ goalArmed=true; refreshGoalToggle(); }
+      endTurn('failed'); renderSidebar(); renderQueue();
+      showToast(error&&error.message?error.message:'Session could not start.','warn');
+    });
+  }
+  function scheduleCurrentComment(runAt){
+    if(!cur||!commentDrawerState.parentSessionId) throw new Error('Comment context is not ready.');
+    var input=byId('commentInput'), text=String(input&&input.value||'').trim();
+    if(!text) throw new Error('Write a comment first.');
+    ensureCommentAnchorPinned();
+    var target=cur, context=(cachedTranscriptFor(target)||[]).map(function(message){ return {role:message.role,text:message.text||'',tools:message.tools||[]}; });
+    var payload={threadId:commentDrawerState.threadId||'',parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,text:text,contextMessages:context,createdWhileGenerating:!!(turnActive&&commentDrawerState.anchorMsg&&(commentDrawerState.anchorMsg===assistantEl||commentDrawerState.anchorMsg.hasAttribute('data-tool-pending'))),model:target.model||undefined,effort:target.effort||undefined,speed:target.speed||undefined};
+    return createSchedule('comment',runAt,payload).then(function(res){
+      var item=res.item, p=item&&item.payload;
+      if(p&&p.threadId){
+        var known=commentThreads[p.threadId];
+        if(!known) rememberCommentThread({id:p.threadId,parentSessionId:p.parentSessionId,anchorKey:p.anchorKey,anchorText:p.anchorText,anchorData:p.anchorData||undefined,providerSessionId:'',vendor:p.vendor,cwd:p.cwd,createdAt:item.createdAt,status:'scheduled',messageCount:0});
+        commentDrawerState.threadId=p.threadId;
+      }
+      if(input) input.value=''; syncCommentShortcutGhost(); renderCommentQueue(); syncCommentPromoteButton();
+      return res;
+    });
+  }
+  function editScheduled(item,button){
+    openSchedulePopover(button,[{id:'reschedule',label:'Reschedule',primary:true,submit:function(runAt){
+      return scheduleRequest('/schedules?id='+encodeURIComponent(item.id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({runAt:runAt})});
+    }}],item.runAt);
+  }
+  function runScheduledNow(item){
+    var previousStatus=item.status, previousRunAt=item.runAt;
+    item.status='claimed'; item.runAt=Date.now(); editingScheduleId='';
+    renderQueue(); renderCommentQueue();
+    return scheduleRequest('/schedules/run?id='+encodeURIComponent(item.id),{method:'POST'}).catch(function(error){
+      item.status=previousStatus; item.runAt=previousRunAt; renderQueue(); renderCommentQueue(); showToast(error.message,'warn');
+    });
+  }
+  function deleteScheduled(item){
+    return scheduleRequest('/schedules?id='+encodeURIComponent(item.id),{method:'DELETE'}).then(function(res){
+      if(item.kind==='comment'&&item.payload){
+        var thread=commentThreads[item.payload.threadId];
+        var remains=scheduledCommentsForThread(item.payload.threadId).length>0;
+        if(thread&&!thread.providerSessionId&&!remains){
+          delete commentThreads[thread.id]; VAULT_STATE.commentThreads=commentThreads;
+          if(commentDrawerState.threadId===thread.id){ commentDrawerState.threadId=''; syncCommentPromoteButton(); }
+          syncAllMessageCommentStates(); syncAllSessionCommentBadges(); renderPinTray();
+        }
+      }
+      return res;
+    }).catch(function(error){ showToast(error.message,'warn'); });
+  }
+  function makeScheduledQueueRow(item){
+    if(editingScheduleId===item.id&&item.status!=='claimed'){
+      var editingRow=el('div','qitem editing scheduled'); editingRow.appendChild(makeScheduledEditor(item)); return editingRow;
+    }
+    var row=el('div','qitem scheduled'+(item.status==='blocked'||item.status==='uncertain'?' blocked':''));
+    row.appendChild(el('span','qtag',item.status==='claimed'?'dispatching':item.status==='blocked'?'blocked':item.status==='uncertain'?'review':'scheduled'));
+    if(item.kind==='session'&&item.payload&&item.payload.mode==='fork') row.appendChild(el('span','qtag','fork'));
+    if(item.payload&&item.payload.goal) row.appendChild(el('span','qtag','goal'));
+    var text=String(item.payload&&item.payload.text||'');
+    var tx=el('div','qtext',text||'(scheduled session)'); tx.title=text; row.appendChild(tx);
+    var tm=el('span','qtime',scheduleDateLabel(item.runAt));
+    tm.title=new Date(item.runAt).toLocaleString(); row.appendChild(tm);
+    var run=el('button','qdispatch qsend','run now'); run.type='button'; run.disabled=item.status==='claimed'; run.title='Run this scheduled action now'; run.onclick=function(){ runScheduledNow(item); }; row.appendChild(run);
+    var contentEdit=el('button','qaction qedit'); setIconButton(contentEdit,'edit','Edit scheduled content'); contentEdit.disabled=item.status==='claimed'; contentEdit.onclick=function(){ editingScheduleId=item.id; renderQueue(); renderCommentQueue(); }; row.appendChild(contentEdit);
+    var reschedule=el('button','qaction qschedule'); setIconButton(reschedule,'clock','Reschedule'); reschedule.disabled=item.status==='claimed'; reschedule.onclick=function(){ editScheduled(item,reschedule); }; row.appendChild(reschedule);
+    var del=el('button','qaction qdel'); setIconButton(del,'delete','Cancel scheduled action'); del.disabled=item.status==='claimed'; del.onclick=function(){ deleteScheduled(item); }; row.appendChild(del);
+    if(item.error) row.setAttribute('data-hover-tip',item.error);
+    return row;
+  }
+  function makeScheduledEditor(item){
+    var payload=item.payload||{}, current=String(payload.text||''), attachments=Array.isArray(payload.attachments)?payload.attachments:[], references=Array.isArray(payload.references)?payload.references:[];
+    var box=el('div','qeditbox');
+    box.appendChild(el('span','qtag','scheduled'));
+    if(item.kind==='session'&&payload.mode==='fork') box.appendChild(el('span','qtag','fork'));
+    if(payload.goal) box.appendChild(el('span','qtag','goal'));
+    if(attachments.length) box.appendChild(el('span','qtag',attachments.length+' file'+(attachments.length>1?'s':'')));
+    if(references.length) box.appendChild(el('span','qtag',references.length+' pin'+(references.length>1?'s':'')));
+    var input=el('input','qeditta'); input.type='text'; input.value=current; box.appendChild(input);
+    var time=el('span','qtime',scheduleDateLabel(item.runAt)); time.title=new Date(item.runAt).toLocaleString(); box.appendChild(time);
+    var save=el('button','qdispatch qsend','save'); save.title='Save this scheduled content'; box.appendChild(save);
+    var cancel=editCancelButton('Cancel edit (Esc)'); box.appendChild(cancel);
+    var del=el('button','qaction qdel'); setIconButton(del,'delete','Cancel scheduled action'); box.appendChild(del);
+    function closeEditor(){ editingScheduleId=''; renderQueue(); renderCommentQueue(); }
+    function commit(){
+      var next=input.value.trim();
+      if(!next){ editingScheduleId=''; deleteScheduled(item); return; }
+      if(next===current){ closeEditor(); return; }
+      input.disabled=true; save.disabled=true; cancel.disabled=true; del.disabled=true;
+      scheduleRequest('/schedules?id='+encodeURIComponent(item.id),{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({text:next})}).then(function(){ closeEditor(); }).catch(function(error){
+        input.disabled=false; save.disabled=false; cancel.disabled=false; del.disabled=false; input.focus(); showToast(error.message,'warn');
+      });
+    }
+    save.onclick=function(ev){ ev.stopPropagation(); commit(); };
+    cancel.onclick=function(ev){ ev.stopPropagation(); closeEditor(); };
+    del.onclick=function(ev){ ev.stopPropagation(); editingScheduleId=''; deleteScheduled(item); };
+    box.onclick=function(ev){ ev.stopPropagation(); };
+    input.onkeydown=function(ev){ ev.stopPropagation(); if(isImeConfirming(ev)) return; if(ev.key==='Enter'){ ev.preventDefault(); commit(); } else if(ev.key==='Escape'){ ev.preventDefault(); closeEditor(); } };
+    setTimeout(function(){ try{ input.focus(); input.setSelectionRange(input.value.length,input.value.length); }catch(e){} },0);
+    return box;
+  }
+  function scheduledSessionFromItem(item){
+    var p=item.payload||{}, client=String(p.clientSessionId||'');
+    if(!client) return null;
+    var isFork=p.mode==='fork', parent=isFork?String(p.parentSessionId||''):'';
+    var session={vendor:p.vendor||'claude',model:p.model||'',effort:p.effort||'',speed:p.speed||'',sessionId:client,clientBranchId:client,providerSessionId:null,forkParentId:parent||null,pendingNew:true,pendingScheduled:true,scheduleRunId:item.id,scheduledAt:item.runAt,title:isFork?forkTitleFromSession(findSessionById(parent),p.text):p.text||'(scheduled session)',lastPrompt:p.text||null,cwd:p.cwd||'',project:basename(p.cwd||''),file:'',ageDays:0,lastTs:item.createdAt||Date.now(),prompts:1,brief:null,state:null,seen:true,tags:Array.isArray(p.tags)?p.tags.slice():[],_pendingSessionTags:Array.isArray(p.tags)?p.tags.slice():[],generating:false,generatingStartedAt:null};
+    projectScheduledSessionTranscript(session,item);
+    return session;
+  }
+  function syncSchedules(items,quiet){
+    SCHEDULES=Array.isArray(items)?items:[];
+    var pendingClients={};
+    SCHEDULES.forEach(function(item){
+      if(item&&item.kind==='comment'&&item.status==='dispatched'&&item.dispatchId&&item.payload){
+        var thread=commentThreads[item.payload.threadId];
+        if(thread&&!thread.providerSessionId){
+          thread=rememberCommentThread(Object.assign({},thread,{providerSessionId:String(item.dispatchId),status:'generating'}))||thread;
+          if(commentDrawerState.threadId===thread.id) setCommentGenerating(true);
+        }
+      }
+      if(!item||item.kind!=='session'||!item.payload) return;
+      var client=String(item.payload.clientSessionId||''); if(!client) return;
+      var synthetic=findSessionByClientId(client), dispatched=String(item.dispatchId||'');
+      if(item.status==='dispatched'&&dispatched){
+        var real=findSessionById(dispatched);
+        if(item.payload.mode==='fork'&&item.payload.parentSessionId&&real){ real.forkParentId=String(item.payload.parentSessionId); rememberForkRelation(dispatched,real.forkParentId); }
+        if(synthetic&&real&&synthetic!==real){
+          var wasCurrent=cur===synthetic, idx=SESS.indexOf(synthetic); if(idx>=0) SESS.splice(idx,1);
+          if(wasCurrent) select(real);
+        } else if(synthetic){
+          if(!synthetic.providerSessionId) bindProviderSessionId(synthetic,dispatched);
+          if(item.payload.mode==='fork'&&item.payload.parentSessionId){ synthetic.forkParentId=String(item.payload.parentSessionId); rememberForkRelation(dispatched,synthetic.forkParentId); }
+          synthetic.pendingNew=false; synthetic.pendingScheduled=false; synthetic.scheduleRunId=null;
+          synthetic.generating=true; synthetic.generatingStartedAt=synthetic.generatingStartedAt||Date.now();
+          warmTranscriptCache(synthetic);
+        }
+        return;
+      }
+      if(!scheduleIsPending(item)) return;
+      pendingClients[client]=true;
+      if(!synthetic){ var made=scheduledSessionFromItem(item); if(made) SESS.unshift(made); }
+      else { synthetic.pendingScheduled=true; synthetic.pendingNew=true; synthetic.scheduleRunId=item.id; synthetic.scheduledAt=item.runAt; synthetic.lastTs=item.createdAt||synthetic.lastTs; synthetic.lastPrompt=item.payload.text||synthetic.lastPrompt; if(item.payload.mode==='fork') synthetic.forkParentId=String(item.payload.parentSessionId||synthetic.forkParentId||'')||null; projectScheduledSessionTranscript(synthetic,item); }
+    });
+    SESS.slice().forEach(function(s){
+      if(!s.pendingScheduled) return;
+      var client=String(s.clientBranchId||s.sessionId||'');
+      if(pendingClients[client]) return;
+      var idx=SESS.indexOf(s); if(idx>=0) SESS.splice(idx,1);
+      if(cur===s){ cur=null; resetOpenHeader(); }
+    });
+    if(!quiet){ sortSessions(); renderSidebar(); }
+    SESS.forEach(syncSessionQueueBadge);
+    renderQueue(); renderCommentQueue();
   }
   function showToast(text, kind, persistent){
     var host=byId('toastHost');
@@ -5335,9 +5909,9 @@ window.__CHANGELOG__ = ${changelogJson};
   function syncCommentPromoteButton(){
     var button=byId('commentPromote'), thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
     if(!button) return;
-    button.disabled=!thread||commentDrawerState.busy||commentDrawerState.generating||commentDrawerState.promoting;
+    button.disabled=!thread||!thread.providerSessionId||commentDrawerState.busy||commentDrawerState.generating||commentDrawerState.promoting;
     button.textContent=commentDrawerState.promoting?'promoting…':'promote to session';
-    button.title=!thread?'Send a comment before promoting':commentDrawerState.generating?'Wait for the current reply and queue to finish':'Make this comment thread a regular session';
+    button.title=!thread||!thread.providerSessionId?'Send a comment before promoting':commentDrawerState.generating?'Wait for the current reply and queue to finish':'Make this comment thread a regular session';
   }
   function clearCommentGenerating(){
     if(commentGenTimer){ clearInterval(commentGenTimer); commentGenTimer=null; }
@@ -5461,7 +6035,7 @@ window.__CHANGELOG__ = ${changelogJson};
     commentDrawerState.assistant=null;
   }
   function markCommentRead(thread){
-    if(!thread || thread.status==='generating') return;
+    if(!thread || thread.status==='generating' || thread.status==='scheduled') return;
     var readAt=Date.now();
     rememberCommentThread(Object.assign({},thread,{status:'read'}));
     fetch('/comments/read',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:thread.id,readAt:readAt})})
@@ -5506,9 +6080,9 @@ window.__CHANGELOG__ = ${changelogJson};
     renderCommentAnchorBlock(text,key,anchorData);
     drawer.hidden=false; drawer.setAttribute('aria-hidden','false');
     scheduleCommentOverlayOffsets();
-    renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.status==='generating'));
+    renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false); renderCommentQueue(); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.status==='generating'));
     if(input){ input.value=''; input.focus(); }
-    if(thread){
+    if(thread&&thread.providerSessionId){
       fetch('/comments/messages?id='+encodeURIComponent(thread.id)).then(function(r){return r.json();}).then(function(res){
         if(commentDrawerState.epoch!==drawerEpoch || commentDrawerState.threadId!==thread.id) return;
         if(res&&res.thread) thread=rememberCommentThread(res.thread)||thread;
@@ -6270,13 +6844,6 @@ window.__CHANGELOG__ = ${changelogJson};
         ? { fg:'var(--vendor-cursor-fg)', bg:'var(--vendor-cursor-bg)', border:'var(--vendor-cursor-border)' }
         : { fg:'#3730a3', bg:'#eef2ff', border:'#a5b4fc' };
   }
-  function setForkActionTheme(button, vendor, enabled){
-    if(!button) return;
-    var active=enabled!==false;
-    button.classList.toggle('fork-action',active);
-    if(active) button.setAttribute('data-vendor',String(vendor||'').trim().toLowerCase());
-    else button.removeAttribute('data-vendor');
-  }
   function customSelectTheme(sel, optValue){
     if(!sel) return null;
     if(sel.id==='rvendor') return vendorTheme(String(optValue||sel.value||'').trim().toLowerCase());
@@ -6571,7 +7138,10 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function vendorChoices(q){
     var query=String(q||'').trim().toLowerCase();
-    return VENDORS.filter(function(v){ return v && (!query || v.vendor.toLowerCase().indexOf(query)>=0); });
+    var hasAvailable=VENDORS.some(function(v){ return !!(v&&v.available); });
+    return VENDORS.filter(function(v){
+      return v && (!hasAvailable || v.available) && (!query || v.vendor.toLowerCase().indexOf(query)>=0);
+    });
   }
   function saveNewPrefs(){
     VAULT_STATE.modelPrefs=newPrefs;
@@ -7719,7 +8289,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function canConfigureRun(){
     var info=cur&&vendorInfo(cur.vendor);
-    return !!(cur && cur.sessionId && info && info.available && info.chat!==false && !cur.pendingFork);
+    return !!(cur && cur.sessionId && info && info.available && info.chat!==false && !cur.pendingNew && !cur.pendingFork);
   }
   function refreshRunConfigButton(){
     renderComposerRail();
@@ -7973,7 +8543,7 @@ window.__CHANGELOG__ = ${changelogJson};
     window.addEventListener('scroll',positionDrop,true);
     if(window.ResizeObserver) new ResizeObserver(positionDrop).observe(input);
     var remembered=vendorInfo(newPrefs.vendor);
-    var first=(remembered&&remembered.available?remembered:null) || vendorChoices('').filter(function(info){ return info.available; })[0];
+    var first=(remembered&&remembered.available?remembered:null) || vendorChoices('')[0];
     if(first) choose(first.vendor);
   }
   function setupDirChooser(){
@@ -8177,8 +8747,9 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function setNewPending(on, msg){
     newSessionPending = on;
-    var btn=byId('nbtn'), vend=byId('nvendor'), model=byId('nmodel'), effort=byId('neffort'), speed=byId('nspeed'), dir=byId('ndir'), np=byId('np'), attach=byId('nattach');
+    var btn=byId('nbtn'), schedule=byId('scheduleNew'), vend=byId('nvendor'), model=byId('nmodel'), effort=byId('neffort'), speed=byId('nspeed'), dir=byId('ndir'), np=byId('np'), attach=byId('nattach');
     if(btn){ btn.disabled=on; btn.textContent=on?'starting…':'start session ▸'; }
+    if(schedule) schedule.disabled=on;
     if(vend) vend.disabled=on;
     if(model) model.disabled=on;
     if(effort) effort.disabled=on;
@@ -9502,8 +10073,6 @@ window.__CHANGELOG__ = ${changelogJson};
   function composerVendorChanged(){ return !!(cur && cur.runVendor && cur.runVendor!==cur.vendor); }
   function updateSendLabel(){ var b=byId('send'),forkButton=byId('forkBtn'); if(!b) return;
     var changed=composerVendorChanged(),vendor=(currentForkDefaults()).vendor||'selected vendor';
-    setForkActionTheme(b,vendor,!turnActive&&changed);
-    setForkActionTheme(forkButton,vendor,true);
     if(turnActive){
       b.textContent='■ stop'; b.disabled=false; b.title='Stop the current generation (Esc)';
       if(forkButton){ forkButton.hidden=false; setForkButtonLabel(forkButton,changed?'fork with '+vendor:'fork'); }
@@ -9561,6 +10130,7 @@ window.__CHANGELOG__ = ${changelogJson};
   // a Send/Edit/Delete control set — Codex-style.
   function renderQueue(){
     var q=byId('queue'); if(!q) return; q.innerHTML='';
+    scheduledItemsForSession(cur).forEach(function(item){ q.appendChild(makeScheduledQueueRow(item)); });
     pendingQueue.forEach(function(turn,i){
       var text=turnText(turn), atts=turnAttachments(turn), refs=turnPinReferences(turn), preview=turnPreview(turn);
       if(i===editingQueueIdx){
@@ -9599,6 +10169,12 @@ window.__CHANGELOG__ = ${changelogJson};
       q.appendChild(row);
     });
     scheduleOverlayOffsets();
+  }
+  function renderCommentQueue(){
+    var q=byId('commentQueue'); if(!q) return;
+    q.innerHTML='';
+    scheduledCommentsForThread(commentDrawerState.threadId).forEach(function(item){ q.appendChild(makeScheduledQueueRow(item)); });
+    scheduleCommentOverlayOffsets();
   }
   // Edit a queued draft in place (NOT back in the bottom composer, which may hold
   // an unrelated draft): only the text slot becomes a single-line input, so the
@@ -9981,6 +10557,7 @@ window.__CHANGELOG__ = ${changelogJson};
     cur = null;
     pendingQueue = [];
     editingQueueIdx = -1;
+    editingScheduleId = '';
     hideLatestPin();
     var ap=byId('avoidPanel'); if(ap){ ap.innerHTML=''; ap.hidden=true; }
     if(noSessionChangelog) replaceMessages(noSessionChangelog.cloneNode(true));
@@ -10733,8 +11310,10 @@ window.__CHANGELOG__ = ${changelogJson};
   function sessionQueueState(s){
     var liveId=providerSessionId(s), queues=latestLiveSnapshot&&latestLiveSnapshot.queues||{};
     var info=liveId&&queues[liveId];
-    return info ? {count:Math.max(0,Number(info.count)||0),parked:info.parked===true}
+    var base=info ? {count:Math.max(0,Number(info.count)||0),parked:info.parked===true}
       : {count:Math.max(0,Number(s&&s.queueCount)||0),parked:!!(s&&s.queueParked)};
+    var scheduled=scheduledItemsForSession(s).length;
+    return {count:base.count+scheduled,parked:base.parked,scheduled:scheduled,queued:base.count};
   }
   function paintSessionQueueBadge(badge,s){
     if(!badge || !s) return;
@@ -10743,9 +11322,11 @@ window.__CHANGELOG__ = ${changelogJson};
     badge.className='it-queue'+(parked?' parked':'');
     badge.innerHTML='';
     badge.appendChild(el('span','it-queue-count',String(count)));
-    badge.appendChild(el('span','it-queue-label',parked?'held':'queued'));
-    badge.setAttribute('data-hover-tip',count+' queued message'+(count===1?'':'s')+(parked?' · paused after Stop':' · will continue automatically'));
-    badge.setAttribute('aria-label',count+' queued message'+(count===1?'':'s')+(parked?', paused':', continuing automatically'));
+    var onlyScheduled=state.scheduled>0&&state.queued===0;
+    badge.appendChild(el('span','it-queue-label',parked?'held':onlyScheduled?'scheduled':'queued'));
+    var description=onlyScheduled ? count+' scheduled action'+(count===1?'':'s') : count+' queued action'+(count===1?'':'s');
+    badge.setAttribute('data-hover-tip',description+(parked?' · paused after Stop':onlyScheduled?'':' · will continue automatically'));
+    badge.setAttribute('aria-label',description+(parked?', paused':''));
   }
   function paintSessionTodoBadge(badge,s){
     if(!badge || !s) return;
@@ -11217,7 +11798,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   // A small in-place editor (textarea + primary/cancel). Enter commits,
   // Shift+Enter inserts a newline, Esc cancels.
-  function makeInlineEditor(text, onCommit, onCancel, primaryLabel){
+  function makeInlineEditor(text, onCommit, onCancel, primaryLabel, scheduleOption){
     var rawText=String(text||'');
     var box=el('div','inline-edit');
     var ta=el('textarea','inline-edit-ta'); ta.value=rawText;
@@ -11230,11 +11811,20 @@ window.__CHANGELOG__ = ${changelogJson};
     var bar=el('div','inline-edit-bar');
     var save=el('button','inline-edit-save',primaryLabel || 'save ▸');
     if(/^fork\\b/i.test(String(primaryLabel||''))){
-      setForkActionTheme(save,(currentForkDefaults()).vendor,true);
       setForkButtonLabel(save,String(primaryLabel||'fork').replace(/\\s*▸\\s*$/,''));
     }
     var cancel=editCancelButton('Cancel edit (Esc)');
-    bar.appendChild(save); bar.appendChild(cancel);
+    if(scheduleOption){
+      var group=el('div','actiongroup'), schedule=el('button','schedulebtn');
+      setIconButton(schedule,'clock','schedule '+String(scheduleOption.label||primaryLabel||'action').toLowerCase());
+      schedule.setAttribute('aria-expanded','false');
+      schedule.onclick=function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        openSchedulePopover(schedule,[{id:scheduleOption.id||'schedule',label:scheduleOption.label||primaryLabel||'Action',primary:scheduleOption.id==='send',submit:function(runAt){ return scheduleOption.submit(runAt,ta.value.trim()); }}]);
+      };
+      group.appendChild(schedule); group.appendChild(save); bar.appendChild(group);
+    } else bar.appendChild(save);
+    bar.appendChild(cancel);
     box.appendChild(ta); box.appendChild(bar);
     function commit(){ onCommit(ta.value.trim()); }
     save.onclick=function(ev){ ev.stopPropagation(); commit(); };
@@ -11263,8 +11853,9 @@ window.__CHANGELOG__ = ${changelogJson};
   function editStoppedLatestAndResend(msgEl, bubble){
     if(!cur || !cur.sessionId || cur.pendingFork) return;
     if(msgEl.classList.contains('editing')) return;
-    var raw=bubble.getAttribute('data-raw') || bubble.textContent || '';
+    var raw=bubble.getAttribute('data-raw') || bubble.textContent || '', target=cur;
     msgEl.classList.add('editing');
+    function restore(){ msgEl.classList.remove('editing'); if(editor.isConnected) editor.replaceWith(bubble); }
     var editor=makeInlineEditor(raw, function(v){
       msgEl.classList.remove('editing');
       if(!v){ editor.replaceWith(bubble); return; }
@@ -11278,9 +11869,13 @@ window.__CHANGELOG__ = ${changelogJson};
       cacheTranscriptUserMsg(cur, v);
       dispatchSend({ text:v, attachments:[] }, v);
     }, function(){
-      msgEl.classList.remove('editing');
-      editor.replaceWith(bubble);
-    }, 'send ▸');
+      restore();
+    }, 'send ▸', {id:'send',label:'Send',submit:function(runAt,v){
+      if(!v) throw new Error('Write a message first.');
+      return scheduleMessageFor(runAt,target,{text:v,attachments:[],references:[]},false).then(function(res){
+        restore(); return res;
+      });
+    }});
     bubble.replaceWith(editor);
   }
   function editAndForkFromMessage(msgEl, bubble){
@@ -11288,17 +11883,20 @@ window.__CHANGELOG__ = ${changelogJson};
     if(msgEl.classList.contains('editing')) return;
     var prefix=historyBeforeMsg(msgEl);
     if(!prefix){ showToast('Could not find the transcript point for this message.', 'warn'); return; }
-    var raw=bubble.getAttribute('data-raw') || bubble.textContent || '';
+    var raw=bubble.getAttribute('data-raw') || bubble.textContent || '', target=cur;
     msgEl.classList.add('editing');
+    function restore(){ msgEl.classList.remove('editing'); if(editor.isConnected) editor.replaceWith(bubble); }
     var editor=makeInlineEditor(raw, function(v){
       msgEl.classList.remove('editing');
       if(!v){ editor.replaceWith(bubble); return; } // empty → just cancel, don't send
       editor.replaceWith(bubble);
       startForkFromPrefix(prefix, { text:v, attachments:[] });
     }, function(){
-      msgEl.classList.remove('editing');
-      editor.replaceWith(bubble);
-    }, 'fork');
+      restore();
+    }, 'fork', {id:'fork',label:'Fork',submit:function(runAt,v){
+      if(!v) throw new Error('A scheduled fork needs a first message.');
+      return scheduleForkFor(runAt,target,{text:v,attachments:[],references:[]},prefix,{selectCard:true}).then(function(res){ restore(); return res; });
+    }});
     bubble.replaceWith(editor);
   }
   function editUserMessage(msgEl, bubble){
@@ -12009,7 +12607,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // Opening a session is navigation, not activity. Anchor its current ordering
     // before source hydration so a click alone cannot move the row.
     if(s && s.sortTs==null && s.lastTs!=null) s.sortTs=s.lastTs;
-    cur=s; editingTagSession=null; editingTagSurface='sidebar'; headerTagEditing=false; goalArmed=false;
+    cur=s; editingTagSession=null; editingTagSurface='sidebar'; headerTagEditing=false; goalArmed=false; editingScheduleId='';
     clearGen(); turnActive=false; msgOrdinal=0; toolOrdinal=0; setInputEnabled(true); updateSendLabel();
     refreshGoalToggle();
     markSeen(s); renderSidebar();
@@ -12147,6 +12745,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // added or provider-bound after this snapshot was first reduced, so opening
     // them must be able to project the same bus state by stable client identity.
     latestLiveSnapshot=res||{};
+    if(Array.isArray(res&&res.schedules)) syncSchedules(res.schedules);
     applyStats(res && res.stats);
     var active={}; (res.active||[]).forEach(function(id){ active[id]=true; });
     var clientSessionIds=res&&res.clientSessionIds||{};
@@ -12560,6 +13159,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function send(){
     if(!cur) return;
+    if(cur.pendingScheduled){ materializeScheduledSession(cur); return; }
     if(cur.pendingNew){ showToast('Session is still starting. Your draft is preserved.', 'warn'); return; }
     if(composerVendorChanged()) return;
     var availability=vendorInfo(cur.vendor);
@@ -13089,6 +13689,43 @@ window.__CHANGELOG__ = ${changelogJson};
   }
 
   function initApp(){
+  syncSchedules(SCHEDULES,true);
+  var scheduleNew=byId('scheduleNew'); if(scheduleNew){
+    setIconButton(scheduleNew,'clock','schedule new session'); scheduleNew.setAttribute('aria-expanded','false');
+    scheduleNew.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); openSchedulePopover(scheduleNew,[{id:'start',label:'Start session',primary:true,submit:scheduleNewSession}]); };
+  }
+  var scheduleChat=byId('scheduleChat'); if(scheduleChat){
+    setIconButton(scheduleChat,'clock','schedule Send or Fork'); scheduleChat.setAttribute('aria-expanded','false');
+    scheduleChat.onclick=function(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      var actions=[];
+      if(canForkCur()) actions.push({id:'fork',label:'Fork',submit:scheduleCurrentFork});
+      actions.push({id:'send',label:'Send',primary:true,submit:scheduleCurrentMessage});
+      openSchedulePopover(scheduleChat,actions,undefined,'send');
+    };
+  }
+  var scheduleComment=byId('scheduleComment'); if(scheduleComment){
+    setIconButton(scheduleComment,'clock','schedule comment'); scheduleComment.setAttribute('aria-expanded','false');
+    scheduleComment.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); openSchedulePopover(scheduleComment,[{id:'send',label:'Send comment',primary:true,submit:scheduleCurrentComment}]); };
+  }
+  var scheduleDateTimeInput=byId('scheduleDateTimeInput'); if(scheduleDateTimeInput){
+    scheduleDateTimeInput.onblur=function(){ applyScheduleDirectInput(false); };
+    scheduleDateTimeInput.onkeydown=function(ev){ if(ev.key==='ArrowDown'){ ev.preventDefault(); applyScheduleDirectInput(false); toggleSchedulePicker(true); } else if(ev.key==='Enter'){ ev.preventDefault(); submitScheduleAction(defaultScheduleAction()); } else if(ev.key==='Escape'){ ev.preventDefault(); closeSchedulePopover(); } };
+  }
+  var schedulePickerToggle=byId('schedulePickerToggle'); if(schedulePickerToggle) schedulePickerToggle.onclick=function(){ applyScheduleDirectInput(false); toggleSchedulePicker(); };
+  var schedulePrevMonth=byId('schedulePrevMonth'); if(schedulePrevMonth) schedulePrevMonth.onclick=function(){ if(!schedulePopoverState) return; var d=new Date(schedulePopoverState.calendarMonth); d.setMonth(d.getMonth()-1); schedulePopoverState.calendarMonth=d.getTime(); renderSchedulePicker(); };
+  var scheduleNextMonth=byId('scheduleNextMonth'); if(scheduleNextMonth) scheduleNextMonth.onclick=function(){ if(!schedulePopoverState) return; var d=new Date(schedulePopoverState.calendarMonth); d.setMonth(d.getMonth()+1); schedulePopoverState.calendarMonth=d.getTime(); renderSchedulePicker(); };
+  ['scheduleHour','scheduleMinute'].forEach(function(id){
+    var input=byId(id); if(!input) return;
+    input.onfocus=function(){ input.select(); };
+    input.onblur=applyScheduleTimeParts;
+    input.onkeydown=function(ev){
+      if(ev.key==='Escape'){ ev.preventDefault(); closeSchedulePopover(); return; }
+      if(ev.key==='Enter'){ ev.preventDefault(); applyScheduleTimeParts(); submitScheduleAction(defaultScheduleAction()); return; }
+      if(ev.key!=='ArrowUp'&&ev.key!=='ArrowDown') return;
+      ev.preventDefault(); var max=id==='scheduleHour'?23:59, value=Number(input.value)||0, delta=ev.key==='ArrowUp'?1:-1; input.value=schedulePad((value+delta+max+1)%(max+1)); applyScheduleTimeParts();
+    };
+  });
   var chatScrollBottom=byId('chatScrollBottom'); if(chatScrollBottom){ setIconButton(chatScrollBottom,'down','Scroll to bottom'); chatScrollBottom.onclick=scrollChatToBottom; }
   var commentScrollBottom=byId('commentScrollBottom'); if(commentScrollBottom){ setIconButton(commentScrollBottom,'down','Scroll comments to bottom'); commentScrollBottom.onclick=scrollCommentsToBottom; }
   var commentMsgs=byId('commentMsgs'); if(commentMsgs) commentMsgs.addEventListener('scroll',function(){ commentStick=nearScrollBottom(commentMsgs); syncScrollBottomButton(commentMsgs,commentScrollBottom); scheduleCommentLatestPin(); });
@@ -13511,6 +14148,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     if(e.key==='Escape' && newBoxOpen() && !newSessionPending){ closeNewBox(); }
     if(e.key==='Escape' && composerRailKind){ closeComposerRail(); }
+    if(e.key==='Escape' && schedulePopoverState){ closeSchedulePopover(); }
   });
   document.addEventListener('click',function(ev){
     var picker=byId('newTagPick');
@@ -13521,6 +14159,12 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!pinReferencePicker.open || ev.target===input || (picker&&picker.contains(ev.target))) return;
     closePinReferencePicker();
   });
+  document.addEventListener('pointerdown',function(ev){
+    var pop=byId('schedulePop'), button=schedulePopoverState&&schedulePopoverState.button;
+    if(!schedulePopoverState||!pop||pop.contains(ev.target)||(button&&button.contains(ev.target))) return;
+    closeSchedulePopover();
+  });
+  window.addEventListener('resize',function(){ if(schedulePopoverState) positionSchedulePopover(schedulePopoverState.button); });
   // Clicking outside an open tag editor (and not on its "+ tag" toggle) closes it.
   document.addEventListener('pointerdown',function(ev){
     if(!editingTagSession && !headerTagEditing) return;

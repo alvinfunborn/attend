@@ -37,6 +37,12 @@ Attend keeps those signals next to the actual conversations, so organizing work 
   that Attend remembers per session when available.
 - Attach or paste files and images, answer provider questions and forms, stop turns, and queue,
   edit, send, fork, or delete durable follow-up messages.
+- Schedule a one-time message, fork, comment, or new session from the same clock control in each
+  composer. Where more than one action is available, choose Send or Fork in the time popover.
+  Scheduled messages stay editable and reschedulable in the chat's queued area, while scheduled
+  sessions and frozen-point forks appear as session cards immediately with their opening context.
+  Sending from one of those cards before its due time starts it now and keeps the original opening
+  message scheduled on the resulting session; there is no separate scheduling inbox.
 - Edit a session title, state, priority, and estimated re-entry time.
 - Manage machine-wide shortcuts and session notes or todos beside the composer; arm supported Goals
   and accept analyzer-drafted messages.
@@ -72,8 +78,8 @@ Requirements:
 - Node.js `>= 22.13`
 - At least one supported CLI installed: Claude Code, Codex/ChatGPT, or Cursor CLI (`cursor-agent`)
 
-Attend detects those system CLIs at startup and only enables vendors it can actually run. Missing
-or unreadable CLIs remain visible as unavailable with an installation hint. Claude Code must be
+Attend detects those system CLIs at startup and only shows vendors it can actually run. If none are
+available, the picker shows every vendor with installation guidance. Claude Code must be
 `2.1.0` or newer; an older version is disabled with an explicit update message.
 
 ### Claude authentication
@@ -148,6 +154,7 @@ attend [dirs...] [options]
   -c, --config <path>          Path to attend.config.json
       --no-open                Do not open the browser
       --e2ee-passphrase <text> Encrypt browser/server API payloads
+  -v, --version                Show the installed version
   -h, --help                   Help
 ```
 

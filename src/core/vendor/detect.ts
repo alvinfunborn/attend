@@ -242,7 +242,8 @@ export function isVendorId(value: unknown): value is VendorId {
 
 /**
  * Detect which vendor CLIs are installed locally. The "+ new" picker receives
- * every entry and disables unavailable ones with the message generated here.
+ * every entry, hides unavailable ones when any vendor works, and uses the
+ * generated messages as recovery guidance when none work.
  * Vendor-locked execution (DESIGN.md invariant 4): detection lives in
  * core/vendor/ alongside the other seams. Probes are injectable so tests stay
  * deterministic off any real machine.

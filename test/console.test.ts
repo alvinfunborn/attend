@@ -199,7 +199,9 @@ describe("renderConsole", () => {
     expect(html).toContain("cacheOpenCommentMessages();");
     expect(html).toContain('id="commentPromote" type="button">promote to session</button>');
     expect(html).not.toContain("button.hidden=!thread;");
-    expect(html).toContain("button.disabled=!thread||commentDrawerState.busy");
+    expect(html).toContain(
+      "button.disabled=!thread||!thread.providerSessionId||commentDrawerState.busy",
+    );
     expect(html).toContain("function promoteCommentThread(){");
     expect(html).toContain("fetch('/comments/promote'");
     expect(html).toContain(
@@ -1859,14 +1861,9 @@ describe("renderConsole", () => {
       "syncComposerHeight();\n    syncPinReferencePicker();\n    syncComposerShortcutGhost();\n    if(!cur) return;",
     );
     expect(html).toContain(".foot button.runbtn.dirty:hover:not(:disabled)");
-    expect(html).toContain('button.fork-action[data-vendor="claude"]');
-    expect(html).toContain('button.fork-action[data-vendor="codex"]');
-    expect(html).toContain('button.fork-action[data-vendor="cursor"]');
-    expect(html).toContain(".foot button.fork-action:hover:not(:disabled)");
-    expect(html).toContain("--vendor-codex-hover-bg: rgba(79,70,229,0.3);");
-    expect(html).toContain("setForkActionTheme(b,vendor,!turnActive&&changed);");
-    // fork always communicates which vendor the branch will use
-    expect(html).toContain("setForkActionTheme(forkButton,vendor,true);");
+    expect(html).not.toContain("fork-action");
+    expect(html).not.toContain("setForkActionTheme");
+    expect(html).toContain("setForkButtonLabel(b,'fork with '+vendor);");
     expect(html).toContain("badge.classList.add('editable');");
     expect(html).toContain("badge.onkeydown=function(ev)");
     expect(html).toContain('html[data-theme="dark"] .tagadd-compact:hover,');
@@ -1898,14 +1895,71 @@ describe("renderConsole", () => {
     expect(html).toContain("function syncSessionQueueBadge(s)");
     expect(html).toContain("badge.appendChild(el('span','it-queue-count',String(count)));");
     expect(html).toContain(
-      "badge.appendChild(el('span','it-queue-label',parked?'held':'queued'));",
+      "badge.appendChild(el('span','it-queue-label',parked?'held':onlyScheduled?'scheduled':'queued'));",
     );
     expect(html).toContain(
       "promptTail.classList.add('with-tail'); promptTail.appendChild(queueBadge);",
     );
     expect(html).toContain("paintSessionQueueBadge(queueBadge,session);");
     expect(html).toContain("s.queueCount=queueInfo ? Math.max(0,Number(queueInfo.count)||0) : 0;");
-    expect(html).toContain("paused after Stop':' · will continue automatically'");
+    expect(html).toContain("var scheduled=scheduledItemsForSession(s).length;");
+  });
+
+  it("uses one scheduling interaction across all three composers", () => {
+    const html = renderConsole({
+      ...view,
+      schedules: [
+        {
+          id: "run-1",
+          jobId: "job-1",
+          kind: "session",
+          runAt: Date.now() + 60_000,
+          timezone: "UTC",
+          status: "scheduled",
+          payload: {
+            kind: "session",
+            clientSessionId: "scheduled-1",
+            cwd: "/tmp",
+            vendor: "claude",
+            text: "start later",
+          },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+    });
+    expect(html).toContain('id="scheduleNew" class="schedulebtn"');
+    expect(html).toContain('id="scheduleChat" class="schedulebtn"');
+    expect(html).toContain('id="scheduleComment" class="schedulebtn"');
+    expect(html).toContain('class="schedulepop" id="schedulePop"');
+    expect(html).toContain('class="scheduleactions" id="scheduleActions"');
+    expect(html).toContain('class="scheduledatetime" id="scheduleDateTime"');
+    expect(html).toContain('id="scheduleDateTimeInput"');
+    expect(html).toContain('class="schedulepicker" id="schedulePicker"');
+    expect(html).toContain('id="scheduleHourOptions"');
+    expect(html).toContain('id="scheduleMinuteOptions"');
+    expect(html).toContain(
+      ".scheduletime-minutes { display: grid; grid-template-columns: minmax(0,1fr)",
+    );
+    expect(html).not.toContain('type="datetime-local"');
+    expect(html).not.toContain("scheduled for '+scheduleDateLabel");
+    expect(html).not.toContain('id="scheduleConfirm"');
+    expect(html).toContain("button.onclick=function(){ submitScheduleAction(action); }");
+    expect(html).not.toContain("data-schedule-delay");
+    expect(html).not.toContain("data-schedule-tomorrow");
+    expect(html).toContain("actions.push({id:'fork',label:'Fork',submit:scheduleCurrentFork})");
+    expect(html).toContain("function scheduleForkFor(runAt,target,turn,prefixHistory,opts)");
+    expect(html).toContain("mode:'fork',clientSessionId:clientSessionId,parentSessionId:parentId");
+    expect(html).toContain("{id:'fork',label:'Fork',submit:function(runAt,v)");
+    expect(html).toContain("{id:'send',label:'Send',submit:function(runAt,v)");
+    expect(html).toContain('id="commentQueue"');
+    expect(html).toContain("function scheduledSessionFromItem(item)");
+    expect(html).toContain("function makeScheduledEditor(item)");
+    expect(html).toContain("setIconButton(contentEdit,'edit','Edit scheduled content')");
+    expect(html).toContain("body:JSON.stringify({text:next})");
+    expect(html).toContain("scheduledItemsForSession(cur).forEach");
+    expect(html).toContain("scheduledCommentsForThread(commentDrawerState.threadId)");
+    expect(html).toContain('window.__SCHEDULES__ = [{"id":"run-1"');
   });
 
   it("shows generating and unread comment threads on their parent session cards", () => {

@@ -2,6 +2,18 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.2.0 — 2026-07-19
+
+### Added
+
+- Durable one-time scheduling for messages, frozen-context forks, comments, and new sessions
+  through one shared clock and action-picker interaction, including Send/Fork scheduling from the
+  main composer and user-message editor. Scheduled work stays in the existing queue/card surfaces
+  instead of adding a separate scheduling panel, with job/run storage ready for future recurring
+  occurrences. Pending session cards project their frozen history and opening turn; sending from
+  one early materializes the real session immediately and retargets the original turn without
+  changing its scheduled time.
+
 ## 1.1.6 — 2026-07-18
 
 ### Added

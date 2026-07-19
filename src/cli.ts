@@ -2,7 +2,15 @@ import fs from "node:fs";
 import { parseArgs } from "node:util";
 import open from "open";
 import { resolveConfig } from "./config.js";
-import { type RunningServer, startServer } from "./server.js";
+import type { RunningServer } from "./server.js";
+
+interface PackageMetadata {
+  version: string;
+}
+
+const { version: VERSION } = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as PackageMetadata;
 
 const HELP = `attend — local attention-management console for AI coding sessions
 
@@ -19,6 +27,7 @@ Options:
       --no-open        Do not open the browser on start
       --e2ee-passphrase <text>
                      Encrypt browser/server API payloads with this passphrase
+  -v, --version        Show the installed version
   -h, --help           Show this help
 
 Config precedence: CLI args > env (ATTEND_VAULTS / ATTEND_PORT / ATTEND_CLAUDE_PROJECTS
@@ -49,12 +58,18 @@ async function main(): Promise<void> {
       config: { type: "string", short: "c" },
       "no-open": { type: "boolean" },
       "e2ee-passphrase": { type: "string" },
+      version: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
     },
   });
 
   if (values.help) {
     process.stdout.write(`${HELP}\n`);
+    return;
+  }
+
+  if (values.version) {
+    process.stdout.write(`attend ${VERSION}\n`);
     return;
   }
 
@@ -67,6 +82,7 @@ async function main(): Promise<void> {
     e2eePassphrase: values["e2ee-passphrase"],
   });
 
+  const { startServer } = await import("./server.js");
   const server = await startServer(config);
   installShutdownHandlers(server);
 

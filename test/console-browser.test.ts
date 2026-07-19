@@ -328,6 +328,17 @@ const unavailableVendorView: ConsoleView = {
   ],
 };
 
+const allUnavailableVendorView: ConsoleView = {
+  ...unavailableVendorView,
+  vendors: unavailableVendorView.vendors.map((vendor) => ({
+    ...vendor,
+    available: false,
+    issue: vendor.issue ?? "not_installed",
+    message:
+      vendor.message ?? `${vendor.vendor} CLI was not found. Install it, then restart Attend.`,
+  })),
+};
+
 describe("console browser behavior", () => {
   let browser: Browser;
 
@@ -337,6 +348,288 @@ describe("console browser behavior", () => {
 
   afterAll(async () => {
     await browser.close();
+  });
+
+  it("shares one clock interaction and projects scheduled sessions/comments into existing UI", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    page.setDefaultTimeout(2_000);
+    const pageErrors: string[] = [];
+    const scheduledBodies: Array<Record<string, unknown>> = [];
+    const scheduledItems: Array<Record<string, unknown>> = [];
+    const materializedBodies: Array<Record<string, unknown>> = [];
+    let currentPageView = pendingTagView;
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(currentPageView) });
+      } else if (url.pathname === "/schedules" && request.method() === "POST") {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        scheduledBodies.push(body);
+        const kind = String(body.kind);
+        const payload = body.payload as Record<string, unknown>;
+        const item = {
+          id: `run-${scheduledBodies.length}`,
+          jobId: `job-${scheduledBodies.length}`,
+          kind,
+          runAt: body.runAt,
+          timezone: body.timezone,
+          status: "scheduled",
+          payload: {
+            ...payload,
+            kind,
+            ...(kind === "comment" && !payload.threadId ? { threadId: "scheduled-comment-1" } : {}),
+          },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        scheduledItems.push(item);
+        await route.fulfill({ json: { ok: true, item, schedules: [item] } });
+      } else if (url.pathname === "/schedules/materialize" && request.method() === "POST") {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        materializedBodies.push(body);
+        const source = scheduledItems.find((item) => item.id === url.searchParams.get("id"));
+        const payload = (source?.payload ?? {}) as Record<string, unknown>;
+        const item = {
+          ...source,
+          kind: "message",
+          status: "scheduled",
+          payload: {
+            kind: "message",
+            sessionId: "materialized-session-1",
+            cwd: payload.cwd,
+            vendor: payload.vendor,
+            text: payload.text,
+            attachments: payload.attachments,
+          },
+        };
+        await route.fulfill({
+          json: {
+            ok: true,
+            session: "materialized-session-1",
+            clientSessionId: payload.clientSessionId,
+            generating: true,
+            item,
+            schedules: [item],
+          },
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [{ role: "assistant", text: "An answer with an unread comment" }],
+        });
+      } else if (url.pathname === "/comments/messages") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: commentView.vaultState?.commentThreads?.["comment-1"],
+            messages: [],
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+
+    await page.goto("http://attend.test/");
+    await page.locator("#newToggle").click();
+    await page.locator("#np").fill("start this session later");
+    await page.locator("#scheduleNew").click();
+    await expect.poll(() => page.locator("#schedulePop").isVisible()).toBe(true);
+    await expect.poll(() => page.locator("#scheduleActions").isVisible()).toBe(true);
+    expect(await page.locator('#schedulePop input[type="datetime-local"]').count()).toBe(0);
+    expect(
+      await page
+        .locator("#scheduleDateTime,#scheduleActions")
+        .evaluateAll((nodes) => nodes.map((node) => node.parentElement?.className)),
+    ).toEqual(["schedulerow", "schedulerow"]);
+    const directDateTime = page.locator("#scheduleDateTimeInput");
+    const defaultDirectValue = await directDateTime.inputValue();
+    expect(defaultDirectValue).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    await directDateTime.fill(defaultDirectValue.replace(/:\d{2}$/, ":17"));
+    await directDateTime.press("ArrowDown");
+    await expect.poll(() => page.locator("#schedulePicker").isVisible()).toBe(true);
+    await expect
+      .poll(() => page.locator("#schedulePicker .schedulepicker-day.selected").count())
+      .toBe(1);
+    expect(await page.locator("#scheduleHour").inputValue()).toMatch(/^\d{2}$/);
+    expect(await page.locator("#scheduleMinute").inputValue()).toBe("17");
+    await expect
+      .poll(() => page.locator("#scheduleHourOptions .scheduletime-option").count())
+      .toBe(24);
+    await expect
+      .poll(() => page.locator("#scheduleMinuteOptions .scheduletime-option").allTextContents())
+      .toEqual(["00", "15", "30", "45"]);
+    await page.locator("#scheduleMinuteOptions .scheduletime-option", { hasText: "30" }).click();
+    await expect.poll(() => directDateTime.inputValue()).toMatch(/:30$/);
+    await expect
+      .poll(() => page.locator("#scheduleActions .scheduleaction").allTextContents())
+      .toEqual(["Start session"]);
+    await page.locator("#scheduleActions .scheduleaction", { hasText: "Start session" }).click();
+
+    await expect.poll(() => scheduledBodies.length).toBe(1);
+    expect(scheduledBodies[0]).toMatchObject({ kind: "session" });
+    expect(new Date(Number(scheduledBodies[0]?.runAt)).getMinutes()).toBe(30);
+    expect(await page.locator("#toastHost .toast").count()).toBe(0);
+    await expect.poll(() => page.locator("#queue .qitem.scheduled").count()).toBe(1);
+    expect(await page.locator("#queue").textContent()).toContain("start this session later");
+    expect(await page.locator("#list").textContent()).toContain("start this session later");
+    expect(await page.locator("#msgs").textContent()).toContain("start this session later");
+    await page.locator("#input").fill("start working immediately");
+    await page.locator("#send").click();
+    await expect.poll(() => materializedBodies.length).toBe(1);
+    expect(materializedBodies[0]).toMatchObject({ text: "start working immediately" });
+    await expect
+      .poll(() => page.locator("#msgs").textContent())
+      .toContain("start working immediately");
+    expect(await page.locator("#msgs").textContent()).not.toContain("start this session later");
+    expect(await page.locator("#queue").textContent()).toContain("start this session later");
+
+    const buttonClasses = await page
+      .locator("#scheduleNew,#scheduleChat,#scheduleComment")
+      .evaluateAll((buttons) => buttons.map((button) => button.className));
+    expect(buttonClasses).toEqual(["schedulebtn", "schedulebtn", "schedulebtn"]);
+    currentPageView = pendingTagView;
+    await page.goto("http://attend.test/");
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await page.locator("#input").fill("fork this conversation later");
+    await page.locator("#scheduleChat").click();
+    await expect.poll(() => page.locator("#schedulePop").isVisible()).toBe(true);
+    expect(await page.locator("#schedulePop .schedulepop-title").textContent()).toBe(
+      "Schedule once",
+    );
+    await expect.poll(() => page.locator("#scheduleActions").isVisible()).toBe(true);
+    await expect
+      .poll(() => page.locator("#scheduleActions .scheduleaction").allTextContents())
+      .toEqual(["Fork", "Send"]);
+    await page.locator("#scheduleActions .scheduleaction", { hasText: "Fork" }).click();
+    await expect.poll(() => scheduledBodies.length).toBe(2);
+    expect(scheduledBodies[1]).toMatchObject({
+      kind: "session",
+      payload: {
+        mode: "fork",
+        parentSessionId: "s1",
+        text: "fork this conversation later",
+        contextMessages: expect.any(Array),
+      },
+    });
+    await expect
+      .poll(() => page.locator("#list").textContent())
+      .toContain("fork this conversation later");
+    const forkClientId = String(
+      (scheduledItems[1]?.payload as Record<string, unknown>)?.clientSessionId,
+    );
+    await page.locator(`#list .item[data-session-id="${forkClientId}"]`).click();
+    await expect
+      .poll(() => page.locator("#msgs").textContent())
+      .toContain("An answer with an unread comment");
+    expect(await page.locator("#msgs").textContent()).toContain("fork this conversation later");
+
+    currentPageView = commentView;
+    await page.goto("http://attend.test/");
+    await page.locator('#list .item[data-session-id="s1"] .it-comment').click();
+    await page.locator("#commentInput").fill("follow up later");
+    await page.locator("#scheduleComment").click();
+    await page.locator("#scheduleActions .scheduleaction", { hasText: "Send comment" }).click();
+    await expect.poll(() => scheduledBodies.length).toBe(3);
+    expect(scheduledBodies[2]).toMatchObject({ kind: "comment" });
+    await expect.poll(() => page.locator("#commentQueue .qitem.scheduled").count()).toBe(1);
+    expect(await page.locator("#commentQueue").textContent()).toContain("follow up later");
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, 15_000);
+
+  it("edits scheduled user messages inline in the queued area", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const runAt = Date.now() + 60_000;
+    let patchedBody: Record<string, unknown> | null = null;
+    let releaseRunNow = () => {};
+    const runNowGate = new Promise<void>((resolve) => {
+      releaseRunNow = resolve;
+    });
+    const scheduledItem = {
+      id: "scheduled-message-edit",
+      jobId: "scheduled-message-job",
+      kind: "message" as const,
+      runAt,
+      timezone: "Asia/Shanghai",
+      status: "scheduled" as const,
+      payload: {
+        kind: "message" as const,
+        sessionId: "s1",
+        cwd: "/tmp/project",
+        vendor: "claude",
+        text: "original scheduled message",
+      },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({ ...pendingTagView, schedules: [scheduledItem] }),
+        });
+      } else if (url.pathname === "/schedules" && request.method() === "PATCH") {
+        patchedBody = request.postDataJSON() as Record<string, unknown>;
+        const updated = {
+          ...scheduledItem,
+          payload: { ...scheduledItem.payload, text: String(patchedBody.text) },
+          updatedAt: Date.now(),
+        };
+        await route.fulfill({ json: { ok: true, item: updated, schedules: [updated] } });
+      } else if (url.pathname === "/schedules/run" && request.method() === "POST") {
+        await runNowGate;
+        await route.fulfill({
+          json: {
+            ok: true,
+            item: { ...scheduledItem, status: "dispatched" },
+            schedules: [],
+          },
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    const row = page.locator("#queue .qitem.scheduled");
+    await expect.poll(() => row.count()).toBe(1);
+    expect(await row.locator(".qedit").getAttribute("aria-label")).toBe("Edit scheduled content");
+    expect(await row.locator(".qschedule").getAttribute("aria-label")).toBe("Reschedule");
+    await row.locator(".qedit").click();
+    await expect.poll(() => row.locator(".qeditbox").count()).toBe(1);
+    await row.locator(".qeditta").fill("updated scheduled message");
+    await row.locator(".qsend").click();
+
+    await expect.poll(() => patchedBody).toEqual({ text: "updated scheduled message" });
+    await expect.poll(() => row.locator(".qeditbox").count()).toBe(0);
+    await expect.poll(() => row.textContent()).toContain("updated scheduled message");
+    await row.locator(".qsend", { hasText: "run now" }).click();
+    await expect.poll(() => row.locator(".qtag").first().textContent()).toBe("dispatching");
+    await expect.poll(() => row.locator(".qsend").isDisabled()).toBe(true);
+    releaseRunNow();
+    await expect.poll(() => row.count()).toBe(0);
+    await page.close();
   });
 
   it("selects a Pin with @, excludes tool Pins, and sends a structured reference", async () => {
@@ -478,7 +771,7 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("keeps unavailable vendors visible with English install or update guidance", async () => {
+  it("hides unavailable vendors when at least one vendor is installed", async () => {
     const page = await browser.newPage();
     await page.addInitScript(() => {
       class StubEventSource {
@@ -503,26 +796,58 @@ describe("console browser behavior", () => {
     await page.locator("#nvendor").focus();
 
     expect(await page.locator("#nvendor").inputValue()).toBe("cursor");
-    expect(await page.locator("#nvendorSug .chooser-opt").count()).toBe(3);
-    expect(await page.locator("#nvendorSug .chooser-opt.unavailable").count()).toBe(2);
-    const claude = page.locator('#nvendorSug .chooser-opt[data-value="claude"]');
-    expect(await claude.getAttribute("aria-disabled")).toBe("true");
-    expect(await claude.locator(".chooser-opt-meta").textContent()).toBe(
-      "Claude CLI 2.0.99 is too old. Attend requires 2.1.0 or newer. Update Claude Code, then restart Attend.",
-    );
+    expect(await page.locator("#nvendorSug .chooser-opt").count()).toBe(1);
+    expect(await page.locator("#nvendorSug .chooser-opt.unavailable").count()).toBe(0);
+    expect(await page.locator('#nvendorSug .chooser-opt[data-value="cursor"]').count()).toBe(1);
+    expect(await page.locator('#nvendorSug .chooser-opt[data-value="claude"]').count()).toBe(0);
+    expect(await page.locator('#nvendorSug .chooser-opt[data-value="codex"]').count()).toBe(0);
     await page.locator("#nvendor").press("Escape");
     expect(await page.locator("#nvendorSug").isHidden()).toBe(true);
     expect(await page.locator("#newbox").getAttribute("class")).toContain("open");
     expect(
       await page.locator("#nvendor").evaluate((node) => node.ownerDocument.activeElement === node),
     ).toBe(true);
-    await page.locator("#nvendor").click();
-    await claude.click();
-    expect(await page.locator("#nvendor").inputValue()).toBe("cursor");
-    expect(await page.locator("#nmsg").textContent()).toContain("Update Claude Code");
     await page.locator("#np").focus();
     await page.locator("#np").press("Escape");
     expect(await page.locator("#newbox").getAttribute("class")).not.toContain("open");
+    await page.close();
+  });
+
+  it("shows unavailable vendors with recovery guidance when none are installed", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(allUnavailableVendorView),
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#newToggle").click();
+    await page.locator("#nvendor").focus();
+
+    expect(await page.locator("#nvendor").inputValue()).toBe("");
+    expect(await page.locator("#nvendorSug .chooser-opt").count()).toBe(3);
+    expect(await page.locator("#nvendorSug .chooser-opt.unavailable").count()).toBe(3);
+    const claude = page.locator('#nvendorSug .chooser-opt[data-value="claude"]');
+    expect(await claude.getAttribute("aria-disabled")).toBe("true");
+    expect(await claude.locator(".chooser-opt-meta").textContent()).toBe(
+      "Claude CLI 2.0.99 is too old. Attend requires 2.1.0 or newer. Update Claude Code, then restart Attend.",
+    );
+    await claude.click();
+    expect(await page.locator("#nvendor").inputValue()).toBe("");
+    expect(await page.locator("#nmsg").textContent()).toContain("Update Claude Code");
     await page.close();
   });
 
@@ -1433,13 +1758,11 @@ describe("console browser behavior", () => {
       // the inset shelf adds fractional margins; allow sub-3px rounding drift
       expect(Math.abs(pop.x - expectedX)).toBeLessThanOrEqual(3);
     };
-    const expectForkActionTheme = async (selector: string, hovered = false) => {
+    const expectProductActionTheme = async (selector: string, hovered = false) => {
       const button = page.locator(selector);
       if (hovered) await button.hover();
-      // Fork buttons transition into both their vendor and hover palettes.
       await page.waitForTimeout(180);
       const theme = await button.evaluate((node, useHover) => {
-        const vendor = node.getAttribute("data-vendor") ?? "";
         const style = node.ownerDocument.defaultView?.getComputedStyle(node);
         const probe = node.ownerDocument.createElement("span");
         node.ownerDocument.body.appendChild(probe);
@@ -1448,9 +1771,9 @@ describe("console browser behavior", () => {
           return node.ownerDocument.defaultView?.getComputedStyle(probe).color ?? "";
         };
         const expected = {
-          background: resolve(`--vendor-${vendor}-${useHover ? "hover-" : ""}bg`),
-          border: resolve(`--vendor-${vendor}-${useHover ? "hover-" : ""}border`),
-          color: resolve(`--vendor-${vendor}-fg`),
+          background: resolve(useHover ? "--primary-hover" : "--primary-bg"),
+          border: resolve(useHover ? "--primary-hover" : "--primary-bg"),
+          color: resolve("--primary-fg"),
         };
         probe.remove();
         return {
@@ -1484,10 +1807,18 @@ describe("console browser behavior", () => {
       };
       return browserWindow.getComputedStyle(rail).color;
     });
-    // Fork always shows the vendor it will use, including when that matches the current session.
-    expect(await page.locator("#forkBtn").getAttribute("data-vendor")).toBe("claude");
-    expect(await page.locator("#forkBtn").getAttribute("class")).toContain("fork-action");
-    await expectForkActionTheme("#forkBtn");
+    const forkTheme = await page.locator("#forkBtn").evaluate((button) => {
+      const style = button.ownerDocument.defaultView?.getComputedStyle(button);
+      const probe = button.ownerDocument.createElement("span");
+      button.ownerDocument.body.appendChild(probe);
+      probe.style.color = "var(--vendor-claude-border)";
+      const claudeBorder = button.ownerDocument.defaultView?.getComputedStyle(probe).color;
+      probe.remove();
+      return { border: style?.borderTopColor, claudeBorder };
+    });
+    expect(await page.locator("#forkBtn").getAttribute("data-vendor")).toBeNull();
+    expect(await page.locator("#forkBtn").getAttribute("class")).not.toContain("fork-action");
+    expect(forkTheme.border).not.toBe(forkTheme.claudeBorder);
     await page.locator("#input").click();
     expect(
       await page.locator("#input").evaluate((input) => input.ownerDocument.activeElement === input),
@@ -1803,8 +2134,9 @@ describe("console browser behavior", () => {
     expect(await page.locator("#send").textContent()).toBe("fork with codex");
     expect(await page.locator("#send .splitbtn-ico circle").count()).toBe(3);
     expect(await page.locator("#forkBtn").isVisible()).toBe(false);
-    await expectForkActionTheme("#send");
-    await expectForkActionTheme("#send", true);
+    expect(await page.locator("#send").getAttribute("data-vendor")).toBeNull();
+    await expectProductActionTheme("#send");
+    await expectProductActionTheme("#send", true);
     const sessionCount = await page.locator("#list .item").count();
     await page.locator("#send").click();
     await expect.poll(() => page.locator("#list .item").count()).toBe(sessionCount + 1);
@@ -2127,7 +2459,7 @@ describe("console browser behavior", () => {
     await page.locator("#list .item", { hasText: "Avoidance session" }).click();
 
     const order = await page.locator("#composer .composeractions").evaluate((row) =>
-      Array.from(row.children as unknown as ArrayLike<{ id: string }>)
+      Array.from(row.querySelectorAll("button") as unknown as ArrayLike<{ id: string }>)
         .map((node) => node.id)
         .filter(Boolean),
     );
@@ -2389,6 +2721,7 @@ describe("console browser behavior", () => {
 
   it("uses the Tag close control for user-message editing and exits with Escape", async () => {
     const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    let scheduledEdit: Record<string, unknown> | null = null;
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -2409,6 +2742,21 @@ describe("console browser behavior", () => {
             { role: "assistant", text: "Later response" },
           ],
         });
+      } else if (url.pathname === "/schedules" && route.request().method() === "POST") {
+        scheduledEdit = route.request().postDataJSON() as Record<string, unknown>;
+        const payload = scheduledEdit.payload as Record<string, unknown>;
+        const item = {
+          id: "scheduled-edit-fork",
+          jobId: "scheduled-edit-job",
+          kind: "session",
+          runAt: scheduledEdit.runAt,
+          timezone: scheduledEdit.timezone,
+          status: "scheduled",
+          payload: { ...payload, kind: "session" },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        await route.fulfill({ json: { ok: true, item, schedules: [item] } });
       } else await route.fulfill({ json: { ok: true, items: [] } });
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
@@ -2454,8 +2802,10 @@ describe("console browser behavior", () => {
       };
     });
     expect(userCloseStyle).toEqual(tagCloseStyle);
-    expect(await user.locator(".inline-edit-save").getAttribute("class")).toContain("fork-action");
-    expect(await user.locator(".inline-edit-save").getAttribute("data-vendor")).toBe("claude");
+    expect(await user.locator(".inline-edit-save").getAttribute("class")).not.toContain(
+      "fork-action",
+    );
+    expect(await user.locator(".inline-edit-save").getAttribute("data-vendor")).toBeNull();
     expect(await user.locator(".inline-edit-save .splitbtn-ico circle").count()).toBe(3);
     await user.locator(".inline-edit-save").focus();
     await page.keyboard.press("Escape");
@@ -2464,8 +2814,21 @@ describe("console browser behavior", () => {
 
     await user.hover();
     await user.locator(".msg-edit").click();
-    await user.locator(".inline-edit-ta").press("Escape");
-    await expect.poll(() => user.locator(".inline-edit").count()).toBe(0);
+    await user.locator(".inline-edit-ta").fill("Scheduled edited fork");
+    await user.locator(".inline-edit .schedulebtn").click();
+    await expect.poll(() => page.locator("#scheduleActions").isVisible()).toBe(true);
+    await page.locator("#scheduleActions .scheduleaction", { hasText: "Fork" }).click();
+    await expect.poll(() => scheduledEdit).not.toBeNull();
+    expect(scheduledEdit).toMatchObject({
+      kind: "session",
+      payload: {
+        mode: "fork",
+        parentSessionId: "s1",
+        text: "Scheduled edited fork",
+        contextMessages: [],
+      },
+    });
+    await expect.poll(() => page.locator("#list").textContent()).toContain("Scheduled edited fork");
     await page.close();
   });
 

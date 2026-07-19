@@ -111,7 +111,7 @@ export interface CommentThreadState {
   /** Latest user-authored turn in this thread; attributed to the parent for recent sorting. */
   lastUserMessageAt?: number;
   createdWhileGenerating?: boolean;
-  status?: "generating" | "unread" | "read" | "failed";
+  status?: "scheduled" | "generating" | "unread" | "read" | "failed";
   messageCount?: number;
 }
 
@@ -851,7 +851,8 @@ function cleanCommentThreads(
     const providerSessionId = String(raw.providerSessionId || "").trim();
     const vendor = String(raw.vendor || "").trim();
     const cwd = String(raw.cwd || "").trim();
-    if (!id || !parentSessionId || !anchorKey || !providerSessionId || !vendor || !cwd) continue;
+    if (!id || !parentSessionId || !anchorKey || !vendor || !cwd) continue;
+    if (!providerSessionId && raw.status !== "scheduled") continue;
     out[id] = {
       id,
       parentSessionId,
@@ -868,7 +869,8 @@ function cleanCommentThreads(
         ? { lastUserMessageAt: Number(raw.lastUserMessageAt) }
         : {}),
       ...(raw.createdWhileGenerating ? { createdWhileGenerating: true } : {}),
-      ...(raw.status === "generating" ||
+      ...(raw.status === "scheduled" ||
+      raw.status === "generating" ||
       raw.status === "unread" ||
       raw.status === "read" ||
       raw.status === "failed"

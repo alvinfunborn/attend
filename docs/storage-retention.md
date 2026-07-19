@@ -15,6 +15,7 @@ document.
 | Unread, generating, or failed comments | `ui-state` document | No automatic expiry |
 | Queue leases | `chat-queue` document | Removed as soon as the lease expires |
 | Queued messages | `chat-queue` document | No automatic expiry; only user or dispatch removes them |
+| Scheduled jobs and one-time runs | Indexed `schedule_jobs` / `schedule_runs` rows | No automatic expiry; user cancellation or dispatch changes status without deleting history |
 | Tags, titles, pins, Focus views, overrides, fork links | State documents | No automatic expiry (user intent) |
 | Daemon registry and analysis cache | State documents | No automatic expiry; required for daemon hiding and continuity |
 | Workspace migration markers | `workspace-state-migrations` document | Permanent for idempotency |

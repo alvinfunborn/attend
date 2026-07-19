@@ -2124,6 +2124,303 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     };
   }
 
+  it("creates a visible scheduled session card record and dispatches it once", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const runAt = Date.now() + 60_000;
+    const created = await app.request("/schedules", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "session",
+        runAt,
+        timezone: "Asia/Shanghai",
+        payload: {
+          clientSessionId: "scheduled-card-1",
+          cwd: os.tmpdir(),
+          vendor: "codex",
+          text: "start this later",
+          model: "gpt-5",
+          effort: "high",
+          tags: ["later"],
+        },
+      }),
+    });
+    expect(created.status).toBe(200);
+    const body = (await created.json()) as {
+      item: { id: string };
+      schedules: Array<Record<string, unknown>>;
+    };
+    expect(body.schedules).toMatchObject([
+      {
+        kind: "session",
+        runAt,
+        status: "scheduled",
+        payload: {
+          clientSessionId: "scheduled-card-1",
+          text: "start this later",
+          tags: ["later"],
+        },
+      },
+    ]);
+
+    const runNow = await app.request(`/schedules/run?id=${encodeURIComponent(body.item.id)}`, {
+      method: "POST",
+    });
+    expect(runNow.status).toBe(200);
+    expect(await runNow.json()).toMatchObject({ item: { status: "dispatched" } });
+    await vi.waitFor(() => expect(codex.starts).toHaveLength(1));
+    expect(codex.starts[0]).toMatchObject({
+      clientSessionId: "scheduled-card-1",
+      firstText: "start this later",
+      model: "gpt-5",
+      effort: "high",
+    });
+    const listed = (await (await app.request("/schedules")).json()) as {
+      schedules: Array<Record<string, unknown>>;
+    };
+    expect(listed.schedules).toMatchObject([
+      {
+        status: "dispatched",
+        dispatchId: "cx-1",
+        payload: { clientSessionId: "scheduled-card-1" },
+      },
+    ]);
+  });
+
+  it("dispatches a scheduled fork from its frozen transcript point", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    const at = new Date().toISOString();
+    fs.writeFileSync(
+      path.join(config.codexSessions, "rollout-scheduled-fork-parent.jsonl"),
+      [
+        {
+          type: "session_meta",
+          timestamp: at,
+          payload: { id: "scheduled-fork-parent", cwd: os.tmpdir() },
+        },
+        {
+          type: "response_item",
+          timestamp: at,
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "live parent text" }],
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    );
+
+    const created = await app.request("/schedules", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "session",
+        runAt: Date.now() + 60_000,
+        timezone: "Asia/Shanghai",
+        payload: {
+          mode: "fork",
+          clientSessionId: "scheduled-fork-card",
+          parentSessionId: "scheduled-fork-parent",
+          vendor: "codex",
+          text: "take the frozen branch",
+          contextMessages: [
+            { role: "user", text: "frozen prompt" },
+            { role: "assistant", text: "frozen answer" },
+          ],
+        },
+      }),
+    });
+    expect(created.status).toBe(200);
+    const body = (await created.json()) as {
+      item: { id: string; payload: Record<string, unknown> };
+    };
+    expect(body.item.payload).toMatchObject({
+      mode: "fork",
+      parentSessionId: "scheduled-fork-parent",
+      clientSessionId: "scheduled-fork-card",
+    });
+    expect(body.item.payload.contextMessages).toEqual([
+      { role: "user", text: "frozen prompt", tools: [] },
+      { role: "assistant", text: "frozen answer", tools: [] },
+    ]);
+
+    const runNow = await app.request(`/schedules/run?id=${encodeURIComponent(body.item.id)}`, {
+      method: "POST",
+    });
+    expect(runNow.status).toBe(200);
+    expect(await runNow.json()).toMatchObject({ item: { status: "dispatched" } });
+    await vi.waitFor(() => expect(codex.starts).toHaveLength(1));
+    expect(codex.starts[0]).toMatchObject({
+      clientSessionId: "scheduled-fork-card",
+      cwd: os.tmpdir(),
+    });
+    expect(codex.starts[0]?.resume).toBeUndefined();
+    expect(codex.starts[0]?.firstText).toContain("take the frozen branch");
+    expect(codex.starts[0]?.firstText).toContain("User: frozen prompt");
+    expect(codex.starts[0]?.firstText).toContain("Assistant: frozen answer");
+    expect(codex.starts[0]?.firstText).not.toContain("live parent text");
+
+    const listed = (await (await app.request("/schedules")).json()) as {
+      schedules: Array<Record<string, unknown>>;
+    };
+    expect(listed.schedules).toMatchObject([
+      {
+        status: "dispatched",
+        dispatchId: "cx-1",
+        payload: {
+          mode: "fork",
+          parentSessionId: "scheduled-fork-parent",
+        },
+      },
+    ]);
+  });
+
+  it("starts a scheduled placeholder early and keeps its original opener scheduled", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const runAt = Date.now() + 60_000;
+    const created = await app.request("/schedules", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "session",
+        runAt,
+        timezone: "Asia/Shanghai",
+        payload: {
+          clientSessionId: "scheduled-start-early",
+          cwd: os.tmpdir(),
+          vendor: "codex",
+          text: "keep this for later",
+          model: "gpt-5",
+        },
+      }),
+    });
+    const scheduled = (await created.json()) as { item: { id: string } };
+
+    const materialized = await app.request(
+      `/schedules/materialize?id=${encodeURIComponent(scheduled.item.id)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "do this immediately" }),
+      },
+    );
+
+    expect(materialized.status).toBe(200);
+    expect(await materialized.json()).toMatchObject({
+      ok: true,
+      session: "cx-1",
+      clientSessionId: "scheduled-start-early",
+      item: {
+        id: scheduled.item.id,
+        kind: "message",
+        runAt,
+        status: "scheduled",
+        payload: {
+          kind: "message",
+          sessionId: "cx-1",
+          text: "keep this for later",
+        },
+      },
+    });
+    expect(codex.starts).toHaveLength(1);
+    expect(codex.starts[0]).toMatchObject({
+      clientSessionId: "scheduled-start-early",
+      firstText: "do this immediately",
+      model: "gpt-5",
+    });
+
+    const runNow = await app.request(`/schedules/run?id=${encodeURIComponent(scheduled.item.id)}`, {
+      method: "POST",
+    });
+    expect(runNow.status).toBe(200);
+    expect(await runNow.json()).toMatchObject({ item: { status: "dispatched" } });
+    await vi.waitFor(() =>
+      expect(codex.sends).toContainEqual({
+        sessionId: "cx-1",
+        turn: { text: "keep this for later", attachments: [] },
+      }),
+    );
+    expect(await (await app.request("/chat/queue?session=cx-1")).json()).toMatchObject({
+      items: [],
+    });
+  });
+
+  it("materializes a scheduled fork from its frozen prefix with the immediate turn", async () => {
+    const { app, codex, config } = appWithCodexSpy();
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    const at = new Date().toISOString();
+    fs.writeFileSync(
+      path.join(config.codexSessions, "rollout-scheduled-early-parent.jsonl"),
+      [
+        {
+          type: "session_meta",
+          timestamp: at,
+          payload: { id: "scheduled-early-parent", cwd: os.tmpdir() },
+        },
+        {
+          type: "response_item",
+          timestamp: at,
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "live parent text" }],
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    );
+    const created = await app.request("/schedules", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "session",
+        runAt: Date.now() + 60_000,
+        timezone: "UTC",
+        payload: {
+          mode: "fork",
+          clientSessionId: "scheduled-fork-start-early",
+          parentSessionId: "scheduled-early-parent",
+          vendor: "codex",
+          text: "future branch turn",
+          contextMessages: [
+            { role: "user", text: "frozen prompt" },
+            { role: "assistant", text: "frozen answer" },
+          ],
+        },
+      }),
+    });
+    const scheduled = (await created.json()) as { item: { id: string } };
+
+    const materialized = await app.request(
+      `/schedules/materialize?id=${encodeURIComponent(scheduled.item.id)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "branch immediately" }),
+      },
+    );
+
+    expect(materialized.status).toBe(200);
+    expect(await materialized.json()).toMatchObject({
+      ok: true,
+      session: "cx-1",
+      item: {
+        kind: "message",
+        payload: { sessionId: "cx-1", text: "future branch turn" },
+      },
+    });
+    expect(codex.starts).toHaveLength(1);
+    expect(codex.starts[0]?.firstText).toContain("frozen prompt");
+    expect(codex.starts[0]?.firstText).toContain("frozen answer");
+    expect(codex.starts[0]?.firstText).toContain("branch immediately");
+    expect(codex.starts[0]?.firstText).not.toContain("future branch turn");
+    expect(codex.starts[0]?.firstText).not.toContain("live parent text");
+  });
+
   it("resolves Pin references with their full text-only comment thread", async () => {
     const { app, codex, config } = appWithCodexSpy();
     fs.mkdirSync(config.codexSessions, { recursive: true });
@@ -3313,6 +3610,34 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
 
     expect(discard).toHaveBeenNthCalledWith(1, "cx-turn");
     expect(discard).toHaveBeenNthCalledWith(2, "cx-turn");
+  });
+
+  it("dispatches a ready scheduled queue turn before returning its queue snapshot", async () => {
+    const { app, codex } = appWithCodexSpy();
+    const response = await app.request(
+      `/chat/queue?session=cx-scheduled-ready&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-attend-e2ee-internal": "1" },
+        body: JSON.stringify({
+          text: "run the scheduled turn now",
+          scheduleRunId: "schedule-run-1",
+          dispatchIfReady: true,
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, items: [] });
+    expect(codex.sends[0]).toMatchObject({
+      sessionId: "cx-scheduled-ready",
+      turn: { text: "run the scheduled turn now" },
+    });
+    expect(
+      await (await app.request("/chat/queue?session=cx-scheduled-ready")).json(),
+    ).toMatchObject({
+      items: [],
+    });
   });
 
   it("advances a persisted queue on turn-end while no browser session is selected", async () => {
