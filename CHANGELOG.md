@@ -2,6 +2,13 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.2.2 — 2026-07-24
+
+### Documentation
+
+- Clarify provider-limit recovery, live provider-model discovery, and message-level comment, pin,
+  and reference workflows in the README.
+
 ## 1.2.1 — 2026-07-24
 
 ### Changed

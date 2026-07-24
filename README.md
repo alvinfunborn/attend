@@ -20,9 +20,10 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 - Organize sessions across projects with tags, search, and Focus views, while distinguishing work
   that is generating, unread, waiting for follow-up, or handled.
 - Start or continue Claude Code, Codex/ChatGPT, and Cursor CLI sessions in the browser, with
-  attachments, interactive questions, stopping, and durable message queues.
+  attachments, interactive questions, stopping, recoverable provider-limit errors, and durable
+  message queues.
 - Keep shortcuts, notes, todos, and Goals beside the composer; pin messages and use `@` to carry
-  selected context into the next turn.
+  selected context into the next turn, or start a focused comment from a message or text selection.
 - Fork sessions, comment on a response, or promote a side discussion into its own task without
   losing its relationship to the original work.
 - Edit titles and attention signals, review recent work statistics, and switch between light and
@@ -39,7 +40,8 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 - Track `generating`, `new reply`, `in progress`, and `read`; change status manually or archive seen
   sessions in the current view.
 - Start or continue supported provider sessions; choose discovered model, effort, and speed settings
-  that Attend remembers per session when available.
+  that Attend remembers per session when available. Model lists refresh from the installed provider,
+  including when a previously available model is no longer offered.
 - Attach or paste files and images, answer provider questions and forms, stop turns, and queue,
   edit, send, fork, or delete durable follow-up messages.
 - Schedule a one-time message, fork, comment, or new session from the same clock control in each
@@ -51,10 +53,11 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 - Edit a session title, state, priority, and estimated re-entry time.
 - Manage machine-wide shortcuts and session notes or todos beside the composer; arm supported Goals
   and accept analyzer-drafted messages.
-- Comment on a response, including while it is generating; continue in an isolated side session,
-  queue replies, or promote the discussion with its parent configuration and context.
-- Pin messages and reference them with `@`; include a pin's text-only comment thread, exclude tool
-  blocks, and snapshot referenced context for queued turns.
+- Comment on a response or a selected passage, including while it is generating; continue in an
+  isolated side session, queue replies, or promote the discussion with its parent configuration and
+  context. Stop, edit, and resend the latest comment message when needed.
+- Pin messages or selected passages and reference them with `@`; include a pin's text-only comment
+  thread, exclude tool blocks, and snapshot referenced context for queued turns.
 - Collapse completed turns, refresh from the provider transcript, preview attachments and diagrams,
   and reveal referenced local paths.
 - Fork from the current draft or a queued turn, keep or switch providers, preserve run settings and
