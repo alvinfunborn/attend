@@ -3,6 +3,7 @@ import type { CodexEvent } from "../codex/events.js";
 import { toUiEventsFromCodex } from "../codex/events.js";
 import type { ActiveSessionState, ChatDriver, StartOpts, ToolAnswer, UserTurn } from "../driver.js";
 import type { UiEvent } from "../events.js";
+import { IdleSessionTimers, SESSION_IDLE_TTL_MS } from "../idle-sessions.js";
 import { type ProviderErrorClassifier, providerErrorPayload } from "../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../runtime.js";
 import type { ProcessForkFn, ProcessSandbox, ProcessTurnFn, ProcessTurnHandle } from "./types.js";
@@ -50,6 +51,7 @@ export class ProcessChatDriver implements ChatDriver {
   private readonly runtime = new DriverRuntime<ProcessRun>({
     shouldReplay: (run) => run.turnActive || !!run.awaitingInputToolUseId,
   });
+  private readonly idle: IdleSessionTimers;
 
   constructor(
     private readonly execFn: ProcessTurnFn<CodexEvent>,
@@ -57,8 +59,10 @@ export class ProcessChatDriver implements ChatDriver {
     private readonly forkFn: ProcessForkFn = () => null,
     vendor = "codex",
     readonly classifyError?: ProviderErrorClassifier,
+    idleTtlMs = SESSION_IDLE_TTL_MS,
   ) {
     this.vendor = vendor;
+    this.idle = new IdleSessionTimers(idleTtlMs);
   }
 
   onTurnEnd(listener: (sessionId: string) => void): () => void {
@@ -84,6 +88,7 @@ export class ProcessChatDriver implements ChatDriver {
   }
 
   shutdown(): void {
+    this.idle.clear();
     this.runtime.clearPending();
     for (const run of this.runtime.values()) {
       try {
@@ -96,6 +101,7 @@ export class ProcessChatDriver implements ChatDriver {
   }
 
   start(opts: StartOpts): Promise<string> {
+    if (opts.resume && !opts.forkSession) this.idle.cancel(opts.resume);
     let resumeId = opts.resume;
     let forkFailed = false;
     if (opts.forkSession && opts.resume) {
@@ -143,7 +149,9 @@ export class ProcessChatDriver implements ChatDriver {
         this.runTurn(run, opts.firstText ?? "", opts.firstAttachments);
       }
       if (run.sessionId) run.settle(run.sessionId);
-      else if (opts.firstText === undefined && !opts.firstAttachments?.length) {
+      if (run.sessionId && opts.firstText === undefined && !opts.firstAttachments?.length) {
+        this.scheduleIdle(run);
+      } else if (opts.firstText === undefined && !opts.firstAttachments?.length) {
         run.fail(new Error(`${this.vendor} sessions need a first message`));
       }
     });
@@ -152,14 +160,24 @@ export class ProcessChatDriver implements ChatDriver {
   send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runtime.get(sessionId);
     if (!run || run.turnActive || run.awaitingInputToolUseId) return false;
+    this.idle.cancel(sessionId);
     this.runTurn(run, turn.text, turn.attachments);
     return true;
+  }
+
+  canSteer(_sessionId: string): boolean {
+    return false;
+  }
+
+  steer(_sessionId: string, _turn: UserTurn): Promise<boolean> {
+    return Promise.resolve(false);
   }
 
   answer(sessionId: string, answer: ToolAnswer): boolean {
     const run = this.runtime.get(sessionId);
     if (!run || !run.awaitingInputToolUseId) return false;
     if (answer.toolUseId !== run.awaitingInputToolUseId) return false;
+    this.idle.cancel(sessionId);
     run.awaitingInputToolUseId = null;
     run.queuedAnswer = answer;
     if (run.child) {
@@ -196,6 +214,7 @@ export class ProcessChatDriver implements ChatDriver {
   }
 
   private runTurn(run: ProcessRun, text: string, attachments: UserTurn["attachments"] = []): void {
+    if (run.sessionId) this.idle.cancel(run.sessionId);
     run.events = [];
     run.turnActive = true;
     run.turnStartedAt = Date.now();
@@ -286,7 +305,20 @@ export class ProcessChatDriver implements ChatDriver {
     }
     this.runtime.publish(run, event);
     if (event.kind === "session" && event.sessionId) run.settle?.(event.sessionId);
+    if (event.kind === "result" || event.kind === "error") this.scheduleIdle(run);
     return true;
+  }
+
+  private scheduleIdle(run: ProcessRun): void {
+    const sessionId = run.sessionId;
+    if (!sessionId || run.turnActive || run.awaitingInputToolUseId) return;
+    this.idle.arm(sessionId, () => this.releaseIdle(run));
+  }
+
+  private releaseIdle(run: ProcessRun): void {
+    const sessionId = run.sessionId;
+    if (!sessionId || run.turnActive || run.child || run.awaitingInputToolUseId) return;
+    this.runtime.release(sessionId, run);
   }
 }
 

@@ -10,6 +10,7 @@ import { DaemonOrchestrator } from "../src/chat/daemon.js";
 import type { QueryFn } from "../src/chat/engine.js";
 import { AnalysisCache } from "../src/core/daemon/cache.js";
 import { DaemonRegistry } from "../src/core/daemon/registry.js";
+import { TranscriptPathIndex } from "../src/core/vendor/transcript-index.js";
 
 const claudeCalls: Array<{ prompt: unknown; options?: Record<string, unknown> }> = [];
 // Fake SDK query: a spawn (no resume) mints a daemon id; a resumed turn replies
@@ -270,6 +271,47 @@ describe("DaemonOrchestrator", () => {
     expect(a?.brief).toBe("codex task");
     expect(a?.state).toBe("continue_ready");
     expect(a?.priority).toBe(6);
+  });
+
+  it("uses the scanner-owned transcript index without searching the configured Codex root", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-indexed-codex-"));
+    const taskId = "indexed-codex-task";
+    const file = path.join(dir, `${taskId}.jsonl`);
+    cleanup.push(file, dir);
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "indexed codex transcript" }],
+        },
+      }),
+    );
+    const index = new TranscriptPathIndex();
+    index.set("codex", taskId, file);
+    const analyzer = new CodexAnalyzer(path.join(dir, "does-not-exist"), fakeCodexExec, index);
+
+    await analyzer.analyze("cx-daemon-1", dir, taskId);
+    expect(String(codexCalls.at(-1)?.prompt ?? "")).toContain("indexed codex transcript");
+  });
+
+  it("uses the scanner-owned transcript index without searching Claude project dirs", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-indexed-claude-"));
+    const taskId = "indexed-claude-task";
+    const file = path.join(dir, `${taskId}.jsonl`);
+    cleanup.push(file, dir);
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ type: "user", message: { content: "indexed claude transcript" } }),
+    );
+    const index = new TranscriptPathIndex();
+    index.set("claude", taskId, file);
+    const analyzer = new ClaudeAnalyzer(path.join(dir, "does-not-exist"), fakeQuery, index);
+
+    await analyzer.analyze("daemon-1", dir, taskId);
+    expect(String(claudeCalls.at(-1)?.prompt ?? "")).toContain("indexed claude transcript");
   });
 
   it("pins Codex daemon work to the read-only sandbox", async () => {

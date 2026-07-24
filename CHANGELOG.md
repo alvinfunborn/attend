@@ -2,6 +2,35 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.2.1 — 2026-07-24
+
+### Changed
+
+- Empty chat composers keep showing the analyzer's `nextStep` ghost before focus; Tab still accepts
+  it only after the composer is focused.
+- Session-card turn-reading rails use a logarithmic unread-tail curve so the final assistant
+  paragraphs remain visually prominent instead of collapsing to a barely visible linear sliver.
+
+### Fixed
+
+- User turns no longer duplicate when a chat is switched or re-rendered before the matching live
+  acknowledgement arrives.
+- After stopping a comment response, its latest user message can be edited and resent in the same
+  comment thread, including while the abort request is still completing.
+- Newly created, forked, promoted, and scheduled sessions are pin-sorted before their first render,
+  preventing unpinned cards from briefly appearing in the middle panel's pinned region.
+- Session-card comment icons stay visible and use the attention lights' blue tracked color after
+  reading, green while unread, and purple while generating; every pinned main-chat message or text
+  selection exposes a neutral comment action before its first thread exists and a colored action
+  afterward.
+- Hovering a pinned user message shows its complete original text, including for historical Pins
+  whose stored card preview was truncated.
+- Terminal Codex app-server usage-limit notifications now produce the same visible, retryable
+  provider error shown for Claude limits immediately, even while Codex marks the exhausted request
+  as internally retrying, instead of ending or stalling without an explanation.
+- Authoritative Codex model discovery can remove models that are no longer visible, so an obsolete
+  in-memory snapshot no longer traps the New Session model picker behind a last-known-list warning.
+
 ## 1.2.0 — 2026-07-19
 
 ### Added

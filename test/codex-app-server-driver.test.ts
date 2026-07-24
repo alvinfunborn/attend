@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppServerClientLike } from "../src/chat/codex/app-server/client.js";
 import { CodexAppServerDriver } from "../src/chat/codex/app-server/driver.js";
 import type { AppServerMessage, JsonRpcId } from "../src/chat/codex/app-server/types.js";
@@ -13,6 +13,7 @@ class FakeAppServer implements AppServerClientLike {
   nextTurn = "turn-1";
   threadConfig: Record<string, unknown> = {};
   threadTurns: Array<{ id: string; status: string }> = [];
+  rejectInterruptFor: string | null = null;
 
   async start(): Promise<void> {}
 
@@ -34,6 +35,11 @@ class FakeAppServer implements AppServerClientLike {
     if (method === "thread/goal/clear") return { cleared: true } as T;
     if (method === "thread/read")
       return { thread: { id: this.nextThread, turns: this.threadTurns } } as T;
+    if (
+      method === "turn/interrupt" &&
+      (params as { turnId?: string } | undefined)?.turnId === this.rejectInterruptFor
+    )
+      throw new Error("turn is no longer active");
     if (method.startsWith("thread/"))
       return { thread: { id: this.nextThread }, ...this.threadConfig } as T;
     if (method === "turn/start") return { turn: { id: this.nextTurn, status: "inProgress" } } as T;
@@ -183,6 +189,49 @@ describe("CodexAppServerDriver", () => {
     });
     expect(events).toContainEqual({ kind: "result", ok: true });
     expect(driver.activeSessions()).toEqual([]);
+  });
+
+  it("steers an active turn through the native app-server method", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "start working" });
+
+    expect(driver.canSteer(id)).toBe(true);
+    expect(await driver.steer(id, { text: "focus on the failing test" })).toBe(true);
+    expect(client.requests.at(-1)).toEqual({
+      method: "turn/steer",
+      params: {
+        threadId: id,
+        expectedTurnId: "turn-1",
+        input: [{ type: "text", text: "focus on the failing test", text_elements: [] }],
+      },
+    });
+    expect(driver.activeSessions()).toEqual([id]);
+
+    client.emit({
+      method: "turn/completed",
+      params: { threadId: id, turn: { id: "turn-1", status: "completed" } },
+    });
+    expect(driver.canSteer(id)).toBe(false);
+  });
+
+  it("waits for the active turn id before steering an immediately queued message", async () => {
+    const client = new DeferredTurnAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", resume: "thread-1" });
+    expect(driver.send(id, { text: "start" })).toBe(true);
+    expect(driver.canSteer(id)).toBe(true);
+
+    const steering = driver.steer(id, { text: "guide immediately" });
+    await Promise.resolve();
+    expect(client.requests.some((request) => request.method === "turn/steer")).toBe(false);
+    client.resolveTurnStart();
+
+    expect(await steering).toBe(true);
+    expect(client.requests.at(-1)).toMatchObject({
+      method: "turn/steer",
+      params: { threadId: id, expectedTurnId: "turn-1" },
+    });
   });
 
   it("answers app-server requestUserInput without ending or restarting the turn", async () => {
@@ -382,6 +431,44 @@ describe("CodexAppServerDriver", () => {
     ]);
   });
 
+  it("interrupts an externally scanned turn directly instead of re-reading its status", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+
+    expect(await driver.interrupt("detached-thread", { turnId: "turn-from-transcript" })).toBe(
+      true,
+    );
+    expect(client.requests).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "detached-thread", turnId: "turn-from-transcript" },
+      },
+    ]);
+  });
+
+  it("falls back to the current remote turn when a scanned id has just ended", async () => {
+    const client = new FakeAppServer();
+    client.rejectInterruptFor = "turn-stale";
+    client.threadTurns = [{ id: "turn-current", status: "inProgress" }];
+    const driver = new CodexAppServerDriver(client);
+
+    expect(await driver.interrupt("detached-thread", { turnId: "turn-stale" })).toBe(true);
+    expect(client.requests).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "detached-thread", turnId: "turn-stale" },
+      },
+      {
+        method: "thread/read",
+        params: { threadId: "detached-thread", includeTurns: true },
+      },
+      {
+        method: "turn/interrupt",
+        params: { threadId: "detached-thread", turnId: "turn-current" },
+      },
+    ]);
+  });
+
   it("maps an MCP form elicitation to questions and returns structured content", async () => {
     const client = new FakeAppServer();
     const driver = new CodexAppServerDriver(client);
@@ -455,6 +542,81 @@ describe("CodexAppServerDriver", () => {
       code: "codex_auth_required",
       command: "codex login",
     });
+  });
+
+  it("surfaces the app-server usage-limit notification once without waiting for completion", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "ask" });
+    const events: UiEvent[] = [];
+    driver.subscribe(id, (event) => events.push(event));
+    const error = {
+      message: "You have 0 weighted tokens left",
+      codexErrorInfo: "usageLimitExceeded",
+      additionalDetails: null,
+    };
+
+    client.emit({
+      method: "error",
+      params: {
+        threadId: id,
+        turnId: "turn-1",
+        willRetry: true,
+        error,
+      },
+    });
+    expect(events.filter((event) => event.kind === "error")).toEqual([
+      {
+        kind: "error",
+        message: "You have 0 weighted tokens left",
+        code: "codex_usage_limit",
+        vendor: "codex",
+        retryable: true,
+      },
+    ]);
+
+    // A later terminal notification and completion must not duplicate the card.
+    client.emit({
+      method: "error",
+      params: {
+        threadId: id,
+        turnId: "turn-1",
+        willRetry: false,
+        error,
+      },
+    });
+    client.emit({
+      method: "turn/completed",
+      params: {
+        threadId: id,
+        turn: { id: "turn-1", status: "failed", error },
+      },
+    });
+    expect(events.filter((event) => event.kind === "error")).toHaveLength(1);
+  });
+
+  it("keeps transient app-server retry notifications non-terminal", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "ask" });
+    const events: UiEvent[] = [];
+    driver.subscribe(id, (event) => events.push(event));
+
+    client.emit({
+      method: "error",
+      params: {
+        threadId: id,
+        turnId: "turn-1",
+        willRetry: true,
+        error: {
+          message: "stream disconnected; retrying",
+          codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+        },
+      },
+    });
+
+    expect(events.filter((event) => event.kind === "error")).toEqual([]);
+    expect(driver.canSteer(id)).toBe(true);
   });
 
   it("uses native resume, fork, and interrupt without clearing the forked Goal", async () => {
@@ -558,5 +720,51 @@ describe("CodexAppServerDriver", () => {
       method: "turn/interrupt",
       params: { threadId: "parent", turnId: "turn-1" },
     });
+  });
+
+  it("unsubscribes a completed thread only after its 24-hour-style idle TTL", async () => {
+    vi.useFakeTimers();
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client, 1_000);
+    try {
+      const id = await driver.start({ cwd: "/repo", firstText: "first" });
+      const events: UiEvent[] = [];
+      driver.subscribe(id, (event) => events.push(event));
+      client.emit({
+        method: "turn/completed",
+        params: { threadId: id, turn: { id: "turn-1", status: "completed" } },
+      });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(driver.get(id)).toMatchObject({ cwd: "/repo" });
+      expect(client.requests.some((request) => request.method === "thread/unsubscribe")).toBe(
+        false,
+      );
+
+      expect(driver.send(id, { text: "still here" })).toBe(true);
+      client.emit({
+        method: "turn/completed",
+        params: { threadId: id, turn: { id: "turn-2", status: "completed" } },
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(driver.get(id)).toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(driver.get(id)).toBeUndefined();
+      expect(client.requests.at(-1)).toEqual({
+        method: "thread/unsubscribe",
+        params: { threadId: id },
+      });
+
+      await driver.start({ cwd: "/repo", resume: id });
+      expect(client.requests.at(-1)).toMatchObject({
+        method: "thread/resume",
+        params: { threadId: id },
+      });
+      expect(events).toContainEqual({ kind: "session", sessionId: id });
+    } finally {
+      driver.shutdown();
+      vi.useRealTimers();
+    }
   });
 });

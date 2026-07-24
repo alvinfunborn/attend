@@ -57,6 +57,9 @@ export interface ScheduledCommentPayload extends SchedulePayloadBase {
   anchorKey: string;
   anchorText: string;
   anchorData?: CommentAnchorData;
+  references?: ChatReference[];
+  /** Frozen when scheduled so the quoted comment context cannot drift. */
+  referenceContext?: string;
   contextMessages?: unknown[];
   createdWhileGenerating?: boolean;
   model?: string;

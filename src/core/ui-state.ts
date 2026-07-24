@@ -24,6 +24,8 @@ export interface VaultUiState {
   sessionNotes?: Record<string, UiTextItem[]>;
   /** User-authored todos grouped by stable session identity. */
   sessionTodos?: Record<string, UiTodoItem[]>;
+  /** Scope-local todos that have not been attached to a session yet. */
+  inboxTodos?: UiTodoItem[];
   /** Lightweight UI mirror for provider-native Goals (Claude needs this across reloads). */
   sessionGoals?: Record<string, UiSessionGoal>;
   pins?: Record<string, unknown[]>;
@@ -32,6 +34,8 @@ export interface VaultUiState {
   sessionTitles?: Record<string, string>;
   /** child provider session id -> parent provider session id */
   forkParents?: Record<string, string>;
+  /** User-arranged chat tab groups, keyed by a stable group id and shared across scopes. */
+  chatGroups?: Record<string, UiChatGroup>;
   /** Absolute project directory -> last successful new-session launch time. */
   recentDirectories?: Record<string, number>;
   /** Hidden provider sessions attached as comment threads to transcript messages. */
@@ -42,6 +46,7 @@ interface PersistedScopeUiState {
   focusViews?: unknown[];
   pinnedTags?: string[];
   hiddenTags?: string[];
+  inboxTodos?: UiTodoItem[];
 }
 
 interface PersistedVaultUiState extends VaultUiState {
@@ -67,12 +72,25 @@ export interface VaultUiStatePatch {
   shortcuts?: UiTextItem[];
   sessionNotes?: Record<string, UiTextItem[] | null>;
   sessionTodos?: Record<string, UiTodoItem[] | null>;
+  inboxTodos?: UiTodoItem[];
   sessionGoals?: Record<string, UiSessionGoal | null>;
   pins?: Record<string, unknown[] | null>;
   sessionPins?: Record<string, number | null>;
   sessionTitles?: Record<string, string | null>;
   forkParents?: Record<string, string | null>;
+  chatGroups?: Record<string, UiChatGroup | null>;
   commentThreads?: Record<string, CommentThreadState | null>;
+}
+
+export interface UiChatGroupMember {
+  vendor: string;
+  sessionId: string;
+}
+
+export interface UiChatGroup {
+  id: string;
+  members: UiChatGroupMember[];
+  updatedAt: number;
 }
 
 export interface UiTextItem {
@@ -110,6 +128,8 @@ export interface CommentThreadState {
   createdAt: number;
   /** Latest user-authored turn in this thread; attributed to the parent for recent sorting. */
   lastUserMessageAt?: number;
+  /** Latest user-authored text, used as the temporary title if this thread is promoted. */
+  lastUserText?: string;
   createdWhileGenerating?: boolean;
   status?: "scheduled" | "generating" | "unread" | "read" | "failed";
   messageCount?: number;
@@ -172,11 +192,13 @@ export class VaultUiStateStore {
       focusViews: legacyFocusViews,
       pinnedTags: legacyPinnedTags,
       hiddenTags: legacyHiddenTags,
+      inboxTodos: legacyInboxTodos,
       ...shared
     } = state;
     const focusViews = this.scopeFocusViews(state, legacyFocusViews);
     const pinnedTags = this.scopeTagDisplayState(state, "pinnedTags", legacyPinnedTags);
     const hiddenTags = this.scopeTagDisplayState(state, "hiddenTags", legacyHiddenTags);
+    const inboxTodos = this.scopeInboxTodos(state, legacyInboxTodos);
     return structuredClone({
       ...shared,
       ...(composerText
@@ -189,6 +211,7 @@ export class VaultUiStateStore {
       ...(Array.isArray(focusViews) ? { focusViews } : {}),
       ...(Array.isArray(pinnedTags) ? { pinnedTags } : {}),
       ...(Array.isArray(hiddenTags) ? { hiddenTags } : {}),
+      ...(Array.isArray(inboxTodos) ? { inboxTodos } : {}),
     });
   }
 
@@ -204,6 +227,8 @@ export class VaultUiStateStore {
           member.pinnedTags = [...combined.pinnedTags];
         if (!Object.prototype.hasOwnProperty.call(member, "hiddenTags") && combined.hiddenTags)
           member.hiddenTags = [...combined.hiddenTags];
+        if (!Object.prototype.hasOwnProperty.call(member, "inboxTodos") && combined.inboxTodos)
+          member.inboxTodos = structuredClone(combined.inboxTodos);
         state.scopes[memberScopeId] = member;
       }
       const { [this.scopeId]: _combined, ...memberScopes } = state.scopes;
@@ -257,6 +282,27 @@ export class VaultUiStateStore {
     return scoped && Object.prototype.hasOwnProperty.call(scoped, key) ? scoped[key] : legacy;
   }
 
+  private scopeInboxTodos(
+    state: PersistedVaultUiState,
+    legacy: UiTodoItem[] | undefined,
+  ): UiTodoItem[] | undefined {
+    if (!this.memberScopeIds.length) {
+      const scoped = state.scopes?.[this.scopeId];
+      return scoped && Object.prototype.hasOwnProperty.call(scoped, "inboxTodos")
+        ? scoped.inboxTodos
+        : legacy;
+    }
+    let found = false;
+    let merged: UiTodoItem[] = [];
+    for (const memberScopeId of this.memberScopeIds) {
+      const member = state.scopes?.[memberScopeId];
+      if (!member || !Object.prototype.hasOwnProperty.call(member, "inboxTodos")) continue;
+      found = true;
+      merged = mergeTextItemLists(merged, member.inboxTodos, true);
+    }
+    return found ? merged : legacy;
+  }
+
   patch(next: VaultUiStatePatch): VaultUiState {
     this.data.update((state) => {
       if (next.theme === "light" || next.theme === "dark") state.theme = next.theme;
@@ -264,7 +310,8 @@ export class VaultUiStateStore {
         Array.isArray(next.focusViews) ||
         next.focusViewPatch ||
         Array.isArray(next.pinnedTags) ||
-        Array.isArray(next.hiddenTags)
+        Array.isArray(next.hiddenTags) ||
+        Array.isArray(next.inboxTodos)
       ) {
         state.scopes ??= {};
         if (Array.isArray(next.focusViews) || next.focusViewPatch) {
@@ -292,6 +339,14 @@ export class VaultUiStateStore {
             state.scopes[tagScopeId] = scoped;
           }
         }
+        if (Array.isArray(next.inboxTodos)) {
+          const inboxScopeIds = this.memberScopeIds.length ? this.memberScopeIds : [this.scopeId];
+          for (const inboxScopeId of inboxScopeIds) {
+            const scoped = state.scopes[inboxScopeId] ?? {};
+            scoped.inboxTodos = cleanTodoItems(next.inboxTodos);
+            state.scopes[inboxScopeId] = scoped;
+          }
+        }
       }
       if (next.modelPrefs && typeof next.modelPrefs === "object")
         state.modelPrefs = patchUnknownRecord(state.modelPrefs, next.modelPrefs);
@@ -316,6 +371,8 @@ export class VaultUiStateStore {
         state.sessionTitles = patchStringRecord(state.sessionTitles, next.sessionTitles);
       if (next.forkParents && typeof next.forkParents === "object")
         state.forkParents = patchStringRecord(state.forkParents, next.forkParents);
+      if (next.chatGroups && typeof next.chatGroups === "object")
+        state.chatGroups = patchChatGroups(state.chatGroups, next.chatGroups);
       if (next.commentThreads && typeof next.commentThreads === "object")
         state.commentThreads = patchCommentThreads(state.commentThreads, next.commentThreads);
       return undefined;
@@ -610,6 +667,60 @@ function patchSessionRunConfigs(
   return out;
 }
 
+const MAX_CHAT_GROUPS = 256;
+const MAX_CHAT_GROUP_MEMBERS = 64;
+
+function cleanChatGroup(rawId: string, value: unknown): UiChatGroup | null {
+  const id = rawId.trim();
+  if (!id || !value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Partial<UiChatGroup>;
+  const members: UiChatGroupMember[] = [];
+  const seen = new Set<string>();
+  for (const raw of Array.isArray(input.members) ? input.members : []) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const vendor = String((raw as Partial<UiChatGroupMember>).vendor ?? "")
+      .trim()
+      .toLowerCase();
+    const sessionId = String((raw as Partial<UiChatGroupMember>).sessionId ?? "").trim();
+    const key = `${vendor}\0${sessionId}`;
+    if (!vendor || !sessionId || seen.has(key)) continue;
+    seen.add(key);
+    members.push({ vendor, sessionId });
+    if (members.length >= MAX_CHAT_GROUP_MEMBERS) break;
+  }
+  if (members.length < 2) return null;
+  const updatedAt = Number(input.updatedAt);
+  return { id, members, updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 1 };
+}
+
+function cleanChatGroups(input: Record<string, unknown>): Record<string, UiChatGroup> {
+  const groups: UiChatGroup[] = [];
+  for (const [rawId, value] of Object.entries(input)) {
+    const group = cleanChatGroup(rawId, value);
+    if (group) groups.push(group);
+  }
+  groups.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+  return Object.fromEntries(groups.slice(0, MAX_CHAT_GROUPS).map((group) => [group.id, group]));
+}
+
+function patchChatGroups(
+  current: Record<string, UiChatGroup> | undefined,
+  patch: Record<string, UiChatGroup | null>,
+): Record<string, UiChatGroup> {
+  const out = structuredClone(current ?? {});
+  for (const [rawId, value] of Object.entries(patch)) {
+    const id = rawId.trim();
+    if (!id) continue;
+    if (value === null) delete out[id];
+    else {
+      const group = cleanChatGroup(id, value);
+      if (group) out[id] = group;
+      else delete out[id];
+    }
+  }
+  return cleanChatGroups(out);
+}
+
 function normalizeUiState(value: unknown): PersistedVaultUiState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const input = value as VaultUiState;
@@ -628,6 +739,7 @@ function normalizeUiState(value: unknown): PersistedVaultUiState {
     ...(Array.isArray(input.hiddenTags) && cleanPinnedTags(input.hiddenTags).length
       ? { hiddenTags: cleanPinnedTags(input.hiddenTags) }
       : {}),
+    ...(Array.isArray(input.inboxTodos) ? { inboxTodos: cleanTodoItems(input.inboxTodos) } : {}),
     ...(Array.isArray(input.shortcuts) ? { shortcuts: cleanTextItems(input.shortcuts) } : {}),
     ...(input.sessionNotes && typeof input.sessionNotes === "object"
       ? { sessionNotes: cleanTextItemRecord(input.sessionNotes, false) }
@@ -647,6 +759,9 @@ function normalizeUiState(value: unknown): PersistedVaultUiState {
       : {}),
     ...(input.forkParents && typeof input.forkParents === "object"
       ? { forkParents: cleanStringRecord(input.forkParents) }
+      : {}),
+    ...(input.chatGroups && typeof input.chatGroups === "object"
+      ? { chatGroups: cleanChatGroups(input.chatGroups) }
       : {}),
     ...(input.recentDirectories && typeof input.recentDirectories === "object"
       ? {
@@ -834,6 +949,7 @@ function cleanScopes(
     if (Array.isArray(raw.focusViews)) scoped.focusViews = structuredClone(raw.focusViews);
     if (Array.isArray(raw.pinnedTags)) scoped.pinnedTags = cleanPinnedTags(raw.pinnedTags);
     if (Array.isArray(raw.hiddenTags)) scoped.hiddenTags = cleanPinnedTags(raw.hiddenTags);
+    if (Array.isArray(raw.inboxTodos)) scoped.inboxTodos = cleanTodoItems(raw.inboxTodos);
     if (Object.keys(scoped).length) scopes[id] = scoped;
   }
   return Object.keys(scopes).length ? { scopes } : {};
@@ -867,6 +983,9 @@ function cleanCommentThreads(
       createdAt: Number(raw.createdAt) || Date.now(),
       ...(Number.isFinite(Number(raw.lastUserMessageAt)) && Number(raw.lastUserMessageAt) > 0
         ? { lastUserMessageAt: Number(raw.lastUserMessageAt) }
+        : {}),
+      ...(typeof raw.lastUserText === "string" && raw.lastUserText.trim()
+        ? { lastUserText: raw.lastUserText.trim().slice(0, 20_000) }
         : {}),
       ...(raw.createdWhileGenerating ? { createdWhileGenerating: true } : {}),
       ...(raw.status === "scheduled" ||

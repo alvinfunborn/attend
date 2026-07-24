@@ -13,6 +13,19 @@ function jsonl(...lines: object[]): string {
 }
 
 describe("parseCodexTranscript (RolloutLine schema)", () => {
+  it("retains the exact active turn id until its terminal event", () => {
+    const raw = jsonl({
+      timestamp: "2026-05-01T10:00:00Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-live", started_at: 1_778_234_400 },
+    });
+    expect(parseCodexTranscript("rollout.jsonl", raw)).toMatchObject({
+      active: true,
+      activeTurnId: "turn-live",
+      activeStartedAt: 1_778_234_400_000,
+    });
+  });
+
   it("restores the latest turn's model and effort from turn_context", () => {
     const raw = jsonl(
       {

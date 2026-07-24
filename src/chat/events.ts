@@ -16,6 +16,14 @@ export type UiEvent =
       goal?: boolean;
       startedAt?: number;
     }
+  | {
+      kind: "queued_turn_steered";
+      queueId: string;
+      text: string;
+      attachments?: ChatAttachment[];
+      references?: ChatReference[];
+      steeredAt?: number;
+    }
   | { kind: "assistant_text"; text: string }
   | { kind: "tool_use"; id: string | null; name: string; input: unknown }
   | { kind: "tool_result"; id: string | null; text: string; isError: boolean }

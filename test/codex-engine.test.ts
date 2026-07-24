@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CodexEngine } from "../src/chat/codex/engine.js";
 import type { CodexEvent } from "../src/chat/codex/events.js";
 import type { CodexExecFn, CodexExecRequest } from "../src/chat/codex/exec.js";
@@ -461,6 +461,29 @@ describe("CodexEngine", () => {
     await b.start({ cwd: ".", firstText: "go" });
     await new Promise((r) => setTimeout(r, 20));
     expect(b.activeSessions()).toHaveLength(0);
+  });
+
+  it("drops an idle process-backed session after the shared TTL and resumes it on demand", async () => {
+    vi.useFakeTimers();
+    const { fn, calls } = fakeExec([turn("cursor-idle", "one"), turn("cursor-idle", "two")]);
+    const engine = new CodexEngine(fn, "workspace-write", () => null, "cursor", undefined, 1_000);
+    try {
+      const id = await engine.start({ cwd: ".", firstText: "first" });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(engine.activeSessions()).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(engine.get(id)).toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(engine.get(id)).toBeUndefined();
+
+      await engine.start({ cwd: ".", resume: id, firstText: "second" });
+      expect(calls[1]).toMatchObject({ resume: id, prompt: "second" });
+    } finally {
+      engine.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   it("forks into a new thread id (copy the parent, resume the copy) and diverges there", async () => {

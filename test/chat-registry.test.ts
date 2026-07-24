@@ -26,6 +26,12 @@ class FakeDriver implements ChatDriver {
   send(_sessionId: string, _turn: UserTurn): boolean {
     return false;
   }
+  canSteer(_sessionId: string): boolean {
+    return false;
+  }
+  steer(_sessionId: string, _turn: UserTurn): Promise<boolean> {
+    return Promise.resolve(false);
+  }
   answer(_sessionId: string, _answer: ToolAnswer): boolean {
     return false;
   }

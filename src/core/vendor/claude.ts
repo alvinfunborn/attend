@@ -4,7 +4,8 @@ import { visiblePromptText } from "../../chat/transcript.js";
 import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
 import type { SessionSource } from "./index.js";
-import { ScanCache } from "./scan-cache.js";
+import { type IncrementalJsonlParser, ScanCache } from "./scan-cache.js";
+import type { TranscriptPathWriter } from "./transcript-index.js";
 
 /** Tool uses that count as productive "actions". */
 const ACTION_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "Bash", "PowerShell"]);
@@ -97,9 +98,13 @@ function assistantText(content: unknown): number {
   return n;
 }
 
-/** Parse one Claude transcript's text into a normalized session (pure, testable). */
-export function parseClaudeTranscript(file: string, raw: string): RawSession {
-  const session: RawSession = {
+interface ClaudeSessionState {
+  session: RawSession;
+  previousTs: number | null;
+}
+
+function emptyClaudeSession(file: string): RawSession {
+  return {
     path: file,
     vendor: "claude",
     sessionId: null,
@@ -117,90 +122,85 @@ export function parseClaudeTranscript(file: string, raw: string): RawSession {
     actions: 0,
     visits: 0,
   };
-  const gapMs = VISIT_GAP_MINUTES * 60_000;
-  let prevTs: number | null = null;
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let obj: JsonlEntry;
-    try {
-      obj = JSON.parse(line) as JsonlEntry;
-    } catch {
-      continue;
-    }
-    if (session.cwd === null && obj.cwd) session.cwd = obj.cwd;
-    if (session.sessionId === null && obj.sessionId) session.sessionId = obj.sessionId;
-    const ts = isActivityEntry(obj) ? parseTs(obj.timestamp) : null;
-    if (ts !== null) {
-      if (session.firstTs === null) session.firstTs = ts;
-      session.lastTs = ts;
-      // A fresh burst (first activity, or resumed after a long idle gap) = a visit.
-      if (prevTs === null || ts - prevTs > gapMs) session.visits += 1;
-      prevTs = ts;
-    }
-    // Skip subagent sidechain turns — they are not the user's direct prompts
-    // and their tool uses shouldn't inflate the brief's action count.
-    if (obj.isSidechain) continue;
-    if (obj.isMeta) continue;
-    if (obj.type === "user") {
-      const text = userPromptText(obj.message?.content);
-      if (text !== null) {
-        if (ts !== null) {
-          session.userPromptTs?.push(ts);
-          session.userPromptActivity?.push({ at: ts, chars: text.length });
-        }
-        session.prompts += 1;
-        session.chars += text.length;
-        if (session.title === null) session.title = snippet(text);
-        session.lastPrompt = snippet(text); // keep overwriting → ends as the latest prompt
-      }
-    } else if (obj.type === "assistant") {
-      const model = configValue(obj.message?.model);
-      const speed = configValue(obj.message?.usage?.speed);
-      if (model || speed) {
-        session.runConfig = {
-          source: "provider",
-          ...(session.runConfig ?? {}),
-          ...(ts !== null ? { updatedAt: ts } : {}),
-          ...(model ? { model } : {}),
-          ...(speed ? { speed } : {}),
-        };
-      }
-      session.actions += countActions(obj.message?.content);
-      const txt = assistantText(obj.message?.content);
-      session.chars += txt;
-      if (txt > 0) {
-        session.lastTurnChars = txt;
-        if (ts !== null) {
-          session.lastAssistantTs = ts;
-          session.assistantTextActivity?.push({ at: ts, chars: txt });
-        }
-      }
-    }
-  }
-  return session;
 }
 
-function parseSessionFile(file: string): RawSession {
+function createClaudeState(file: string): ClaudeSessionState {
+  return { session: emptyClaudeSession(file), previousTs: null };
+}
+
+function appendClaudeLine(state: ClaudeSessionState, line: string): void {
+  let obj: JsonlEntry;
   try {
-    return parseClaudeTranscript(file, fs.readFileSync(file, "utf-8"));
+    obj = JSON.parse(line) as JsonlEntry;
   } catch {
-    return {
-      path: file,
-      vendor: "claude",
-      sessionId: null,
-      title: null,
-      lastPrompt: null,
-      lastTurnChars: 0,
-      chars: 0,
-      cwd: null,
-      firstTs: null,
-      lastTs: null,
-      userPromptTs: [],
-      prompts: 0,
-      actions: 0,
-      visits: 0,
-    };
+    return;
   }
+  const session = state.session;
+  if (session.cwd === null && obj.cwd) session.cwd = obj.cwd;
+  if (session.sessionId === null && obj.sessionId) session.sessionId = obj.sessionId;
+  const ts = isActivityEntry(obj) ? parseTs(obj.timestamp) : null;
+  if (ts !== null) {
+    if (session.firstTs === null) session.firstTs = ts;
+    session.lastTs = ts;
+    // A fresh burst (first activity, or resumed after a long idle gap) = a visit.
+    if (state.previousTs === null || ts - state.previousTs > VISIT_GAP_MINUTES * 60_000) {
+      session.visits += 1;
+    }
+    state.previousTs = ts;
+  }
+  // Skip subagent sidechain turns — they are not the user's direct prompts
+  // and their tool uses shouldn't inflate the brief's action count.
+  if (obj.isSidechain || obj.isMeta) return;
+  if (obj.type === "user") {
+    const text = userPromptText(obj.message?.content);
+    if (text !== null) {
+      if (ts !== null) {
+        session.userPromptTs?.push(ts);
+        session.userPromptActivity?.push({ at: ts, chars: text.length });
+      }
+      session.prompts += 1;
+      session.chars += text.length;
+      if (session.title === null) session.title = snippet(text);
+      session.lastPrompt = snippet(text);
+    }
+  } else if (obj.type === "assistant") {
+    const model = configValue(obj.message?.model);
+    const speed = configValue(obj.message?.usage?.speed);
+    if (model || speed) {
+      session.runConfig = {
+        source: "provider",
+        ...(session.runConfig ?? {}),
+        ...(ts !== null ? { updatedAt: ts } : {}),
+        ...(model ? { model } : {}),
+        ...(speed ? { speed } : {}),
+      };
+    }
+    session.actions += countActions(obj.message?.content);
+    const chars = assistantText(obj.message?.content);
+    session.chars += chars;
+    if (chars > 0) {
+      session.lastTurnChars = chars;
+      if (ts !== null) {
+        session.lastAssistantTs = ts;
+        session.assistantTextActivity?.push({ at: ts, chars });
+      }
+    }
+  }
+}
+
+const claudeJsonlParser: IncrementalJsonlParser<ClaudeSessionState> = {
+  create: createClaudeState,
+  append: appendClaudeLine,
+  snapshot: (state) => state.session,
+};
+
+/** Parse one Claude transcript's text into a normalized session (pure, testable). */
+export function parseClaudeTranscript(file: string, raw: string): RawSession {
+  const state = createClaudeState(file);
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.trim()) appendClaudeLine(state, line);
+  }
+  return state.session;
 }
 
 /** Reads Claude Code transcripts at ~/.claude/projects/<encoded-cwd>/*.jsonl. */
@@ -210,12 +210,13 @@ export class ClaudeSource implements SessionSource {
   constructor(
     private readonly projectsDir: string,
     private readonly cache = new ScanCache(),
+    private readonly transcriptIndex?: TranscriptPathWriter,
   ) {}
 
   scan(): RawSession[] {
-    // Walk + stat is cheap; the cache re-parses only transcripts whose mtime/size
-    // changed since the last scan (see ScanCache).
-    return this.cache.memoize(this.listTranscripts(), parseSessionFile);
+    const sessions = this.cache.memoizeJsonl(this.listTranscripts(), claudeJsonlParser);
+    this.transcriptIndex?.replaceVendor(this.vendor, sessions);
+    return sessions;
   }
 
   private listTranscripts(): string[] {

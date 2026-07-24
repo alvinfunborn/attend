@@ -18,6 +18,7 @@ import type {
   UserTurn,
 } from "../driver.js";
 import type { UiEvent } from "../events.js";
+import { IdleSessionTimers, SESSION_IDLE_TTL_MS } from "../idle-sessions.js";
 import { providerErrorPayload } from "../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../runtime.js";
 import { classifyClaudeError } from "./errors.js";
@@ -186,11 +187,15 @@ export class ClaudeSdkDriver implements ChatDriver {
     isActive: (run) => run.turnActive && !run.done,
     shouldReplay: (run) => run.turnActive || !!run.awaitingQuestionToolUseId,
   });
+  private readonly idle: IdleSessionTimers;
 
   constructor(
     private readonly queryFn: QueryFn,
     private readonly stallTimeoutMs: number = STALL_TIMEOUT_MS,
-  ) {}
+    idleTtlMs = SESSION_IDLE_TTL_MS,
+  ) {
+    this.idle = new IdleSessionTimers(idleTtlMs);
+  }
 
   onTurnEnd(listener: (sessionId: string) => void): () => void {
     return this.runtime.onTurnEnd(listener);
@@ -216,6 +221,7 @@ export class ClaudeSdkDriver implements ChatDriver {
   }
 
   shutdown(): void {
+    this.idle.clear();
     this.runtime.clearPending();
     for (const run of new Set(this.runtime.values())) {
       run.input.close();
@@ -224,6 +230,7 @@ export class ClaudeSdkDriver implements ChatDriver {
   }
 
   start(opts: StartOpts): Promise<string> {
+    if (opts.resume && !opts.forkSession) this.idle.cancel(opts.resume);
     if (opts.resume && !opts.forkSession) {
       const previous = this.runtime.get(opts.resume);
       if (previous && !previous.turnActive && !previous.done) {
@@ -316,6 +323,7 @@ export class ClaudeSdkDriver implements ChatDriver {
           this.scheduleStall(run);
           run.emitter.emit("done");
           if (run.sessionId) {
+            if (this.runtime.get(run.sessionId) === run) this.idle.cancel(run.sessionId);
             settle(run.sessionId);
             this.runtime.pruneInactive();
           } else if (!resolved) {
@@ -329,6 +337,7 @@ export class ClaudeSdkDriver implements ChatDriver {
   send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runtime.get(sessionId);
     if (!run || run.done || run.turnActive || run.awaitingQuestionToolUseId) return false;
+    this.idle.cancel(sessionId);
     run.events = [];
     run.turnActive = true;
     run.turnStartedAt = Date.now();
@@ -337,9 +346,24 @@ export class ClaudeSdkDriver implements ChatDriver {
     return true;
   }
 
+  canSteer(sessionId: string): boolean {
+    const run = this.runtime.get(sessionId);
+    return !!run && !run.done && run.turnActive && !run.awaitingQuestionToolUseId;
+  }
+
+  steer(sessionId: string, turn: UserTurn): Promise<boolean> {
+    const run = this.runtime.get(sessionId);
+    if (!run || !this.canSteer(sessionId)) return Promise.resolve(false);
+    this.idle.cancel(sessionId);
+    run.input.pushTurn(turn);
+    this.scheduleStall(run);
+    return Promise.resolve(true);
+  }
+
   answer(sessionId: string, answer: ToolAnswer): boolean {
     const run = this.runtime.get(sessionId);
     if (!run || run.done) return false;
+    this.idle.cancel(sessionId);
     run.awaitingQuestionToolUseId = null;
     run.events = [];
     run.turnActive = true;
@@ -381,8 +405,25 @@ export class ClaudeSdkDriver implements ChatDriver {
       run.awaitingQuestionToolUseId = event.id;
     }
     this.runtime.publish(run, event);
+    if (event.kind === "session" || event.kind === "result" || event.kind === "error") {
+      this.scheduleIdle(run);
+    }
     this.scheduleStall(run);
     return true;
+  }
+
+  private scheduleIdle(run: ClaudeRun): void {
+    const sessionId = run.sessionId;
+    if (!sessionId || run.done || run.turnActive || run.awaitingQuestionToolUseId) return;
+    this.idle.arm(sessionId, () => this.releaseIdle(run));
+  }
+
+  private releaseIdle(run: ClaudeRun): void {
+    const sessionId = run.sessionId;
+    if (!sessionId || run.done || run.turnActive || run.awaitingQuestionToolUseId) return;
+    if (!this.runtime.release(sessionId, run)) return;
+    run.done = true;
+    run.input.close();
   }
 
   private scheduleStall(run: ClaudeRun): void {

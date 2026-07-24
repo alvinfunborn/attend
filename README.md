@@ -67,8 +67,8 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 Supported sessions created by Attend receive a short `brief`, `state`, `priority`, `etaMin`, and
 `reason` after each turn. The analyzer may also provide two editable messages:
 
-- `nextStep`: predicts the most likely next user message. With an empty, focused composer, it
-  appears as ghost text that Tab accepts.
+- `nextStep`: predicts the most likely next user message. With an empty composer, it appears as
+  ghost text even before focus; once focused, Tab accepts it.
 - `probe`: questions, explains, or verifies something specific in the latest turn. It appears beside
   `todo` and fills the composer when clicked.
 

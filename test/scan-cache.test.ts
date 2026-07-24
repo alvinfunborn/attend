@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RawSession } from "../src/core/types.js";
-import { ScanCache } from "../src/core/vendor/scan-cache.js";
+import { type IncrementalJsonlParser, ScanCache } from "../src/core/vendor/scan-cache.js";
 
 function stub(file: string): RawSession {
   return {
@@ -20,6 +20,30 @@ function stub(file: string): RawSession {
     prompts: 0,
     actions: 0,
     visits: 0,
+  };
+}
+
+interface LineState {
+  file: string;
+  values: string[];
+}
+
+function incrementalParser(
+  created: string[],
+  appended: string[],
+): IncrementalJsonlParser<LineState> {
+  return {
+    create(file) {
+      created.push(file);
+      return { file, values: [] };
+    },
+    append(state, line) {
+      appended.push(line);
+      state.values.push(String((JSON.parse(line) as { value: unknown }).value));
+    },
+    snapshot(state) {
+      return { ...stub(state.file), title: state.values.join(",") };
+    },
   };
 }
 
@@ -76,5 +100,63 @@ describe("ScanCache", () => {
     expect(cache.memoize([s], read)).toEqual([]);
     expect(cache.memoize([s], read)).toEqual([]);
     expect(reads).toEqual([s]);
+  });
+
+  it("feeds only appended JSONL records to an existing parser state", () => {
+    const file = path.join(dir, "growing.jsonl");
+    fs.writeFileSync(file, JSON.stringify({ value: "one" }));
+    const created: string[] = [];
+    const appended: string[] = [];
+    const cache = new ScanCache();
+    const parser = incrementalParser(created, appended);
+
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("one");
+    expect(created).toEqual([file]);
+    expect(appended).toHaveLength(1);
+
+    fs.appendFileSync(file, `\n${JSON.stringify({ value: "two" })}`);
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("one,two");
+    expect(created).toEqual([file]);
+    expect(appended).toHaveLength(2);
+
+    cache.memoizeJsonl([file], parser);
+    expect(appended).toHaveLength(2);
+  });
+
+  it("waits for an incomplete final record and consumes it after append", () => {
+    const file = path.join(dir, "partial.jsonl");
+    fs.writeFileSync(file, `${JSON.stringify({ value: "one" })}\n{"value":`);
+    const created: string[] = [];
+    const appended: string[] = [];
+    const cache = new ScanCache();
+    const parser = incrementalParser(created, appended);
+
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("one");
+    expect(appended).toHaveLength(1);
+
+    fs.appendFileSync(file, '"two"}\n');
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("one,two");
+    expect(created).toEqual([file]);
+    expect(appended).toHaveLength(2);
+  });
+
+  it("rebuilds state after truncate or an in-place rewrite", () => {
+    const file = path.join(dir, "rewritten.jsonl");
+    const created: string[] = [];
+    const appended: string[] = [];
+    const cache = new ScanCache();
+    const parser = incrementalParser(created, appended);
+    fs.writeFileSync(
+      file,
+      [JSON.stringify({ value: "old-one" }), JSON.stringify({ value: "old-two" })].join("\n"),
+    );
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("old-one,old-two");
+
+    fs.writeFileSync(file, JSON.stringify({ value: "short" }));
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("short");
+
+    fs.writeFileSync(file, JSON.stringify({ value: "replacement-that-is-longer" }));
+    expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("replacement-that-is-longer");
+    expect(created).toEqual([file, file, file]);
   });
 });

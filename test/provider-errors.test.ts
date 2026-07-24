@@ -51,6 +51,21 @@ describe("provider errors", () => {
       message: "You've hit your usage limit. Try again tomorrow.",
       retryable: true,
     });
+    expect(
+      classifyCodexError({
+        message: "You have 0 weighted tokens left",
+        codexErrorInfo: "usageLimitExceeded",
+        additionalDetails: null,
+      }),
+    ).toEqual({
+      code: "codex_usage_limit",
+      vendor: "codex",
+      message: "You have 0 weighted tokens left",
+      retryable: true,
+    });
+    expect(providerErrorPayload(undefined, { message: "structured failure" })).toEqual({
+      message: "structured failure",
+    });
   });
 
   it("classifies Cursor authentication and usage-limit errors", () => {

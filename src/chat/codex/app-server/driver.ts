@@ -8,6 +8,7 @@ import type {
   UserTurn,
 } from "../../driver.js";
 import type { UiEvent } from "../../events.js";
+import { IdleSessionTimers, SESSION_IDLE_TTL_MS } from "../../idle-sessions.js";
 import { InteractionBroker } from "../../interactions.js";
 import { providerErrorPayload } from "../../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../../runtime.js";
@@ -32,10 +33,11 @@ interface CodexRun extends DriverRun {
   effort?: string;
   speed?: string;
   turnId: string | null;
+  turnReady: Promise<void> | null;
   interruptRequested: boolean;
   interactions: InteractionBroker<ToolAnswer>;
   streamedMessages: Set<string>;
-  cleanupInput: (() => void) | null;
+  cleanupInputs: Set<() => void>;
 }
 
 interface ThreadResponse {
@@ -79,11 +81,16 @@ export class CodexAppServerDriver implements ChatDriver {
     shouldReplay: (run) => run.turnActive || run.interactions.size > 0,
   });
   private readonly unsubscribe: () => void;
+  private readonly idle: IdleSessionTimers;
   private readonly starts = new Map<string, Promise<string>>();
   private readonly pendingInterrupts = new Set<string>();
 
-  constructor(private readonly client: AppServerClientLike = new CodexAppServerClient()) {
+  constructor(
+    private readonly client: AppServerClientLike = new CodexAppServerClient(),
+    idleTtlMs = SESSION_IDLE_TTL_MS,
+  ) {
     this.unsubscribe = client.onMessage((message) => this.receive(message));
+    this.idle = new IdleSessionTimers(idleTtlMs);
   }
 
   onTurnEnd(listener: (sessionId: string) => void): () => void {
@@ -140,14 +147,21 @@ export class CodexAppServerDriver implements ChatDriver {
   }
 
   async start(opts: StartOpts): Promise<string> {
+    if (opts.resume && !opts.forkSession) this.idle.cancel(opts.resume);
     const key = opts.resume && !opts.forkSession ? opts.resume : null;
     if (!key) return this.startOnce(opts);
     const existing = this.starts.get(key);
     if (existing) return existing;
-    const pending = this.startOnce(opts).finally(() => {
-      this.starts.delete(key);
-      this.pendingInterrupts.delete(key);
-    });
+    const pending = this.startOnce(opts)
+      .catch((error) => {
+        const run = this.runtime.get(key);
+        if (run) this.scheduleIdle(run);
+        throw error;
+      })
+      .finally(() => {
+        this.starts.delete(key);
+        this.pendingInterrupts.delete(key);
+      });
     this.starts.set(key, pending);
     return pending;
   }
@@ -192,10 +206,11 @@ export class CodexAppServerDriver implements ChatDriver {
       turnActive: false,
       turnStartedAt: 0,
       turnId: null,
+      turnReady: null,
       interruptRequested: resumeKey ? this.pendingInterrupts.delete(resumeKey) : false,
       interactions: new InteractionBroker<ToolAnswer>(),
       streamedMessages: new Set(),
-      cleanupInput: null,
+      cleanupInputs: new Set(),
     };
     this.runtime.index(sessionId, run);
     this.runtime.publish(run, { kind: "session", sessionId });
@@ -217,6 +232,8 @@ export class CodexAppServerDriver implements ChatDriver {
         this.failTurn(run, error);
         throw error;
       }
+    } else {
+      this.scheduleIdle(run);
     }
     return sessionId;
   }
@@ -224,8 +241,39 @@ export class CodexAppServerDriver implements ChatDriver {
   send(sessionId: string, turn: UserTurn): boolean {
     const run = this.runtime.get(sessionId);
     if (!run || run.turnActive || run.interactions.size > 0) return false;
+    this.idle.cancel(sessionId);
     void this.startTurn(run, turn).catch((error) => this.failTurn(run, error));
     return true;
+  }
+
+  canSteer(sessionId: string): boolean {
+    const run = this.runtime.get(sessionId);
+    return (
+      !!run && run.turnActive && (!!run.turnId || !!run.turnReady) && run.interactions.size === 0
+    );
+  }
+
+  async steer(sessionId: string, turn: UserTurn): Promise<boolean> {
+    const run = this.runtime.get(sessionId);
+    if (!run || !this.canSteer(sessionId)) return false;
+    if (run.turnReady) await run.turnReady;
+    if (!this.canSteer(sessionId) || !run.turnId) return false;
+    this.idle.cancel(sessionId);
+    const expectedTurnId = run.turnId;
+    const prepared = this.prepareTurnInput(turn);
+    run.cleanupInputs.add(prepared.cleanup);
+    try {
+      await this.client.request("turn/steer", {
+        threadId: sessionId,
+        input: prepared.input,
+        expectedTurnId,
+      });
+      return true;
+    } catch {
+      run.cleanupInputs.delete(prepared.cleanup);
+      prepared.cleanup();
+      return false;
+    }
   }
 
   answer(sessionId: string, answer: ToolAnswer): boolean {
@@ -233,18 +281,20 @@ export class CodexAppServerDriver implements ChatDriver {
     return !!run && run.interactions.answer(answer.toolUseId, answer);
   }
 
-  async interrupt(sessionId: string): Promise<boolean> {
+  async interrupt(sessionId: string, options?: { turnId?: string | null }): Promise<boolean> {
     const run = this.runtime.get(sessionId);
     if (!run) {
       if (this.starts.has(sessionId)) {
         this.pendingInterrupts.add(sessionId);
         return true;
       }
-      return this.interruptRemoteTurn(sessionId);
+      return this.interruptRemoteTurn(sessionId, options?.turnId);
     }
     const cancelledInteractions = run.interactions.cancelAll();
     if (!run.turnActive)
-      return cancelledInteractions > 0 || (await this.interruptRemoteTurn(sessionId));
+      return (
+        cancelledInteractions > 0 || (await this.interruptRemoteTurn(sessionId, options?.turnId))
+      );
     if (!run.turnId) {
       run.interruptRequested = true;
       return true;
@@ -256,8 +306,23 @@ export class CodexAppServerDriver implements ChatDriver {
     return true;
   }
 
-  private async interruptRemoteTurn(sessionId: string): Promise<boolean> {
+  private async interruptRemoteTurn(
+    sessionId: string,
+    hintedTurnId?: string | null,
+  ): Promise<boolean> {
     try {
+      if (hintedTurnId) {
+        try {
+          await this.client.request("turn/interrupt", {
+            threadId: sessionId,
+            turnId: hintedTurnId,
+          });
+          return true;
+        } catch {
+          // The scanner can be one event behind a just-finished turn. Fall
+          // through to discover a newer active turn before reporting failure.
+        }
+      }
       const response = await this.client.request<ThreadReadResponse>("thread/read", {
         threadId: sessionId,
         includeTurns: true,
@@ -278,27 +343,47 @@ export class CodexAppServerDriver implements ChatDriver {
 
   shutdown(): void {
     this.unsubscribe();
+    this.idle.clear();
     this.runtime.clearPending();
-    for (const run of this.runtime.values()) run.cleanupInput?.();
+    for (const run of this.runtime.values()) this.cleanupPreparedInputs(run);
     this.client.shutdown();
   }
 
+  private prepareTurnInput(turn: UserTurn): {
+    input: unknown[];
+    cleanup: () => void;
+  } {
+    const prepared = prepareCodexInput(turn.text, turn.attachments);
+    const input: unknown[] = [];
+    if (prepared.prompt) input.push({ type: "text", text: prepared.prompt, text_elements: [] });
+    for (const imagePath of prepared.imagePaths)
+      input.push({ type: "localImage", path: imagePath });
+    return { input, cleanup: prepared.cleanup };
+  }
+
+  private cleanupPreparedInputs(run: CodexRun): void {
+    for (const cleanup of run.cleanupInputs) cleanup();
+    run.cleanupInputs.clear();
+  }
+
   private async startTurn(run: CodexRun, turn: UserTurn): Promise<void> {
+    if (run.sessionId) this.idle.cancel(run.sessionId);
     run.events = [];
     run.streamedMessages.clear();
     run.turnActive = true;
     run.turnStartedAt = Date.now();
-    const prepared = prepareCodexInput(turn.text, turn.attachments);
-    run.cleanupInput?.();
-    run.cleanupInput = prepared.cleanup;
+    const prepared = this.prepareTurnInput(turn);
+    this.cleanupPreparedInputs(run);
+    run.cleanupInputs.add(prepared.cleanup);
+    let markTurnReady = () => {};
+    const turnReady = new Promise<void>((resolve) => {
+      markTurnReady = resolve;
+    });
+    run.turnReady = turnReady;
     try {
-      const input: unknown[] = [];
-      if (prepared.prompt) input.push({ type: "text", text: prepared.prompt, text_elements: [] });
-      for (const imagePath of prepared.imagePaths)
-        input.push({ type: "localImage", path: imagePath });
       const response = await this.client.request<TurnResponse>("turn/start", {
         threadId: run.sessionId,
-        input,
+        input: prepared.input,
         cwd: run.cwd,
         model: run.model,
         effort: run.effort,
@@ -315,9 +400,11 @@ export class CodexAppServerDriver implements ChatDriver {
       }
     } catch (error) {
       run.interruptRequested = false;
-      run.cleanupInput?.();
-      run.cleanupInput = null;
+      this.cleanupPreparedInputs(run);
       throw error;
+    } finally {
+      markTurnReady();
+      if (run.turnReady === turnReady) run.turnReady = null;
     }
   }
 
@@ -364,10 +451,24 @@ export class CodexAppServerDriver implements ChatDriver {
         this.runtime.publish(run, { kind: "goal", goal: null });
         break;
       case "turn/started": {
+        this.idle.cancel(threadId);
         const turn = record(params.turn);
         if (typeof turn.id === "string") run.turnId = turn.id;
         run.turnActive = true;
         if (!run.turnStartedAt) run.turnStartedAt = Date.now();
+        break;
+      }
+      case "error": {
+        // app-server reports terminal provider failures here before (and, in
+        // some versions, without) a useful turn/completed notification. In
+        // particular usageLimitExceeded may be marked willRetry while Codex
+        // backs off internally. Waiting for those retries leaves the UI silent
+        // even though the user already needs to wait for quota reset. Surface
+        // classified account failures immediately; only transient unknown
+        // failures remain silent while the provider retries.
+        const error = record(params.error);
+        const classified = this.classifyError(error);
+        if (run.turnActive && (params.willRetry !== true || classified)) this.failTurn(run, error);
         break;
       }
       case "item/agentMessage/delta": {
@@ -742,15 +843,22 @@ export class CodexAppServerDriver implements ChatDriver {
   }
 
   private turnCompleted(run: CodexRun, turn: AppServerTurn): void {
+    // A non-retrying app-server `error` notification may already have ended and
+    // surfaced this turn. Ignore the trailing completion instead of duplicating
+    // the banner (or replacing its structured usage-limit classification).
+    if (!run.turnActive) {
+      this.scheduleIdle(run);
+      return;
+    }
     run.turnId = null;
+    run.turnReady = null;
     run.interruptRequested = false;
     run.interactions.cancelAll();
-    run.cleanupInput?.();
-    run.cleanupInput = null;
+    this.cleanupPreparedInputs(run);
     if (turn.status === "failed") {
       this.runtime.publish(run, {
         kind: "error",
-        ...providerErrorPayload(this.classifyError, turn.error?.message ?? "codex turn failed"),
+        ...providerErrorPayload(this.classifyError, turn.error ?? "codex turn failed"),
       });
     } else {
       this.runtime.publish(run, {
@@ -759,17 +867,33 @@ export class CodexAppServerDriver implements ChatDriver {
         ...(turn.status === "interrupted" ? { text: "interrupted" } : {}),
       });
     }
+    this.scheduleIdle(run);
   }
 
   private failTurn(run: CodexRun, error: unknown): void {
     run.turnId = null;
+    run.turnReady = null;
     run.interruptRequested = false;
     run.interactions.cancelAll();
-    run.cleanupInput?.();
-    run.cleanupInput = null;
+    this.cleanupPreparedInputs(run);
     this.runtime.publish(run, {
       kind: "error",
       ...providerErrorPayload(this.classifyError, error),
     });
+    this.scheduleIdle(run);
+  }
+
+  private scheduleIdle(run: CodexRun): void {
+    const sessionId = run.sessionId;
+    if (!sessionId || run.turnActive || run.interactions.size > 0) return;
+    this.idle.arm(sessionId, () => this.releaseIdle(run));
+  }
+
+  private releaseIdle(run: CodexRun): void {
+    const sessionId = run.sessionId;
+    if (!sessionId || run.turnActive || run.interactions.size > 0) return;
+    if (!this.runtime.release(sessionId, run)) return;
+    this.cleanupPreparedInputs(run);
+    void this.client.request("thread/unsubscribe", { threadId: sessionId }).catch(() => {});
   }
 }

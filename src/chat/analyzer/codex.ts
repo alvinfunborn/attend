@@ -9,6 +9,7 @@ import {
   parseAvoidancePrompt,
   parseCollaborationLabels,
 } from "../../core/daemon/parse.js";
+import type { TranscriptPathWriter } from "../../core/vendor/transcript-index.js";
 import { toUiEventsFromCodex } from "../codex/events.js";
 import type { CodexExecFn } from "../codex/exec.js";
 import { readCodexTranscript } from "../codex/transcript.js";
@@ -52,6 +53,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
   constructor(
     private readonly codexSessions: string,
     private readonly execFn: CodexExecFn | null,
+    private readonly transcriptIndex?: TranscriptPathWriter,
   ) {}
 
   async spawn(cwd: string): Promise<string | null> {
@@ -79,7 +81,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     uiContext = "",
   ): Promise<AnalyzerVerdict | null> {
     if (!this.execFn) return null;
-    const file = this.findRollout(this.codexSessions, taskId);
+    const file = this.findRollout(taskId);
     // Same rationale as ClaudeAnalyzer: keep the real opening goal available to
     // the condense step so long sessions don't collapse to their final PR/admin step.
     const messages = file ? readCodexTranscript(file, Number.POSITIVE_INFINITY) : [];
@@ -118,7 +120,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     uiContext = "",
   ): Promise<string | null> {
     if (!this.execFn) return null;
-    const file = this.findRollout(this.codexSessions, taskId);
+    const file = this.findRollout(taskId);
     const transcript = file
       ? condenseTranscript(readCodexTranscript(file, Number.POSITIVE_INFINITY))
       : "";
@@ -139,8 +141,16 @@ export class CodexAnalyzer implements SessionAnalyzer {
     return parseAvoidancePrompt(text);
   }
 
-  /** Locate a session's rollout file (`rollout-*-<id>.jsonl`) under the sessions dir. */
-  private findRollout(dir: string, sessionId: string): string | null {
+  /** Resolve from the scanner-owned index; recursively discover only on a cold miss. */
+  private findRollout(sessionId: string): string | null {
+    const indexed = this.transcriptIndex?.get(this.vendor, sessionId);
+    if (indexed) return indexed;
+    const discovered = this.findRolloutIn(this.codexSessions, sessionId);
+    if (discovered) this.transcriptIndex?.set(this.vendor, sessionId, discovered);
+    return discovered;
+  }
+
+  private findRolloutIn(dir: string, sessionId: string): string | null {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -150,7 +160,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
-        const hit = this.findRollout(full, sessionId);
+        const hit = this.findRolloutIn(full, sessionId);
         if (hit) return hit;
       } else if (e.isFile() && e.name.endsWith(".jsonl") && e.name.includes(sessionId)) {
         return full;

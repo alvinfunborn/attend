@@ -115,6 +115,22 @@ const tagPinView: ConsoleView = {
   ],
 };
 
+const tagPickerOrderView: ConsoleView = {
+  ...tagPinView,
+  tags: ["old", "middle", "new"],
+  sessions: [
+    ...tagPinView.sessions,
+    {
+      ...tagPinNewSession,
+      sessionId: "s4",
+      title: "Tag picker target",
+      file: "/tmp/session-4.jsonl",
+      tags: [],
+      userPromptTs: [50],
+    },
+  ],
+};
+
 const hiddenTagsView: ConsoleView = {
   ...tagPinView,
   vaultState: { pinnedTags: ["old"], hiddenTags: ["middle"] },
@@ -228,7 +244,12 @@ const composerRailView: ConsoleView = {
   ...raceView,
   sessions: raceView.sessions.map((session, index) =>
     index === 0
-      ? { ...session, model: "claude-sonnet", effort: "high", speed: "standard" }
+      ? {
+          ...session,
+          model: "claude-sonnet",
+          effort: "high",
+          speed: "standard",
+        }
       : session,
   ),
   vendors: [
@@ -324,7 +345,12 @@ const unavailableVendorView: ConsoleView = {
       message:
         "Codex CLI was not found. Install Codex CLI or the ChatGPT desktop app, then restart Attend.",
     },
-    { vendor: "cursor", available: true, chat: true, version: "2026.07.09-a3815c0" },
+    {
+      vendor: "cursor",
+      available: true,
+      chat: true,
+      version: "2026.07.09-a3815c0",
+    },
   ],
 };
 
@@ -351,7 +377,9 @@ describe("console browser behavior", () => {
   });
 
   it("shares one clock interaction and projects scheduled sessions/comments into existing UI", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     page.setDefaultTimeout(2_000);
     const pageErrors: string[] = [];
     const scheduledBodies: Array<Record<string, unknown>> = [];
@@ -364,13 +392,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(currentPageView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(currentPageView),
+        });
       } else if (url.pathname === "/schedules" && request.method() === "POST") {
         const body = request.postDataJSON() as Record<string, unknown>;
         scheduledBodies.push(body);
@@ -485,7 +518,9 @@ describe("console browser behavior", () => {
     await page.locator("#input").fill("start working immediately");
     await page.locator("#send").click();
     await expect.poll(() => materializedBodies.length).toBe(1);
-    expect(materializedBodies[0]).toMatchObject({ text: "start working immediately" });
+    expect(materializedBodies[0]).toMatchObject({
+      text: "start working immediately",
+    });
     await expect
       .poll(() => page.locator("#msgs").textContent())
       .toContain("start working immediately");
@@ -542,12 +577,36 @@ describe("console browser behavior", () => {
     expect(scheduledBodies[2]).toMatchObject({ kind: "comment" });
     await expect.poll(() => page.locator("#commentQueue .qitem.scheduled").count()).toBe(1);
     expect(await page.locator("#commentQueue").textContent()).toContain("follow up later");
+    const commentFlow = await page.locator(".commentpanel").evaluate((panel) => {
+      const rect = (selector: string) => {
+        const node = panel.querySelector(selector);
+        if (!node) throw new Error(`Missing ${selector}`);
+        const box = node.getBoundingClientRect();
+        return {
+          top: box.top,
+          bottom: box.bottom,
+          position: node.ownerDocument.defaultView?.getComputedStyle(node).position,
+        };
+      };
+      return {
+        messages: rect("#commentMsgs"),
+        queue: rect("#commentQueue"),
+        foot: rect(".commentfoot"),
+      };
+    });
+    expect(commentFlow.messages.bottom).toBeCloseTo(commentFlow.queue.top, 0);
+    expect(commentFlow.queue.bottom).toBeCloseTo(commentFlow.foot.top, 0);
+    expect(commentFlow.messages.position).toBe("static");
+    expect(commentFlow.queue.position).toBe("static");
+    expect(commentFlow.foot.position).toBe("relative");
     expect(pageErrors).toEqual([]);
     await page.close();
   }, 15_000);
 
   it("edits scheduled user messages inline in the queued area", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     const runAt = Date.now() + 60_000;
     let patchedBody: Record<string, unknown> | null = null;
     let releaseRunNow = () => {};
@@ -576,7 +635,9 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
@@ -584,7 +645,10 @@ describe("console browser behavior", () => {
       if (url.pathname === "/") {
         await route.fulfill({
           contentType: "text/html",
-          body: renderConsole({ ...pendingTagView, schedules: [scheduledItem] }),
+          body: renderConsole({
+            ...pendingTagView,
+            schedules: [scheduledItem],
+          }),
         });
       } else if (url.pathname === "/schedules" && request.method() === "PATCH") {
         patchedBody = request.postDataJSON() as Record<string, unknown>;
@@ -593,7 +657,9 @@ describe("console browser behavior", () => {
           payload: { ...scheduledItem.payload, text: String(patchedBody.text) },
           updatedAt: Date.now(),
         };
-        await route.fulfill({ json: { ok: true, item: updated, schedules: [updated] } });
+        await route.fulfill({
+          json: { ok: true, item: updated, schedules: [updated] },
+        });
       } else if (url.pathname === "/schedules/run" && request.method() === "POST") {
         await runNowGate;
         await route.fulfill({
@@ -633,7 +699,9 @@ describe("console browser behavior", () => {
   });
 
   it("selects a Pin with @, excludes tool Pins, and sends a structured reference", async () => {
-    const page = await browser.newPage({ viewport: { width: 390, height: 780 } });
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 780 },
+    });
     const pageErrors: string[] = [];
     let sentBody: Record<string, unknown> | null = null;
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -642,12 +710,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pinReferenceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pinReferenceView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else if (url.pathname === "/chat/send") {
@@ -658,7 +731,87 @@ describe("console browser behavior", () => {
       }
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    const readSessionComment = page.locator('#list .item[data-session-id="s1"] .it-comment');
+    expect(await readSessionComment.isVisible()).toBe(true);
+    expect(await readSessionComment.getAttribute("class")).toContain("read");
+    expect(await readSessionComment.getAttribute("class")).not.toContain("unread");
+    expect(await readSessionComment.getAttribute("class")).not.toContain("generating");
+    expect(await readSessionComment.getAttribute("aria-label")).toBe("1 comment thread");
+    expect(await readSessionComment.locator(".it-comment-icon").count()).toBe(1);
+    const sessionCommentPath = await readSessionComment.locator("svg path").getAttribute("d");
+    expect(
+      await readSessionComment.evaluate((badge) => {
+        const view = badge.ownerDocument.defaultView;
+        if (!view) return null;
+        const probe = badge.ownerDocument.createElement("span");
+        probe.style.color = "var(--status-seen)";
+        badge.appendChild(probe);
+        const style = view.getComputedStyle(badge);
+        const result = {
+          colorMatches: style.color === view.getComputedStyle(probe).color,
+          borderStyle: style.borderStyle,
+          background: style.backgroundColor,
+        };
+        probe.remove();
+        return result;
+      }),
+    ).toEqual({
+      colorMatches: true,
+      borderStyle: "none",
+      background: "rgba(0, 0, 0, 0)",
+    });
+    await readSessionComment.hover();
+    await expect
+      .poll(() =>
+        readSessionComment.evaluate((badge) => {
+          const view = badge.ownerDocument.defaultView;
+          if (!view) return false;
+          const probe = badge.ownerDocument.createElement("span");
+          probe.style.background = "var(--status-seen-soft)";
+          probe.style.position = "fixed";
+          probe.style.left = "-9999px";
+          badge.ownerDocument.body.appendChild(probe);
+          const expected = view.getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return view.getComputedStyle(badge).backgroundColor === expected;
+        }),
+      )
+      .toBe(true);
     await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+
+    const pinnedMessage = page.locator("#pinTray .pinitem").first();
+    const pinComments = page.locator("#pinTray .pincomment");
+    expect(await pinComments.count()).toBe(2);
+    expect(await pinComments.first().getAttribute("aria-label")).toBe("Open comments");
+    expect(await pinComments.last().getAttribute("aria-label")).toBe("Comment on this pin");
+    expect(await pinComments.first().getAttribute("class")).toContain("read");
+    expect(await pinComments.last().getAttribute("class")).toContain("idle");
+    expect(await pinComments.locator(".pincomment-icon").count()).toBe(2);
+    expect(await pinComments.first().locator("svg path").getAttribute("d")).toBe(
+      sessionCommentPath,
+    );
+    await pinComments.last().hover();
+    await expect
+      .poll(() =>
+        pinComments.last().evaluate((button) => {
+          const view = button.ownerDocument.defaultView;
+          if (!view) return false;
+          const probe = button.ownerDocument.createElement("span");
+          probe.style.color = "var(--status-seen)";
+          probe.style.position = "fixed";
+          probe.style.left = "-9999px";
+          button.ownerDocument.body.appendChild(probe);
+          const expected = view.getComputedStyle(probe).color;
+          probe.remove();
+          return view.getComputedStyle(button).color === expected;
+        }),
+      )
+      .toBe(true);
+    expect(await pinnedMessage.getAttribute("data-hover-tip")).toBe("Pinned architecture decision");
+    await pinnedMessage.locator(".pintext").hover();
+    await expect
+      .poll(() => page.locator("#hoverTip").textContent())
+      .toBe("Pinned architecture decision");
 
     const input = page.locator("#input");
     await input.fill("Compare @Pinned");
@@ -695,6 +848,10 @@ describe("console browser behavior", () => {
     expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(true);
     expect(await input.getAttribute("data-test-blurs")).toBe("0");
     expect(await input.inputValue()).toBe("Compare @Pinned");
+
+    await input.fill("Compare @not-a-match");
+    await expect.poll(() => page.locator("#composerPinPicker").isHidden()).toBe(true);
+    expect(await input.getAttribute("aria-expanded")).toBe("false");
 
     await input.fill("");
     await input.fill("Compare @Pinned");
@@ -738,8 +895,29 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("keeps chars first and exposes the complete throughput data on hover", async () => {
-    const page = await browser.newPage({ viewport: { width: 360, height: 720 } });
+  it("shows the full user message when hovering a truncated historical Pin", async () => {
+    const page = await browser.newPage();
+    const fullUserText = [
+      "Long pinned user instruction.",
+      ...Array.from({ length: 180 }, (_, index) => `Requirement ${index + 1} must remain visible.`),
+      "End of the complete pinned user instruction.",
+    ].join(" ");
+    const preview = fullUserText.slice(0, 1200);
+    const userPinView: ConsoleView = {
+      ...raceView,
+      vaultState: {
+        pins: {
+          "attend.pins.v1:s1": [
+            {
+              key: "user:0",
+              role: "you",
+              text: preview,
+              pinnedAt: 101,
+            },
+          ],
+        },
+      },
+    };
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -750,9 +928,388 @@ describe("console browser behavior", () => {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(userPinView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            { role: "user", text: fullUserText },
+            { role: "assistant", text: "Acknowledged." },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    const pinText = page.locator("#pinTray .pinitem .pintext");
+    await expect.poll(() => pinText.getAttribute("data-hover-tip")).toBe(fullUserText);
+    expect(await pinText.textContent()).toBe(preview);
+    await pinText.hover();
+    await expect.poll(() => page.locator("#hoverTip").textContent()).toBe(fullUserText);
+    await page.close();
+  });
+
+  it("starts a comment from a pinned text selection without an existing thread", async () => {
+    const page = await browser.newPage();
+    let commentBody: Record<string, unknown> | null = null;
+    const selectionKey = "assistant:0:selection:test";
+    const selectionPrefix = "Context before the selected evidence. ".repeat(180);
+    const selectedPinView: ConsoleView = {
+      ...raceView,
+      vaultState: {
+        pins: {
+          "attend.pins.v1:s1": [
+            {
+              key: selectionKey,
+              targetKey: "assistant:0",
+              kind: "selection",
+              role: "selected",
+              text: "Option Beta needs evidence.",
+              selectionStart: selectionPrefix.length,
+              pinnedAt: 101,
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(selectedPinView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: `${selectionPrefix}Option Beta needs evidence.`,
+            },
+          ],
+        });
+      } else if (url.pathname === "/comments/send") {
+        commentBody = request.postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: {
+              id: "selected-comment-1",
+              parentSessionId: "s1",
+              anchorKey: selectionKey,
+              anchorText: "Option Beta needs evidence.",
+              providerSessionId: "selected-comment-provider-1",
+              vendor: "claude",
+              cwd: "/tmp/project",
+              createdAt: 102,
+              status: "generating",
+              messageCount: 1,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    const pin = page.locator("#pinTray .pinitem");
+    expect(await pin.locator(".pinrole").textContent()).toBe("selected");
+    await pin.locator(".pintext").click();
+    const selectedPosition = await page
+      .locator("#msgs > .msg.assistant .bubble")
+      .evaluate((bubble, selectedText) => {
+        const host = bubble.closest("#msgs");
+        if (!host) throw new Error("Missing message scroller");
+        const fullText = bubble.textContent ?? "";
+        const start = fullText.indexOf(selectedText);
+        if (start < 0) throw new Error("Missing selected text");
+        const walker = bubble.ownerDocument.createTreeWalker(bubble, 4);
+        let consumed = 0;
+        let startNode = walker.currentNode;
+        let foundStart = false;
+        let startOffset = 0;
+        let endNode = walker.currentNode;
+        let foundEnd = false;
+        let endOffset = 0;
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const text = node.textContent ?? "";
+          const next = consumed + text.length;
+          if (!foundStart && start < next) {
+            startNode = node;
+            foundStart = true;
+            startOffset = start - consumed;
+          }
+          if (!foundEnd && start + selectedText.length <= next) {
+            endNode = node;
+            foundEnd = true;
+            endOffset = start + selectedText.length - consumed;
+            break;
+          }
+          consumed = next;
+        }
+        if (!foundStart || !foundEnd) throw new Error("Missing selection range");
+        const range = bubble.ownerDocument.createRange();
+        range.setStart(startNode, startOffset);
+        range.setEnd(endNode, endOffset);
+        const selectedRect = range.getClientRects()[0];
+        const hostRect = host.getBoundingClientRect();
+        return {
+          blockTop: bubble.getBoundingClientRect().top - hostRect.top,
+          selectedTop: selectedRect.top - hostRect.top,
+          selectedBottom: selectedRect.bottom - hostRect.top,
+          viewportHeight: host.clientHeight,
+        };
+      }, "Option Beta needs evidence.");
+    expect(selectedPosition.blockTop).toBeLessThan(-500);
+    expect(selectedPosition.selectedTop).toBeGreaterThan(40);
+    expect(selectedPosition.selectedBottom).toBeLessThanOrEqual(
+      selectedPosition.viewportHeight - 14,
+    );
+    const comment = pin.locator(".pincomment");
+    expect(await comment.getAttribute("aria-label")).toBe("Comment on this pin");
+    expect(await comment.getAttribute("class")).toContain("idle");
+    expect(
+      await comment.evaluate((button) => {
+        const style = button.ownerDocument.defaultView?.getComputedStyle(button);
+        return { background: style?.backgroundColor, color: style?.color };
+      }),
+    ).toEqual({ background: "rgba(0, 0, 0, 0)", color: "rgb(156, 163, 175)" });
+    await comment.click();
+
+    expect(await page.locator("#commentDrawer").isVisible()).toBe(true);
+    expect(await page.locator("#commentAnchorContent").textContent()).toContain(
+      "Option Beta needs evidence.",
+    );
+    await page.locator("#commentInput").fill("Check the evidence for this selection.");
+    await page.locator("#commentSend").click();
+    await expect
+      .poll(() => commentBody)
+      .toMatchObject({
+        parentSessionId: "s1",
+        anchorKey: selectionKey,
+        anchorText: "Option Beta needs evidence.",
+        question: "Check the evidence for this selection.",
+      });
+    await page.close();
+  });
+
+  it("jumps from chat-header First and Latest prompts to their user messages", async () => {
+    const page = await browser.newPage({ viewport: { width: 900, height: 720 } });
+    const baseSession = raceView.sessions[0];
+    if (!baseSession) throw new Error("Missing base session fixture");
+    const otherSessions = raceView.sessions.slice(1);
+    const promptJumpView: ConsoleView = {
+      ...raceView,
+      sessions: [
+        {
+          ...baseSession,
+          title: "First user prompt",
+          lastPrompt: "Latest user prompt",
+        },
+        ...otherSessions,
+      ],
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(promptJumpView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            { role: "user", text: "First user prompt" },
+            { role: "assistant", text: "First long response. ".repeat(220) },
+            { role: "user", text: "Middle user prompt" },
+            { role: "assistant", text: "Second long response. ".repeat(220) },
+            { role: "user", text: "Latest user prompt" },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.locator("#msgs .msg.user").count()).toBe(3);
+
+    const firstJump = page.locator("#h-sub .prompt-line:has(.prompt-line-first)");
+    const latestJump = page.locator("#h-sub .prompt-line:has(.prompt-line-latest)");
+    expect(await firstJump.getAttribute("role")).toBe("button");
+    expect(await firstJump.getAttribute("tabindex")).toBe("0");
+    expect(await latestJump.getAttribute("aria-label")).toBe("Jump to latest user message");
+
+    await firstJump.click();
+    const firstOffset = await page
+      .locator("#msgs .msg.user")
+      .first()
+      .evaluate((node) => {
+        const host = node.closest("#msgs");
+        if (!host) throw new Error("Missing message scroller");
+        return node.getBoundingClientRect().top - host.getBoundingClientRect().top;
+      });
+    expect(firstOffset).toBeGreaterThanOrEqual(0);
+    expect(firstOffset).toBeLessThan(45);
+
+    await latestJump.focus();
+    await latestJump.press("Enter");
+    const latestMessage = page.locator("#msgs .msg.user").last();
+    await expect
+      .poll(async () =>
+        latestMessage.evaluate((node) => {
+          const host = node.closest("#msgs");
+          if (!host) throw new Error("Missing message scroller");
+          return node.getBoundingClientRect().bottom - host.getBoundingClientRect().top;
+        }),
+      )
+      .toBeLessThanOrEqual(await page.locator("#msgs").evaluate((host) => host.clientHeight - 14));
+    const latestOffset = await latestMessage.evaluate((node) => {
+      const host = node.closest("#msgs");
+      if (!host) throw new Error("Missing message scroller");
+      return node.getBoundingClientRect().top - host.getBoundingClientRect().top;
+    });
+    expect(latestOffset).toBeGreaterThanOrEqual(0);
+    await page.close();
+  });
+
+  it("adds selected assistant text and a review instruction to the chat composer", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    let sentBody: Record<string, unknown> | null = null;
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: "Option Alpha is safe. Option Beta needs evidence.",
+            },
+          ],
+        });
+      } else if (url.pathname === "/chat/send") {
+        sentBody = route.request().postDataJSON() as Record<string, unknown>;
+        await route.fulfill({ json: { ok: true, session: "s1" } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    const input = page.locator("#input");
+    await input.fill("Existing review");
+    const assistant = page.locator("#msgs > .msg.assistant");
+    const bubble = assistant.locator(".bubble");
+    await bubble.hover();
+    await bubble.evaluate((node) => {
+      const doc = node.ownerDocument;
+      const walker = doc.createTreeWalker(node, 4);
+      let textNode = walker.nextNode();
+      while (textNode && !String(textNode.nodeValue).includes("Option Alpha")) {
+        textNode = walker.nextNode();
+      }
+      if (!textNode) throw new Error("missing assistant text");
+      const start = String(textNode.nodeValue).indexOf("Option Alpha");
+      const range = doc.createRange();
+      range.setStart(textNode, start);
+      range.setEnd(textNode, start + "Option Alpha is safe.".length);
+      const selection = doc.defaultView?.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    await page.locator("#msgFloatReference").click({ force: true });
+    await expect.poll(() => page.locator("#msgReferenceComposer").isVisible()).toBe(true);
+    expect(await page.locator("#msgReferenceMark").textContent()).toBe("@ selected");
+    expect(await page.locator("#msgReferencePreview").textContent()).toBe("Option Alpha is safe.");
+    await page.locator("#msgReferenceInput").fill("Prove this against the failure cases.");
+    await page.locator("#msgReferenceInput").press("Enter");
+
+    await expect.poll(() => page.locator("#msgReferenceComposer").isHidden()).toBe(true);
+    const firstPrompt =
+      "Existing review\n\n@ selected\n> Option Alpha is safe.\n\n@ comment\nProve this against the failure cases.";
+    expect(await input.inputValue()).toBe(firstPrompt);
+    expect(await page.locator("#attachTray .pinrefchip").count()).toBe(0);
+    expect(await page.locator("#pinTray .pinitem").count()).toBe(0);
+
+    await bubble.hover();
+    await bubble.evaluate((node) => {
+      const doc = node.ownerDocument;
+      const walker = doc.createTreeWalker(node, 4);
+      let textNode = walker.nextNode();
+      while (textNode && !String(textNode.nodeValue).includes("Option Beta")) {
+        textNode = walker.nextNode();
+      }
+      if (!textNode) throw new Error("missing second assistant text");
+      const start = String(textNode.nodeValue).indexOf("Option Beta");
+      const range = doc.createRange();
+      range.setStart(textNode, start);
+      range.setEnd(textNode, start + "Option Beta needs evidence.".length);
+      const selection = doc.defaultView?.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    await page.locator("#msgFloatReference").click({ force: true });
+    await page.locator("#msgReferenceInput").fill("Challenge the evidence for this option.");
+    await page.locator("#msgReferenceInput").press("Enter");
+    const expectedPrompt = `${firstPrompt}\n\n@ selected\n> Option Beta needs evidence.\n\n@ comment\nChallenge the evidence for this option.`;
+    expect(await input.inputValue()).toBe(expectedPrompt);
+
+    await page.locator("#send").click();
+    await expect.poll(() => sentBody).not.toBeNull();
+    expect(sentBody).toMatchObject({
+      text: expectedPrompt,
+      references: [],
+    });
+    await page.close();
+  });
+
+  it("keeps chars first and exposes the complete throughput data on hover", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 360, height: 720 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
         await route.fulfill({
           contentType: "text/html",
-          body: renderConsole({ ...view, sessions1h: 8, prompts1h: 32, chars1h: 77_500 }),
+          body: renderConsole({
+            ...view,
+            sessions1h: 8,
+            prompts1h: 32,
+            chars1h: 77_500,
+          }),
         });
       } else {
         await route.fulfill({ json: { ok: true } });
@@ -778,7 +1335,9 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
@@ -820,7 +1379,9 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
@@ -858,12 +1419,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else {
@@ -891,21 +1457,99 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("pins and unpins the open session from the chat header beside Refresh", async () => {
+    const page = await browser.newPage();
+    const pinPatches: Array<Record<string, number | null>> = [];
+    const pinnedView: ConsoleView = {
+      ...raceView,
+      vaultState: { ...raceView.vaultState, sessionPins: { s1: 1 } },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pinnedView),
+        });
+      } else if (url.pathname === "/vault/ui-state") {
+        const body = request.postDataJSON() as {
+          sessionPins?: Record<string, number | null>;
+        };
+        if (body.sessionPins) pinPatches.push(body.sessionPins);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+
+    const headerPin = page.locator("#headerPinBtn");
+    expect(
+      await page.locator(".head-actions").evaluate((actions) => {
+        const refresh = actions.querySelector("#refreshBtn");
+        const pin = actions.querySelector("#headerPinBtn");
+        return !!(refresh && pin && refresh.compareDocumentPosition(pin) & 4);
+      }),
+    ).toBe(true);
+    expect(await headerPin.getAttribute("aria-label")).toBe("Unpin session");
+    expect(await headerPin.getAttribute("aria-pressed")).toBe("true");
+    expect(await headerPin.getAttribute("class")).toContain("on");
+
+    await headerPin.click();
+    await expect.poll(() => pinPatches.some((patch) => patch.s1 === null)).toBe(true);
+    expect(await headerPin.getAttribute("aria-label")).toBe("Pin session to top");
+    expect(await headerPin.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      await page.locator('#list .item[data-session-id="s1"] .it-pin').getAttribute("aria-pressed"),
+    ).toBe("false");
+
+    await headerPin.click();
+    await expect
+      .poll(() => pinPatches.some((patch) => typeof patch.s1 === "number" && patch.s1 > 1))
+      .toBe(true);
+    expect(await headerPin.getAttribute("aria-label")).toBe("Unpin session");
+    expect(await headerPin.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      await page.locator('#list .item[data-session-id="s1"] .it-pin').getAttribute("aria-pressed"),
+    ).toBe("true");
+    await page.close();
+  });
+
   it("arms Goal from the new-session input and keeps its controls at bottom right", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     let sentBody: Record<string, unknown> | null = null;
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pendingTagView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pendingTagView),
+        });
       } else if (url.pathname === "/chat/new") {
         sentBody = request.postDataJSON() as Record<string, unknown>;
         await route.fulfill({
@@ -970,7 +1614,9 @@ describe("console browser behavior", () => {
     await page.addInitScript(() => {
       const browserGlobal = globalThis as unknown as {
         __copiedCommand?: string;
-        __eventSource?: { onmessage: ((event: { data: string }) => void) | null };
+        __eventSource?: {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
       };
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -980,7 +1626,9 @@ describe("console browser behavior", () => {
         }
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
       Object.defineProperty(globalThis.navigator, "clipboard", {
         configurable: true,
         value: {
@@ -993,7 +1641,10 @@ describe("console browser behavior", () => {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else if (url.pathname === "/chat/send") {
@@ -1012,7 +1663,9 @@ describe("console browser behavior", () => {
     await page.evaluate(() => {
       const source = (
         globalThis as unknown as {
-          __eventSource?: { onmessage: ((event: { data: string }) => void) | null };
+          __eventSource?: {
+            onmessage: ((event: { data: string }) => void) | null;
+          };
         }
       ).__eventSource;
       const publish = (event: Record<string, unknown>) =>
@@ -1058,7 +1711,10 @@ describe("console browser behavior", () => {
 
     await card.locator(".provider-error-retry").click();
     await expect.poll(() => sentBodies.length).toBe(2);
-    expect(sentBodies[1]).toMatchObject({ text: "continue after signing in", attachments: [] });
+    expect(sentBodies[1]).toMatchObject({
+      text: "continue after signing in",
+      attachments: [],
+    });
     await expect.poll(() => page.locator("#msgs .provider-error-card").count()).toBe(0);
     await page.close();
   });
@@ -1071,12 +1727,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pendingTagView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pendingTagView),
+        });
       } else if (url.pathname === "/chat/new") {
         attempts++;
         if (attempts === 1) {
@@ -1093,7 +1754,11 @@ describe("console browser behavior", () => {
           });
         } else {
           await route.fulfill({
-            json: { ok: true, session: "new-auth-1", cwd: "/tmp/recent-project" },
+            json: {
+              ok: true,
+              session: "new-auth-1",
+              cwd: "/tmp/recent-project",
+            },
           });
         }
       } else if (url.pathname === "/chat/messages") {
@@ -1130,13 +1795,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(cursorMatrixView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(cursorMatrixView),
+        });
       } else if (url.pathname === "/models/cursor") {
         await route.fulfill({
           json: {
@@ -1147,7 +1817,9 @@ describe("console browser behavior", () => {
         });
       } else if (url.pathname === "/chat/new") {
         sentBody = request.postDataJSON() as Record<string, unknown>;
-        await route.fulfill({ json: { ok: true, session: "cursor-1", cwd: "/tmp/project" } });
+        await route.fulfill({
+          json: { ok: true, session: "cursor-1", cwd: "/tmp/project" },
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else {
@@ -1176,19 +1848,26 @@ describe("console browser behavior", () => {
   });
 
   it("keeps New Session config menus readable in a narrow sidebar", async () => {
-    const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
     await page.addInitScript(() => {
       localStorage.setItem("attend.sideW", "200");
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(cursorMatrixView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(cursorMatrixView),
+        });
       } else if (url.pathname === "/models/cursor") {
         await route.fulfill({
           json: {
@@ -1276,38 +1955,175 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("preserves link query strings and never auto-uploads PlantUML source", async () => {
-    const page = await browser.newPage();
-    const externalRequests: string[] = [];
-    page.on("request", (request) => {
-      if (/plantuml\.com|jsdelivr\.net/.test(request.url())) externalRequests.push(request.url());
+  it("hosts the narrow New Session form in the open middle panel while keeping it button-anchored", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1400, height: 800 },
     });
+    const hostedNewSessionView: ConsoleView = {
+      ...raceView,
+      tags: ["work", "urgent"],
+    };
     await page.addInitScript(() => {
-      const browserGlobal = globalThis as unknown as { fetch: typeof fetch; EventSource: unknown };
-      browserGlobal.fetch = async () =>
-        new Response("{}", { headers: { "content-type": "application/json" } });
+      localStorage.setItem("attend.sideW", "240");
       class StubEventSource {
         static readonly CLOSED = 2;
-        onopen: (() => void) | null = null;
-        onmessage: (() => void) | null = null;
-        onerror: (() => void) | null = null;
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
-    await page.setContent(renderConsole(view), { waitUntil: "domcontentloaded" });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(hostedNewSessionView),
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#sessionPanelToggle").click();
+    await page.locator("#newToggle").click();
 
-    expect(
-      await page.locator('.changelog-content a[href^="https://example.test"]').getAttribute("href"),
-    ).toBe("https://example.test/?a=1&b=2");
-    expect(await page.locator(".diagram-plantuml .diagram-render").isVisible()).toBe(true);
-    expect(await page.locator(".diagram-plantuml img").count()).toBe(0);
-    expect(externalRequests).toEqual([]);
+    const form = page.locator("#newbox");
+    expect(await form.getAttribute("class")).toContain("panel-hosted");
+    await page.waitForTimeout(220);
+    await page.locator("#newTagAdd").click();
+    expect(await page.locator("#newTagMenu").isVisible()).toBe(true);
+    // Custom-select buttons stop click propagation; the tag picker still needs
+    // to dismiss when any control outside it is pressed.
+    await page.locator("#nmodelButton").click();
+    expect(await page.locator("#newTagMenu").isHidden()).toBe(true);
+    await page.locator("#nmodelButton").press("Escape");
+    await page.locator("#newTagAdd").click();
+    await page.locator("#newTagInput").fill("urg");
+    await page.locator("#newTagInput").press("ArrowDown");
+    expect(await page.locator("#newTagSug .newtagopt.on").textContent()).toContain("urgent");
+    await page.locator("#newTagInput").press("Enter");
+    expect(await page.locator("#newTags .newtagchip", { hasText: "urgent" }).count()).toBe(1);
+    expect(await page.locator("#newTagMenu").isHidden()).toBe(true);
+    const layout = await page.locator("body").evaluate((body) => {
+      const box = body.querySelector("#newbox")?.getBoundingClientRect();
+      const button = body.querySelector("#newToggle")?.getBoundingClientRect();
+      const panel = body.querySelector("#sessionPanel")?.getBoundingClientRect();
+      const side = body.querySelector(".side")?.getBoundingClientRect();
+      if (!box || !button || !panel || !side)
+        throw new Error("New Session panel layout is unavailable");
+      const rect = (value: typeof box) => ({
+        x: value.x,
+        y: value.y,
+        width: value.width,
+        height: value.height,
+      });
+      return {
+        box: rect(box),
+        button: rect(button),
+        panel: rect(panel),
+        side: rect(side),
+      };
+    });
+    expect(layout.box.width).toBeCloseTo(
+      Math.min(
+        576,
+        layout.panel.x + layout.panel.width - 8 - (layout.button.x + layout.button.width + 6),
+      ),
+      0,
+    );
+    expect(layout.box.x).toBeCloseTo(layout.button.x + layout.button.width + 6, 0);
+    expect(layout.box.y).toBeCloseTo(layout.button.y, 0);
+    expect(layout.box.width).toBeGreaterThan(layout.side.width);
+
+    await page.locator("#sessionPanelToggle").click();
+    expect(await form.getAttribute("class")).not.toContain("panel-hosted");
+    const restored = await form.boundingBox();
+    if (!restored) throw new Error("Restored New Session form is unavailable");
+    expect(restored.x + restored.width).toBeLessThanOrEqual(layout.side.x + layout.side.width);
     await page.close();
   });
 
-  it("linkifies paths without mistaking ratios or slash-separated labels for directories", async () => {
-    const page = await browser.newPage();
+  it("opens ordinary sessions independently and groups only dropped sessions and forks", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    expect(await page.locator("#chatTabs").isHidden()).toBe(true);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(1);
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    expect(await page.locator("#chatTabs").isHidden()).toBe(true);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(1);
+    expect(await page.locator("#h-title").textContent()).toContain("Other session");
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    expect(await page.locator("#chatTabs").isHidden()).toBe(true);
+    expect(await page.locator("#h-title").textContent()).toContain("Avoidance session");
+
+    await page.locator('#list .item[data-session-id="s2"]').dragTo(page.locator("#msgs"));
+    expect(await page.locator("#chatTabs").isVisible()).toBe(true);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(2);
+    expect(await page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id")).toBe("s2");
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(2);
+    expect(await page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id")).toBe("s1");
+    await page.locator("#forkBtn").click();
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(3);
+    expect(await page.locator("#chatTabs .chat-tab-label").allTextContents()).toContain(
+      "(fork) Avoidance session",
+    );
+    await page.close();
+  });
+
+  it("windows large session lists and transcripts without rebuilding rows on chat switches", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(4_000);
+    const baseSession = raceView.sessions[0];
+    if (!baseSession) throw new Error("Missing base session fixture");
+    const sessions = Array.from({ length: 220 }, (_, index) => ({
+      ...baseSession,
+      sessionId: `large-${index}`,
+      title: `Large session ${index}`,
+      brief: `Large session ${index}`,
+      lastPrompt: `Latest prompt ${index}`,
+      file: `/tmp/large-${index}.jsonl`,
+      lastTs: 10_000 - index,
+      sortTs: 10_000 - index,
+      seen: true,
+      unread: false,
+    }));
+    const transcript = Array.from({ length: 170 }, (_, index) => [
+      { role: "user", text: `User turn ${index}` },
+      { role: "assistant", text: `Assistant turn ${index}. ${"detail ".repeat(24)}` },
+    ]).flat();
+    const largeView: ConsoleView = { ...raceView, sessions };
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -1318,7 +2134,693 @@ describe("console browser behavior", () => {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({ contentType: "text/html", body: renderConsole(largeView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: transcript });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await expect.poll(() => page.locator("#list .item").count()).toBeLessThan(45);
+
+    await page.locator("#sessionPanelToggle").click();
+    await expect.poll(() => page.locator("#sessionPanelList .item").count()).toBeGreaterThan(0);
+    expect(await page.locator("#sessionPanelList .item").count()).toBeLessThan(30);
+    await page.locator("#sessionPanel").evaluate((panel) => {
+      panel.scrollTop = panel.scrollHeight;
+      panel.dispatchEvent(new Event("scroll"));
+    });
+    await expect
+      .poll(() => page.locator('#sessionPanelList .item[data-session-id="large-219"]').count())
+      .toBe(1);
+    expect(await page.locator("#sessionPanelList .item").count()).toBeLessThan(30);
+
+    const firstRow = page.locator('#list .item[data-session-id="large-0"]');
+    await firstRow.click();
+    await expect
+      .poll(() => page.locator("#msgs").getAttribute("data-transcript-total-blocks"))
+      .toBe("340");
+    expect(await page.locator("#msgs .msg, #msgs .toolc").count()).toBeLessThan(80);
+    await firstRow.evaluate((row) => row.setAttribute("data-switch-sentinel", "stable"));
+
+    await page.locator('#list .item[data-session-id="large-1"]').click();
+    await expect.poll(() => page.locator("#h-title").textContent()).toContain("Large session 1");
+    expect(await firstRow.getAttribute("data-switch-sentinel")).toBe("stable");
+    await expect
+      .poll(() => page.locator("#msgs").getAttribute("data-transcript-total-blocks"))
+      .toBe("340");
+    expect(await page.locator("#msgs .msg, #msgs .toolc").count()).toBeLessThan(80);
+
+    await page.locator("#h-sub .prompt-line:has(.prompt-line-first)").click();
+    await expect
+      .poll(() => page.locator("#msgs .msg.user").filter({ hasText: "User turn 0" }).count())
+      .toBe(1);
+    const firstOffset = await page
+      .locator("#msgs .msg.user")
+      .filter({ hasText: "User turn 0" })
+      .evaluate((node) => {
+        const host = node.closest("#msgs");
+        if (!host) throw new Error("Missing message scroller");
+        return node.getBoundingClientRect().top - host.getBoundingClientRect().top;
+      });
+    expect(firstOffset).toBeGreaterThanOrEqual(0);
+    expect(firstOffset).toBeLessThan(50);
+    await page
+      .locator("#msgs .msg.assistant")
+      .filter({ hasText: "Assistant turn 0" })
+      .evaluate((node) => {
+        const pageGlobal = globalThis as unknown as {
+          document: {
+            createRange(): { selectNodeContents(node: unknown): void };
+          };
+          getSelection(): {
+            removeAllRanges(): void;
+            addRange(range: unknown): void;
+          } | null;
+        };
+        const bubble = node.querySelector(".bubble");
+        const text = bubble?.firstChild;
+        if (!bubble || !text) throw new Error("Missing assistant text");
+        const range = pageGlobal.document.createRange();
+        range.selectNodeContents(bubble);
+        const selection = pageGlobal.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const host = node.closest("#msgs");
+        if (!host) throw new Error("Missing message scroller");
+        host.scrollTop += 8_000;
+        host.dispatchEvent(new Event("scroll"));
+      });
+    await page.waitForTimeout(50);
+    expect(
+      await page.evaluate(() =>
+        String(
+          (
+            globalThis as unknown as {
+              getSelection(): { toString(): string } | null;
+            }
+          ).getSelection(),
+        ),
+      ),
+    ).toContain("Assistant turn 0");
+    await page.evaluate(() =>
+      (
+        globalThis as unknown as {
+          getSelection(): { removeAllRanges(): void } | null;
+        }
+      )
+        .getSelection()
+        ?.removeAllRanges(),
+    );
+    await page.locator("#msgs").evaluate((host) => host.dispatchEvent(new Event("scroll")));
+    await expect.poll(() => page.locator("#msgs .msg, #msgs .toolc").count()).toBeLessThan(80);
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  });
+
+  it("restores existing fork relations as a chat tab group", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(forkTreeView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s2"]').click();
+
+    expect(await page.locator("#chatTabs").isVisible()).toBe(true);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(2);
+    expect(await page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id")).toBe("s2");
+    await page.close();
+  });
+
+  it("uses relative prompt times on sidebar, panel, header, and fork-tree cards", async () => {
+    const now = Date.now();
+    const timedView: ConsoleView = {
+      ...forkTreeView,
+      sessions: forkTreeView.sessions.map((session, index) => ({
+        ...session,
+        title: index === 0 ? "Original prompt" : session.title,
+        lastPrompt: index === 0 ? "Most recent prompt" : session.lastPrompt,
+        lastTs: index === 0 ? now - 2 * 60_000 : now - 3 * 60_000,
+        userPromptTs: index === 0 ? [now - 2 * 60 * 60_000, now - 5 * 60_000] : [now - 30 * 60_000],
+      })),
+    };
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(timedView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const sidebarCard = page.locator('#list .item[data-session-id="s1"]');
+    expect(await sidebarCard.locator(".prompt-line-label").allTextContents()).toEqual(["2h", "5m"]);
+    expect(await sidebarCard.locator(".it-age").textContent()).toBe("2m");
+
+    await page.locator("#sessionPanelToggle").click();
+    const panelCard = page.locator('#sessionPanelList .item[data-session-id="s1"]');
+    expect(await panelCard.locator(".prompt-line-label").allTextContents()).toEqual(["2h", "5m"]);
+
+    await sidebarCard.click();
+    expect(await page.locator("#h-sub .prompt-line-label").allTextContents()).toEqual(["2h", "5m"]);
+    await page.locator("#forkTreeBtn").click();
+    const treeCard = page.locator('.forktree-node[data-forktree-node-id="s1"]');
+    expect(await treeCard.locator(".prompt-line-label").allTextContents()).toEqual(["2h", "5m"]);
+    await page.close();
+  });
+
+  it("restores persisted chat groups and preserves members outside the launch scope", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    const uiPatches: Array<Record<string, unknown>> = [];
+    const scopedView: ConsoleView = {
+      ...raceView,
+      scopeRoots: ["/tmp/project"],
+      vaultState: {
+        chatGroups: {
+          persisted: {
+            id: "persisted",
+            members: [
+              { vendor: "claude", sessionId: "s1" },
+              { vendor: "codex", sessionId: "outside-this-scope" },
+            ],
+            updatedAt: 10,
+          },
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(scopedView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/vault/ui-state" && route.request().method() === "POST") {
+        uiPatches.push(route.request().postDataJSON() as Record<string, unknown>);
+        await route.fulfill({ json: { ok: true } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    expect(await page.locator("#chatTabs").isHidden()).toBe(true);
+
+    await page.locator('#list .item[data-session-id="s2"]').dragTo(page.locator("#msgs"));
+    await expect.poll(() => uiPatches.length).toBeGreaterThan(0);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(2);
+
+    const persisted = uiPatches
+      .map((patch) => patch.chatGroups as Record<string, { members?: unknown[] }> | undefined)
+      .find((groups) => groups?.persisted)?.persisted;
+    expect(persisted?.members).toEqual([
+      { vendor: "codex", sessionId: "outside-this-scope" },
+      { vendor: "claude", sessionId: "s1" },
+      { vendor: "claude", sessionId: "s2" },
+    ]);
+    await page.close();
+  });
+
+  it("opens recent sessions for a header tag in their own chat group", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    const taggedView: ConsoleView = {
+      ...raceView,
+      tags: ["work"],
+      sessions: raceView.sessions.map((session, index) => ({
+        ...session,
+        tags: ["work"],
+        lastTs: index === 0 ? 100 : 300,
+      })),
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(taggedView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    const headerTag = page.locator("#h-tags .headtag-nav");
+    expect(
+      await headerTag.evaluate(
+        (node) => node.ownerDocument.defaultView?.getComputedStyle(node, "::after").content,
+      ),
+    ).toBe("none");
+    await headerTag.click();
+
+    const options = page.locator("#headerTagSessionMenu .headtag-session-option");
+    expect(await options.count()).toBe(2);
+    expect(await options.first().textContent()).toContain("Other session");
+    expect(await options.first().locator(".headtag-session-copy").count()).toBe(1);
+    expect(await options.first().locator(".headtag-session-heading .chat-tab-status").count()).toBe(
+      1,
+    );
+    expect(await options.first().locator(".headtag-session-meta").textContent()).toContain(
+      "claude",
+    );
+    const alignment = await options.first().evaluate((option) => {
+      const status = option.querySelector(".chat-tab-status")?.getBoundingClientRect();
+      const title = option.querySelector(".headtag-session-title")?.getBoundingClientRect();
+      if (!status || !title) return Number.POSITIVE_INFINITY;
+      return Math.abs(status.y + status.height / 2 - (title.y + title.height / 2));
+    });
+    expect(alignment).toBeLessThanOrEqual(1);
+    expect(await page.locator("#headerTagSessionMenu .headtag-session-current").count()).toBe(1);
+    await options.first().click();
+    expect(await page.locator("#h-title").textContent()).toContain("Other session");
+    expect(await page.locator("#chatTabs").isHidden()).toBe(true);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(1);
+    expect(await page.locator("#headerTagSessionMenu").count()).toBe(0);
+    await page.close();
+  });
+
+  it("preserves link query strings and never auto-uploads PlantUML source", async () => {
+    const page = await browser.newPage();
+    const externalRequests: string[] = [];
+    page.on("request", (request) => {
+      if (/plantuml\.com|jsdelivr\.net/.test(request.url())) externalRequests.push(request.url());
+    });
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as {
+        fetch: typeof fetch;
+        EventSource: unknown;
+      };
+      browserGlobal.fetch = async () =>
+        new Response("{}", { headers: { "content-type": "application/json" } });
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onopen: (() => void) | null = null;
+        onmessage: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.setContent(renderConsole(view), {
+      waitUntil: "domcontentloaded",
+    });
+
+    expect(
+      await page.locator('.changelog-content a[href^="https://example.test"]').getAttribute("href"),
+    ).toBe("https://example.test/?a=1&b=2");
+    expect(await page.locator(".diagram-plantuml .diagram-render").isVisible()).toBe(true);
+    expect(await page.locator(".diagram-plantuml img").count()).toBe(0);
+    expect(externalRequests).toEqual([]);
+    await page.close();
+  });
+
+  it("auto-links complete bare URLs without requiring a leading boundary", async () => {
+    const page = await browser.newPage();
+    const linksView: ConsoleView = {
+      ...view,
+      changelogMarkdown: [
+        "两个 PR 链接：",
+        "",
+        "- **ai_call（后端 #913）**：https://github.com/shaling-ai/ai_call/pull/913（后端匿名守卫 + 测试）",
+        "- **ai_phone（客户端 #958）**：https://github.com/shaling-ai/ai_phone/pull/958(客户端 family 登录)",
+        "- 紧贴中文https://example.test/chinese",
+        "- prefixhttp://example.test/english",
+        "- 合法括号：https://en.wikipedia.org/wiki/Function_(mathematics)",
+        "- 多语言路径：https://example.test/путь/路径",
+        "- Unicode 标点：https://example.test/release—后续说明",
+        "- 多余右括号：https://example.test/foo_(bar)).",
+      ].join("\n"),
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.setContent(renderConsole(linksView), {
+      waitUntil: "domcontentloaded",
+    });
+
+    const links = page.locator(".changelog-content a");
+    expect(await links.count()).toBe(8);
+    expect(await links.nth(0).getAttribute("href")).toBe(
+      "https://github.com/shaling-ai/ai_call/pull/913",
+    );
+    expect(await links.nth(1).getAttribute("href")).toBe(
+      "https://github.com/shaling-ai/ai_phone/pull/958",
+    );
+    expect(await links.nth(2).getAttribute("href")).toBe("https://example.test/chinese");
+    expect(await links.nth(3).getAttribute("href")).toBe("http://example.test/english");
+    expect(await links.nth(4).getAttribute("href")).toBe(
+      "https://en.wikipedia.org/wiki/Function_(mathematics)",
+    );
+    expect(await links.nth(5).getAttribute("href")).toBe("https://example.test/путь/路径");
+    expect(await links.nth(6).getAttribute("href")).toBe("https://example.test/release");
+    expect(await links.nth(7).getAttribute("href")).toBe("https://example.test/foo_(bar)");
+    expect(await links.nth(0).textContent()).toBe("https://github.com/shaling-ai/ai_call/pull/913");
+    expect(await links.nth(1).textContent()).toBe(
+      "https://github.com/shaling-ai/ai_phone/pull/958",
+    );
+    expect(await page.locator(".changelog-content").textContent()).toContain(
+      "/pull/913（后端匿名守卫 + 测试）",
+    );
+    expect(await page.locator(".changelog-content").textContent()).toContain("/foo_(bar)).");
+    await page.close();
+  });
+
+  it("opens a long changelog at the top without changing chat history bottom pinning", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1000, height: 600 },
+    });
+    const scrollView: ConsoleView = {
+      ...raceView,
+      changelogMarkdown: Array.from(
+        { length: 120 },
+        (_, index) => `## Change ${index + 1}\n\n- Changelog entry ${index + 1}`,
+      ).join("\n\n"),
+    };
+    const history = Array.from({ length: 80 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      text: `History message ${index + 1}`,
+    }));
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(scrollView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: history });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    await expect
+      .poll(() =>
+        page.locator("#msgs").evaluate((host) => ({
+          top: host.scrollTop,
+          overflowing: host.scrollHeight > host.clientHeight,
+        })),
+      )
+      .toEqual({ top: 0, overflowing: true });
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.locator("#msgs .msg").count()).toBe(history.length);
+    await expect
+      .poll(() =>
+        page.locator("#msgs").evaluate((host) => ({
+          top: host.scrollTop,
+          max: host.scrollHeight - host.clientHeight,
+        })),
+      )
+      .toSatisfy(({ top, max }) => max > 0 && Math.abs(top - max) <= 1);
+
+    await page.close();
+  });
+
+  it("restores idle reading but keeps bottom intent across background generation", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1000, height: 600 },
+    });
+    const histories = {
+      s1: [
+        { role: "user", text: "First session message 1" },
+        {
+          role: "assistant",
+          text: Array.from(
+            { length: 160 },
+            (_, index) => `Long answer paragraph ${index + 1}.`,
+          ).join("\n\n"),
+        },
+      ],
+      s2: Array.from({ length: 100 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text: `Second session message ${index + 1}`,
+      })),
+    };
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__sessionScrollEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        const sessionId = url.searchParams.get("file") === "/tmp/session-1.jsonl" ? "s1" : "s2";
+        await route.fulfill({ json: histories[sessionId] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const messages = page.locator("#msgs");
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.locator("#msgs .msg").count()).toBe(histories.s1.length);
+    const reading = await messages.evaluate((host) => {
+      const user = host.querySelector(".msg.user");
+      const answer = host.querySelector(".msg.assistant");
+      if (!user || !answer) throw new Error("Long test turn is missing");
+      const hostRect = host.getBoundingClientRect();
+      const visibleHeight = host.clientHeight;
+      const start = user.getBoundingClientRect().top - hostRect.top + host.scrollTop;
+      const end = answer.getBoundingClientRect().bottom - hostRect.top + host.scrollTop;
+      const desiredReadAt = start + (end - start) * 0.45;
+      host.scrollTop = desiredReadAt - visibleHeight;
+      return {
+        top: host.scrollTop,
+        unreadRatio: (end - (host.scrollTop + visibleHeight)) / (end - start),
+      };
+    });
+    expect(reading.top).toBeGreaterThan(0);
+
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await expect
+      .poll(() => page.locator("#msgs .bubble").first().textContent())
+      .toContain("Second session message 1");
+    const progress = page.locator('#list .item[data-session-id="s1"] .session-read-progress');
+    expect(await progress.isVisible()).toBe(true);
+    expect(Number(await progress.getAttribute("data-unread-ratio"))).toBeCloseTo(
+      reading.unreadRatio,
+      2,
+    );
+    const expectedRailRatio = Math.log(1 + 9 * reading.unreadRatio) / Math.log(10);
+    expect(Number(await progress.getAttribute("data-rail-ratio"))).toBeCloseTo(
+      expectedRailRatio,
+      4,
+    );
+    const [progressBox, cardBox] = await Promise.all([
+      progress.boundingBox(),
+      page.locator('#list .item[data-session-id="s1"]').boundingBox(),
+    ]);
+    if (!progressBox || !cardBox) throw new Error("Session reading progress geometry is missing");
+    expect(
+      Math.abs(progressBox.x + progressBox.width - (cardBox.x + cardBox.width)),
+    ).toBeLessThanOrEqual(1);
+    expect(progressBox.height / cardBox.height).toBeCloseTo(expectedRailRatio, 1);
+    expect(progressBox.height / cardBox.height).toBeGreaterThan(reading.unreadRatio);
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs .bubble").first().textContent())
+      .toContain("First session message 1");
+    await expect.poll(() => messages.evaluate((host) => host.scrollTop)).toBe(reading.top);
+
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await page.evaluate(() => {
+      const source = (globalThis as unknown as Record<string, unknown>)
+        .__sessionScrollEventSource as {
+        onmessage: ((event: { data: string }) => void) | null;
+      };
+      source.onmessage?.({
+        data: JSON.stringify({
+          active: ["s1"],
+          startedAt: { s1: Date.now() },
+          queues: {},
+        }),
+      });
+    });
+    await expect
+      .poll(() =>
+        page.locator('#list .item[data-session-id="s1"] .it-status').getAttribute("class"),
+      )
+      .toContain("generating");
+    expect(await progress.isHidden()).toBe(true);
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() =>
+        messages.evaluate((host) => ({
+          top: host.scrollTop,
+          max: host.scrollHeight - host.clientHeight,
+        })),
+      )
+      .toSatisfy(({ top, max }) => max > 0 && Math.abs(top - max) <= 1);
+
+    // Leave while the session is generating at the bottom. Its background reply
+    // grows the transcript after the saved pixel offset, then finishes before we
+    // return; reopening should honor the saved bottom intent, not that stale offset.
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await page.evaluate(() => {
+      const source = (globalThis as unknown as Record<string, unknown>)
+        .__sessionScrollEventSource as {
+        onmessage: ((event: { data: string }) => void) | null;
+      };
+      const emit = (event: Record<string, unknown>) =>
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "s1",
+            emittedAt: Date.now(),
+            event,
+          }),
+        });
+      emit({
+        kind: "assistant_text",
+        text: Array.from(
+          { length: 160 },
+          (_, index) => `Background completion paragraph ${index + 1}.`,
+        ).join("\n\n"),
+      });
+      emit({ kind: "result", ok: true });
+    });
+    await expect
+      .poll(() =>
+        page.locator('#list .item[data-session-id="s1"] .it-status').getAttribute("class"),
+      )
+      .toContain("unread");
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs .bubble").last().textContent())
+      .toContain("Background completion paragraph 160");
+    await expect
+      .poll(() =>
+        messages.evaluate((host) => ({
+          top: host.scrollTop,
+          max: host.scrollHeight - host.clientHeight,
+        })),
+      )
+      .toSatisfy(({ top, max }) => max > 0 && Math.abs(top - max) <= 1);
+
+    await page.close();
+  });
+
+  it("linkifies paths without mistaking ratios or slash-separated labels for directories", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
           json: [
@@ -1368,7 +2870,9 @@ describe("console browser behavior", () => {
   });
 
   it("centers message actions in the visible block without following the pointer", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -1377,12 +2881,17 @@ describe("console browser behavior", () => {
         onerror: (() => void) | null = null;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(view),
+        });
       } else {
         await route.fulfill({ json: {} });
       }
@@ -1417,6 +2926,15 @@ describe("console browser behavior", () => {
 
     await page.locator("#msgs").evaluate((host) => {
       host.innerHTML =
+        '<div class="msg user" data-msg-key="user:0"><div class="bubble">User content</div></div>';
+    });
+    await page.locator("#msgs .msg.user .bubble").hover();
+    await expect
+      .poll(() => page.locator("#msgFloatActions").getAttribute("aria-hidden"))
+      .toBe("true");
+
+    await page.locator("#msgs").evaluate((host) => {
+      host.innerHTML =
         '<div class="msg assistant" data-msg-key="assistant:1"><div class="bubble" style="height:1600px">Long assistant content</div></div>';
       host.scrollTop = 0;
     });
@@ -1429,20 +2947,7 @@ describe("console browser behavior", () => {
       .toBe("false");
     const bottomRailBox = await page.locator("#msgFloatActions").boundingBox();
     const visibleBottom = await page.locator("#msgs").evaluate((host) => {
-      const rect = host.getBoundingClientRect();
-      const browserWindow = host.ownerDocument.defaultView as unknown as {
-        getComputedStyle(target: typeof host): { getPropertyValue(property: string): string };
-      };
-      const style = browserWindow.getComputedStyle((host.parentElement || host) as typeof host);
-      const inset = [
-        "--composer-overlay-height",
-        "--queue-overlay-height",
-        "--avoid-overlay-height",
-      ].reduce(
-        (total, property) => total + (Number.parseFloat(style.getPropertyValue(property)) || 0),
-        0,
-      );
-      return rect.bottom - inset;
+      return host.getBoundingClientRect().bottom;
     });
     if (!bottomRailBox) throw new Error("Missing bottom-clamped action geometry");
     expect(bottomRailBox.y + bottomRailBox.height / 2).toBeCloseTo(
@@ -1465,19 +2970,110 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("uses the same center-or-visible-edge placement in the comment panel", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+  it("aligns the composer with both message edges and keeps a clear scroll-bottom gap", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 720 },
+    });
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    const history = [
+      {
+        role: "user",
+        text: Array.from({ length: 30 }, (_, index) => `User detail ${index + 1}`).join(" "),
+      },
+      {
+        role: "assistant",
+        text: Array.from({ length: 80 }, (_, index) => `Assistant detail ${index + 1}.`).join(
+          "\n\n",
+        ),
+      },
+    ];
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: history });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await expect.poll(() => page.locator("#msgs .msg").count()).toBe(history.length);
+    await page.locator("#msgs").evaluate((host) => {
+      host.scrollTop = host.scrollHeight;
+    });
+
+    const measureGeometry = () =>
+      page.locator("#msgs").evaluate((host) => {
+        const foot = host.ownerDocument.querySelector(".foot");
+        const box = (selector: string) => {
+          const rect = host.ownerDocument.querySelector(selector)?.getBoundingClientRect();
+          if (!rect) throw new Error(`Missing geometry for ${selector}`);
+          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+        };
+        return {
+          assistant: box("#msgs .msg.assistant .bubble"),
+          user: box("#msgs .msg.user .bubble"),
+          host: box("#msgs"),
+          composer: box(".composer-surface"),
+          last: box("#msgs .msg:last-child"),
+          footPosition: foot
+            ? (host.ownerDocument.defaultView?.getComputedStyle(foot).position ?? "")
+            : "",
+        };
+      });
+    await expect
+      .poll(async () => {
+        const geometry = await measureGeometry();
+        return geometry.composer.top - geometry.last.bottom;
+      })
+      .toBeGreaterThanOrEqual(23);
+    const geometry = await measureGeometry();
+    const bottomGap = geometry.composer.top - geometry.last.bottom;
+    expect(Math.abs(geometry.assistant.left - geometry.composer.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.user.right - geometry.composer.right)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.host.bottom - geometry.composer.top)).toBeLessThanOrEqual(1);
+    expect(bottomGap).toBeGreaterThanOrEqual(23);
+    expect(bottomGap).toBeLessThanOrEqual(26);
+    expect(geometry.footPosition).toBe("relative");
+    expect(geometry.composer.left).toBeLessThan(geometry.user.left);
+    expect(geometry.composer.right).toBeGreaterThan(geometry.assistant.right);
+
+    await page.close();
+  });
+
+  it("uses the same center-or-visible-edge placement in the comment panel", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(view),
+        });
       } else {
         await route.fulfill({ json: {} });
       }
@@ -1551,13 +3147,199 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("pins selected text from a comment message", async () => {
+    const page = await browser.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
+      } else if (url.pathname === "/comments/messages") {
+        await route.fulfill({
+          json: {
+            thread: commentView.vaultState?.commentThreads?.["comment-1"],
+            messages: [
+              {
+                role: "assistant",
+                text: "First excerpt then second excerpt",
+                tools: [],
+              },
+            ],
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    expect(pageErrors).toEqual([]);
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+
+    const bubble = page.locator("#commentMsgs > .msg.assistant .bubble");
+    await expect.poll(() => bubble.textContent()).toContain("First excerpt then second excerpt");
+    await bubble.hover();
+    const pin = page.locator("#commentMsgFloatPin");
+    const pinExcerpt = async (excerpt: string) => {
+      await bubble.evaluate((node, selectedText) => {
+        const textNode = node.querySelector("p")?.firstChild;
+        const source = textNode?.textContent ?? "";
+        const start = source.indexOf(selectedText);
+        if (!textNode || start < 0) throw new Error(`Missing excerpt: ${selectedText}`);
+        const range = node.ownerDocument.createRange();
+        range.setStart(textNode, start);
+        range.setEnd(textNode, start + selectedText.length);
+        const selection = node.ownerDocument.defaultView?.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }, excerpt);
+      await expect.poll(() => pin.getAttribute("aria-label")).toBe("Pin selected text to the top");
+      await pin.click();
+    };
+
+    // Pin in reverse click order; the tray must follow text order instead.
+    await pinExcerpt("second excerpt");
+    await pinExcerpt("First excerpt");
+
+    const pinnedSelection = page.locator("#commentPinTray .pinitem");
+    await expect.poll(() => pinnedSelection.count()).toBe(2);
+    expect(await pinnedSelection.locator(".pinrole").allTextContents()).toEqual([
+      "selected",
+      "selected",
+    ]);
+    expect(await pinnedSelection.locator(".pintext").allTextContents()).toEqual([
+      "First excerpt",
+      "second excerpt",
+    ]);
+    expect(await pinnedSelection.first().getAttribute("data-hover-tip")).toBe("First excerpt");
+    await pinnedSelection.first().locator(".pintext").hover();
+    await expect.poll(() => page.locator("#hoverTip").textContent()).toBe("First excerpt");
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  });
+
+  it("adds selected comment-panel AI text to the comment composer without overlapping content", async () => {
+    const page = await browser.newPage({ viewport: { width: 900, height: 760 } });
+    let sentBody: Record<string, unknown> | null = null;
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(commentView) });
+      } else if (url.pathname === "/comments/messages") {
+        await route.fulfill({
+          json: {
+            thread: commentView.vaultState?.commentThreads?.["comment-1"],
+            messages: [
+              {
+                role: "assistant",
+                text: "First excerpt then second excerpt. ".repeat(18),
+                tools: [],
+              },
+            ],
+          },
+        });
+      } else if (url.pathname === "/comments/send") {
+        sentBody = route.request().postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: {
+              ...commentView.vaultState?.commentThreads?.["comment-1"],
+              status: "generating",
+              messageCount: 2,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+
+    const bubble = page.locator("#commentMsgs > .msg.assistant .bubble");
+    await expect.poll(() => bubble.textContent()).toContain("First excerpt then second excerpt");
+    expect(
+      await page
+        .locator("#commentMsgs")
+        .evaluate((host) =>
+          host.ownerDocument.defaultView
+            ?.getComputedStyle(host)
+            .getPropertyValue("--msg-float-actions-space")
+            .trim(),
+        ),
+    ).toBe("5rem");
+    const input = page.locator("#commentInput");
+    await bubble.hover();
+    await bubble.evaluate((node) => {
+      const textNode = node.querySelector("p")?.firstChild;
+      if (!textNode) throw new Error("Missing comment assistant text");
+      const range = node.ownerDocument.createRange();
+      range.setStart(textNode, 0);
+      range.setEnd(textNode, "First excerpt".length);
+      const selection = node.ownerDocument.defaultView?.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    await page.locator("#commentMsgFloatReference").click({ force: true });
+    await expect.poll(() => page.locator("#commentMsgReferenceComposer").isVisible()).toBe(true);
+    expect(await page.locator("#commentMsgReferenceMark").textContent()).toBe("@ selected");
+    await page.locator("#commentMsgReferenceInput").press("Enter");
+
+    const expectedPrompt = "@ selected\n> First excerpt";
+    expect(await input.inputValue()).toBe(expectedPrompt);
+
+    await page.locator("#commentSend").click();
+    await expect.poll(() => sentBody).not.toBeNull();
+    expect(sentBody).toMatchObject({
+      question: expectedPrompt,
+    });
+    const userMessage = page.locator("#commentMsgs > .msg.user").last();
+    expect(await userMessage.locator(".bubble").textContent()).toContain("First excerpt");
+    expect(await userMessage.locator(".msgref").count()).toBe(0);
+    await userMessage.locator(".bubble").hover();
+    await expect
+      .poll(() => page.locator("#commentMsgFloatActions").getAttribute("aria-hidden"))
+      .toBe("true");
+    await page.close();
+  });
+
   it("keeps new-session and chat input geometry fixed when attachments are added", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     let sentBody: { text?: string; attachments?: unknown[] } | null = null;
     await page.addInitScript(() => {
       const browserGlobal = globalThis as unknown as {
         EventSource: unknown;
-        __eventSource?: { onmessage: ((event: { data: string }) => void) | null };
+        __eventSource?: {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
       };
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -1567,12 +3349,17 @@ describe("console browser behavior", () => {
         }
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pendingTagView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pendingTagView),
+        });
       } else if (url.pathname === "/chat/send") {
         sentBody = route.request().postDataJSON() as typeof sentBody;
         await route.fulfill({ json: { ok: true, session: "s1" } });
@@ -1643,14 +3430,22 @@ describe("console browser behavior", () => {
     const body = sentBody as { text?: string; attachments?: unknown[] } | null;
     expect(body?.text).toBe("raw prompt");
     expect(body?.attachments).toHaveLength(1);
+    // Re-rendering from the optimistic transcript cache used to consume the
+    // pending marker before the matching live acknowledgement arrived. The
+    // acknowledgement then appended the same user turn a second time.
+    await page.locator("#list .item", { hasText: "Other session" }).click();
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
     await page.evaluate((attachments) => {
       const source = (
         globalThis as unknown as {
-          __eventSource?: { onmessage: ((event: { data: string }) => void) | null };
+          __eventSource?: {
+            onmessage: ((event: { data: string }) => void) | null;
+          };
         }
       ).__eventSource;
       source?.onmessage?.({
         data: JSON.stringify({
+          kind: "session_event",
           sessionId: "s1",
           emittedAt: Date.now(),
           event: { kind: "user_turn_started", text: "raw prompt", attachments },
@@ -1665,7 +3460,9 @@ describe("console browser behavior", () => {
   });
 
   it("opens the composer rail upward without moving chat or queue and persists text items", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     page.setDefaultTimeout(2_000);
     const uiPatches: unknown[] = [];
     await page.addInitScript(() => {
@@ -1673,13 +3470,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else if (url.pathname === "/chat/queue") {
@@ -1728,10 +3530,16 @@ describe("console browser behavior", () => {
       .poll(() =>
         page.locator("#list .item.active").evaluate((item) => {
           const browserWindow = item.ownerDocument.defaultView;
-          return browserWindow?.getComputedStyle(item).backgroundColor;
+          return browserWindow?.getComputedStyle(item).backgroundImage;
         }),
       )
-      .toBe("rgb(224, 231, 255)");
+      .toContain("linear-gradient");
+    expect(
+      await page.locator("#list .item.active").evaluate((item) => {
+        const browserWindow = item.ownerDocument.defaultView;
+        return browserWindow?.getComputedStyle(item).boxShadow;
+      }),
+    ).toContain("inset");
     await expect.poll(() => page.locator("#queue .qitem").count()).toBe(1);
     await page.locator("#queue .qedit").click();
     expect(await page.locator("#queue .qeditbox .edit-cancel svg").count()).toBe(1);
@@ -1927,30 +3735,32 @@ describe("console browser behavior", () => {
       };
       return browserWindow.getComputedStyle(badge).color;
     });
-    const todoCheckStyle = await page.locator(".rail-todo-check").evaluate((check) => {
-      const browserWindow = check.ownerDocument.defaultView as unknown as {
-        getComputedStyle(target: typeof check): {
-          backgroundColor: string;
-          borderTopColor: string;
-          height: string;
-          width: string;
+    const todoCheckStyle = await page
+      .locator("#composerRailPop .rail-todo-check")
+      .evaluate((check) => {
+        const browserWindow = check.ownerDocument.defaultView as unknown as {
+          getComputedStyle(target: typeof check): {
+            backgroundColor: string;
+            borderTopColor: string;
+            height: string;
+            width: string;
+          };
         };
-      };
-      const style = browserWindow.getComputedStyle(check);
-      return {
-        background: style.backgroundColor,
-        border: style.borderTopColor,
-        height: Number.parseFloat(style.height),
-        width: Number.parseFloat(style.width),
-      };
-    });
+        const style = browserWindow.getComputedStyle(check);
+        return {
+          background: style.backgroundColor,
+          border: style.borderTopColor,
+          height: Number.parseFloat(style.height),
+          width: Number.parseFloat(style.width),
+        };
+      });
     expect(todoCheckStyle.background).toBe("rgba(0, 0, 0, 0)");
     expect(todoCheckStyle.border).not.toBe("rgb(107, 114, 128)");
     expect(todoCheckStyle.width).toBeLessThanOrEqual(13);
     expect(todoCheckStyle.height).toBeLessThanOrEqual(13);
-    await page.locator(".rail-todo-check").check();
+    await page.locator("#composerRailPop .rail-todo-check").check();
     expect(
-      await page.locator(".rail-todo-check").evaluate((check) => {
+      await page.locator("#composerRailPop .rail-todo-check").evaluate((check) => {
         const browserWindow = check.ownerDocument.defaultView as unknown as {
           getComputedStyle(target: typeof check): { backgroundColor: string };
         };
@@ -2102,10 +3912,16 @@ describe("console browser behavior", () => {
       .first()
       .evaluate((option) => {
         const browserWindow = option.ownerDocument.defaultView as unknown as {
-          getComputedStyle(target: typeof option): { borderTopStyle: string; boxShadow: string };
+          getComputedStyle(target: typeof option): {
+            borderTopStyle: string;
+            boxShadow: string;
+          };
         };
         const style = browserWindow.getComputedStyle(option);
-        return { borderStyle: style.borderTopStyle, boxShadow: style.boxShadow };
+        return {
+          borderStyle: style.borderTopStyle,
+          boxShadow: style.boxShadow,
+        };
       });
     expect(configOptionStyle.borderStyle).toBe("none");
     expect(configOptionStyle.boxShadow).toBe("none");
@@ -2151,6 +3967,60 @@ describe("console browser behavior", () => {
     await page.close();
   }, 15_000);
 
+  it("shows the next-step ghost before the empty composer is focused", async () => {
+    const page = await browser.newPage();
+    const nextStepView: ConsoleView = {
+      ...composerRailView,
+      sessions: composerRailView.sessions.map((session, index) =>
+        index === 0 ? { ...session, nextStep: "Continue and run the tests" } : session,
+      ),
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(nextStepView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+
+    const input = page.locator("#input");
+    const ghost = page.locator("#composerShortcutGhost");
+    const suffix = page.locator("#composerShortcutGhostSuffix");
+    expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(false);
+    await expect.poll(() => ghost.isVisible()).toBe(true);
+    expect(await suffix.textContent()).toBe("Continue and run the tests");
+    expect(await input.getAttribute("class")).toContain("nextstep-ghosting");
+
+    await input.focus();
+    await input.press("Tab");
+    expect(await input.inputValue()).toBe("Continue and run the tests");
+    expect(await ghost.isHidden()).toBe(true);
+
+    await input.fill("");
+    await page.locator("#railTodos").focus();
+    expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(false);
+    await expect.poll(() => ghost.isVisible()).toBe(true);
+    expect(await suffix.textContent()).toBe("Continue and run the tests");
+    await page.close();
+  });
+
   it("tab-completes the first ordered shortcut from the composer suffix", async () => {
     const page = await browser.newPage();
     const shortcutView: ConsoleView = {
@@ -2158,11 +4028,36 @@ describe("console browser behavior", () => {
       vaultState: {
         ...composerRailView.vaultState,
         shortcuts: [
-          { id: "eager-result", text: "eager result", createdAt: 0, updatedAt: 0 },
-          { id: "review-changes", text: "Review changes", createdAt: 1, updatedAt: 1 },
-          { id: "review-checklist", text: "Review checklist", createdAt: 2, updatedAt: 2 },
-          { id: "ship-release", text: "Ship release safely", createdAt: 3, updatedAt: 3 },
-          { id: "write-tests", text: "Write tests", createdAt: 4, updatedAt: 4 },
+          {
+            id: "eager-result",
+            text: "eager result",
+            createdAt: 0,
+            updatedAt: 0,
+          },
+          {
+            id: "review-changes",
+            text: "Review changes",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          {
+            id: "review-checklist",
+            text: "Review checklist",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+          {
+            id: "ship-release",
+            text: "Ship release safely",
+            createdAt: 3,
+            updatedAt: 3,
+          },
+          {
+            id: "write-tests",
+            text: "Write tests",
+            createdAt: 4,
+            updatedAt: 4,
+          },
         ],
       },
     };
@@ -2171,12 +4066,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(shortcutView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(shortcutView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else await route.fulfill({ json: { ok: true, items: [] } });
@@ -2329,9 +4229,24 @@ describe("console browser behavior", () => {
       vaultState: {
         ...commentView.vaultState,
         shortcuts: [
-          { id: "review-changes", text: "Review changes", createdAt: 1, updatedAt: 1 },
-          { id: "review-checklist", text: "Review checklist", createdAt: 2, updatedAt: 2 },
-          { id: "ship-release", text: "Ship release safely", createdAt: 3, updatedAt: 3 },
+          {
+            id: "review-changes",
+            text: "Review changes",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          {
+            id: "review-checklist",
+            text: "Review checklist",
+            createdAt: 2,
+            updatedAt: 2,
+          },
+          {
+            id: "ship-release",
+            text: "Ship release safely",
+            createdAt: 3,
+            updatedAt: 3,
+          },
         ],
       },
     };
@@ -2341,13 +4256,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(commentShortcutView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentShortcutView),
+        });
       } else if (url.pathname === "/comments/messages") {
         await route.fulfill({
           json: {
@@ -2411,8 +4331,114 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("edits and resends only the latest stopped comment user message", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    const sentBodies: Array<Record<string, unknown>> = [];
+    let abortStarted = false;
+    let releaseAbort = () => {};
+    const abortGate = new Promise<void>((resolve) => {
+      releaseAbort = resolve;
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
+      } else if (url.pathname === "/comments/messages") {
+        await route.fulfill({
+          json: {
+            thread: commentView.vaultState?.commentThreads?.["comment-1"],
+            messages: [
+              { role: "user", text: "Earlier comment question", tools: [] },
+              { role: "assistant", text: "Earlier comment answer", tools: [] },
+            ],
+          },
+        });
+      } else if (url.pathname === "/comments/send") {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        sentBodies.push(body);
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: {
+              ...commentView.vaultState?.commentThreads?.["comment-1"],
+              status: "generating",
+              lastUserMessageAt: Date.now(),
+              lastUserText: body.question,
+              messageCount: 2 + sentBodies.length,
+            },
+          },
+        });
+      } else if (url.pathname === "/chat/abort") {
+        abortStarted = true;
+        await abortGate;
+        await route.fulfill({ json: { ok: true } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+    await expect.poll(() => page.locator("#commentMsgs .msg.user").count()).toBe(1);
+
+    await page.locator("#commentInput").fill("Comment sent before Stop");
+    await page.locator("#commentSend").click();
+    await expect.poll(() => sentBodies.length).toBe(1);
+    await expect.poll(() => page.locator("#commentSend").textContent()).toContain("stop");
+
+    await page.locator("#commentSend").click();
+    await expect.poll(() => abortStarted).toBe(true);
+
+    const userMessages = page.locator("#commentMsgs .msg.user");
+    expect(await userMessages.count()).toBe(2);
+    const earlierUser = userMessages.nth(0);
+    const latestUser = userMessages.nth(1);
+    expect(await earlierUser.locator(".comment-msg-edit").isHidden()).toBe(true);
+    await latestUser.hover();
+    await expect.poll(() => latestUser.locator(".comment-msg-edit").isVisible()).toBe(true);
+    await latestUser.locator(".comment-msg-edit").click();
+
+    const editor = latestUser.locator(".inline-edit-ta");
+    await editor.fill("Edited comment to resend");
+    const save = latestUser.locator(".inline-edit-save");
+    await save.click();
+    expect(sentBodies).toHaveLength(1);
+    expect(await save.isDisabled()).toBe(true);
+    expect((await save.textContent())?.toLowerCase()).toContain("stopping");
+
+    releaseAbort();
+    await expect.poll(() => sentBodies.length).toBe(2);
+    expect(sentBodies[1]).toMatchObject({
+      threadId: "comment-1",
+      question: "Edited comment to resend",
+    });
+    expect(await page.locator("#commentMsgs .msg.user").count()).toBe(2);
+    expect(await latestUser.locator(".bubble").textContent()).toContain("Edited comment to resend");
+    await page.close();
+  });
+
   it("arms the Goal toggle beside attachments and submits the next message as a Goal", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     let sentBody: Record<string, unknown> | null = null;
     let cleared = false;
     await page.addInitScript(() => {
@@ -2420,19 +4446,26 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else if (url.pathname === "/chat/queue") {
         await route.fulfill({ json: { ok: true, items: [], parked: false } });
       } else if (url.pathname === "/chat/goal" && request.method() === "GET") {
-        await route.fulfill({ json: { ok: true, supported: true, goal: null } });
+        await route.fulfill({
+          json: { ok: true, supported: true, goal: null },
+        });
       } else if (url.pathname === "/chat/goal/clear") {
         cleared = true;
         await route.fulfill({ json: { ok: true, goal: null } });
@@ -2459,7 +4492,11 @@ describe("console browser behavior", () => {
     await page.locator("#list .item", { hasText: "Avoidance session" }).click();
 
     const order = await page.locator("#composer .composeractions").evaluate((row) =>
-      Array.from(row.querySelectorAll("button") as unknown as ArrayLike<{ id: string }>)
+      Array.from(
+        row.querySelectorAll("button") as unknown as ArrayLike<{
+          id: string;
+        }>,
+      )
         .map((node) => node.id)
         .filter(Boolean),
     );
@@ -2489,7 +4526,10 @@ describe("console browser behavior", () => {
     await page.locator("#input").fill("finish and verify this change");
     await page.locator("#send").click();
     await expect.poll(() => sentBody).not.toBeNull();
-    expect(sentBody).toMatchObject({ text: "finish and verify this change", goal: true });
+    expect(sentBody).toMatchObject({
+      text: "finish and verify this change",
+      goal: true,
+    });
     await expect.poll(() => page.locator("#goalToggle").getAttribute("class")).toContain("active");
 
     await page.locator("#goalToggle").click();
@@ -2504,7 +4544,9 @@ describe("console browser behavior", () => {
   });
 
   it("arms Goal during generation for the next queued message only", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     let queuedBody: Record<string, unknown> | null = null;
     let directSendCount = 0;
     await page.addInitScript(() => {
@@ -2517,17 +4559,24 @@ describe("console browser behavior", () => {
         }
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else if (url.pathname === "/chat/goal") {
-        await route.fulfill({ json: { ok: true, supported: true, goal: null } });
+        await route.fulfill({
+          json: { ok: true, supported: true, goal: null },
+        });
       } else if (url.pathname === "/chat/queue" && request.method() === "POST") {
         queuedBody = request.postDataJSON() as Record<string, unknown>;
         await route.fulfill({
@@ -2587,6 +4636,254 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("labels active queued actions as Claude append and Codex guide", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__attendEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/queue") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            items: [
+              { id: "queued-claude", text: "continue this answer", vendor: "claude" },
+              { id: "queued-codex", text: "focus on the tests", vendor: "codex" },
+            ],
+            parked: false,
+            steerable: true,
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await page.evaluate(() => {
+      const source = (globalThis as unknown as Record<string, unknown>).__attendEventSource as {
+        onmessage(event: { data: string }): void;
+      };
+      source.onmessage({
+        data: JSON.stringify({
+          kind: "session_event",
+          sessionId: "s1",
+          emittedAt: Date.now(),
+          event: { kind: "user_turn_started", text: "current turn" },
+        }),
+      });
+    });
+
+    const queuedRows = page.locator("#queue .qitem");
+    await expect.poll(() => queuedRows.nth(0).locator(".qsend").textContent()).toBe("append");
+    expect(await queuedRows.nth(0).locator(".qsend").getAttribute("data-hover-tip")).toContain(
+      "Append",
+    );
+    await expect.poll(() => queuedRows.nth(1).locator(".qsend").textContent()).toBe("guide");
+    expect(await queuedRows.nth(1).locator(".qsend").getAttribute("data-hover-tip")).toContain(
+      "Guide",
+    );
+
+    await queuedRows.nth(0).locator(".qedit").click();
+    await expect.poll(() => page.locator("#queue .qeditbox .qsend").textContent()).toBe("append");
+    await page.locator("#queue .qeditta").press("Escape");
+    await queuedRows.nth(1).locator(".qedit").click();
+    await expect.poll(() => page.locator("#queue .qeditbox .qsend").textContent()).toBe("guide");
+    await page.close();
+  });
+
+  it("appends a queued Claude message without ending the active turn", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    let queuedItem: { id: string; text: string } | null = null;
+    let steeredItem = "";
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__attendEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/queue" && request.method() === "POST") {
+        const body = request.postDataJSON() as { text: string };
+        queuedItem = { id: "queued-steer-1", text: body.text };
+        await route.fulfill({
+          json: {
+            ok: true,
+            items: [queuedItem],
+            parked: false,
+            steerable: true,
+          },
+        });
+      } else if (url.pathname === "/chat/queue/send") {
+        steeredItem = url.searchParams.get("item") ?? "";
+        queuedItem = null;
+        await route.fulfill({
+          json: {
+            ok: true,
+            steered: true,
+            items: [],
+            parked: false,
+            steerable: false,
+          },
+        });
+      } else if (url.pathname === "/chat/queue") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            items: queuedItem ? [queuedItem] : [],
+            parked: false,
+            steerable: !!queuedItem,
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    const emit = (event: Record<string, unknown>) =>
+      page.evaluate((nextEvent) => {
+        const source = (globalThis as unknown as Record<string, unknown>).__attendEventSource as {
+          onmessage(event: { data: string }): void;
+        };
+        source.onmessage({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "s1",
+            emittedAt: Date.now(),
+            event: nextEvent,
+          }),
+        });
+      }, event);
+    await emit({ kind: "user_turn_started", text: "current turn" });
+
+    await page.locator("#input").fill("append this to the response");
+    await page.locator("#input").press("Enter");
+    await expect.poll(() => page.locator("#queue .qsend").textContent()).toBe("append");
+    expect(await page.locator("#queue .qsend").getAttribute("data-hover-tip")).toContain("Append");
+    await page.locator("#queue .qsend").click();
+    await expect.poll(() => steeredItem).toBe("queued-steer-1");
+    await expect.poll(() => page.locator("#queue .qitem").count()).toBe(0);
+    expect(await page.locator("#send").textContent()).toContain("stop");
+
+    await emit({
+      kind: "queued_turn_steered",
+      queueId: "queued-steer-1",
+      text: "append this to the response",
+    });
+    await expect
+      .poll(() => page.locator("#msgs .msg.user .bubble").last().textContent())
+      .toContain("append this to the response");
+    expect(await page.locator("#send").textContent()).toContain("stop");
+    await page.close();
+  });
+
+  it("keeps the latest user-message age current when the send view is transcript-stale", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    const oldPromptAt = Date.now() - 65 * 60_000;
+    const baseSession = composerRailView.sessions[0];
+    if (!baseSession) throw new Error("missing session fixture");
+    const staleSession: ConsoleView["sessions"][number] = {
+      ...baseSession,
+      lastTs: oldPromptAt,
+      userPromptTs: [oldPromptAt],
+    };
+    const staleView: ConsoleView = {
+      ...composerRailView,
+      sessions: [staleSession, ...composerRailView.sessions.slice(1)],
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(staleView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/send") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            session: "s1",
+            view: {
+              ...staleSession,
+              lastPrompt: "latest prompt from a stale scan",
+            },
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await page.locator("#input").fill("fresh user message");
+    const sendResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/chat/send",
+    );
+    await page.locator("#send").click();
+    await sendResponse;
+
+    const row = page.locator('#list .item[data-session-id="s1"]');
+    const latest = row.locator(".prompt-line:has(.prompt-line-latest)");
+    await expect.poll(() => latest.locator(".prompt-line-latest").textContent()).toBe("now");
+    expect(await latest.locator(".prompt-line-text").textContent()).toBe("fresh user message");
+    expect(await row.locator(".it-age").textContent()).toBe("now");
+    await page.close();
+  });
+
   it("reorders shortcut priority with persistent controls and preserves rail state", async () => {
     const page = await browser.newPage();
     page.setDefaultTimeout(2_000);
@@ -2603,7 +4900,12 @@ describe("console browser behavior", () => {
       updatedAt: 10,
     };
     const trailingShortcuts = [
-      { id: "ship-release", text: "Ship release safely", createdAt: 30, updatedAt: 30 },
+      {
+        id: "ship-release",
+        text: "Ship release safely",
+        createdAt: 30,
+        updatedAt: 30,
+      },
       ...Array.from({ length: 10 }, (_, index) => ({
         id: `filler-${index}`,
         text: `Filler shortcut ${index}`,
@@ -2626,17 +4928,24 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(shortcutView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(shortcutView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else if (url.pathname === "/vault/ui-state" && request.method() === "POST") {
-        const body = request.postDataJSON() as { shortcuts?: typeof initialShortcuts };
+        const body = request.postDataJSON() as {
+          shortcuts?: typeof initialShortcuts;
+        };
         if (body.shortcuts) shortcutWrites.push(body.shortcuts);
         await route.fulfill({ json: { ok: true } });
       } else await route.fulfill({ json: { ok: true, items: [] } });
@@ -2719,20 +5028,107 @@ describe("console browser behavior", () => {
     await page.close();
   }, 10_000);
 
-  it("uses the Tag close control for user-message editing and exits with Escape", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+  it("keeps an immediate Stop-then-edit flow in resend mode until abort completes", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    const sentBodies: Array<Record<string, unknown>> = [];
+    let abortStarted = false;
+    let releaseAbort = () => {};
+    const abortGate = new Promise<void>((resolve) => {
+      releaseAbort = resolve;
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            { role: "user", text: "Earlier question" },
+            { role: "assistant", text: "Earlier answer" },
+          ],
+        });
+      } else if (url.pathname === "/chat/send") {
+        sentBodies.push(request.postDataJSON() as Record<string, unknown>);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/abort") {
+        abortStarted = true;
+        await abortGate;
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/queue") {
+        await route.fulfill({ json: { ok: true, parked: false, items: [] } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await expect.poll(() => page.locator("#msgs .msg.user").count()).toBe(1);
+    await page.locator("#input").fill("Message sent before Stop");
+    await page.locator("#send").click();
+    await expect.poll(() => sentBodies.length).toBe(1);
+    await expect.poll(() => page.locator("#send").textContent()).toContain("stop");
+
+    await page.locator("#send").click();
+    await expect.poll(() => abortStarted).toBe(true);
+    const latestUser = page.locator("#msgs .msg.user").last();
+    await latestUser.hover();
+    await latestUser.locator(".msg-edit").click();
+    const save = latestUser.locator(".inline-edit-save");
+    expect((await save.textContent())?.toLowerCase()).toContain("send");
+    expect(await save.getAttribute("class")).not.toContain("fork-action");
+    const resendInput = latestUser.locator(".inline-edit-ta");
+    await expect
+      .poll(() => resendInput.evaluate((node) => node.ownerDocument.activeElement === node))
+      .toBe(true);
+    await resendInput.fill("Edited message to resend");
+    await save.click();
+    expect(sentBodies).toHaveLength(1);
+    expect(await save.isDisabled()).toBe(true);
+    expect((await save.textContent())?.toLowerCase()).toContain("stopping");
+
+    releaseAbort();
+    await expect.poll(() => sentBodies.length).toBe(2);
+    expect(sentBodies[1]).toMatchObject({ text: "Edited message to resend" });
+    await page.close();
+  }, 10_000);
+
+  it("uses the shared close control for user-message editing and exits with Escape", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     let scheduledEdit: Record<string, unknown> | null = null;
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
           json: [
@@ -2765,23 +5161,25 @@ describe("console browser behavior", () => {
 
     const user = page.locator("#msgs .msg.user").first();
     await page.locator("#h-tags .it-tagadd").click();
-    const tagCloseStyle = await page.locator("#h-tags .edit-cancel").evaluate((button) => {
-      const style = button.ownerDocument.defaultView?.getComputedStyle(button);
-      const icon = button.querySelector("svg");
-      const iconStyle = icon && button.ownerDocument.defaultView?.getComputedStyle(icon);
-      return {
-        background: style?.backgroundColor,
-        border: style?.borderTopColor,
-        borderRadius: style?.borderRadius,
-        color: style?.color,
-        height: style?.height,
-        iconHeight: iconStyle?.height,
-        iconWidth: iconStyle?.width,
-        opacity: style?.opacity,
-        width: style?.width,
-      };
-    });
-    await page.locator("#h-tags .edit-cancel").click();
+    const tagCloseStyle = await page
+      .locator("#sessionTagPopover .edit-cancel")
+      .evaluate((button) => {
+        const style = button.ownerDocument.defaultView?.getComputedStyle(button);
+        const icon = button.querySelector("svg");
+        const iconStyle = icon && button.ownerDocument.defaultView?.getComputedStyle(icon);
+        return {
+          background: style?.backgroundColor,
+          border: style?.borderTopColor,
+          borderRadius: style?.borderRadius,
+          color: style?.color,
+          height: style?.height,
+          iconHeight: iconStyle?.height,
+          iconWidth: iconStyle?.width,
+          opacity: style?.opacity,
+          width: style?.width,
+        };
+      });
+    await page.locator("#sessionTagPopover .edit-cancel").click();
     await user.hover();
     await user.locator(".msg-edit").click();
     expect(await user.locator(".inline-edit .edit-cancel svg").count()).toBe(1);
@@ -2814,7 +5212,11 @@ describe("console browser behavior", () => {
 
     await user.hover();
     await user.locator(".msg-edit").click();
-    await user.locator(".inline-edit-ta").fill("Scheduled edited fork");
+    const scheduledForkInput = user.locator(".inline-edit-ta");
+    await expect
+      .poll(() => scheduledForkInput.evaluate((node) => node.ownerDocument.activeElement === node))
+      .toBe(true);
+    await scheduledForkInput.fill("Scheduled edited fork");
     await user.locator(".inline-edit .schedulebtn").click();
     await expect.poll(() => page.locator("#scheduleActions").isVisible()).toBe(true);
     await page.locator("#scheduleActions .scheduleaction", { hasText: "Fork" }).click();
@@ -2832,8 +5234,164 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("shrinks a cleared multiline sent-message editor and tab-completes shortcuts", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "user",
+              text: "Original user message\nSecond line\nThird line",
+            },
+            { role: "assistant", text: "Original response" },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await expect.poll(() => page.locator("#msgs .msg.user").count()).toBe(1);
+
+    const user = page.locator("#msgs .msg.user");
+    await user.hover();
+    await user.locator(".msg-edit").click();
+    const input = user.locator(".inline-edit-ta");
+    const expandedHeight = await input.evaluate((node) => node.clientHeight);
+    expect(await input.getAttribute("rows")).toBe("3");
+
+    await input.fill("");
+    expect(await input.getAttribute("rows")).toBe("1");
+    expect(await user.locator(".inline-edit").getAttribute("class")).toContain("single-line");
+    expect(await input.evaluate((node) => node.clientHeight)).toBeLessThan(expandedHeight);
+
+    await input.fill("Rev");
+    await input.press("Tab");
+
+    expect(await input.inputValue()).toBe("Review changes");
+    expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(true);
+    expect(await user.locator(".inline-edit").count()).toBe(1);
+
+    await input.press("Escape");
+    await expect.poll(() => user.locator(".inline-edit").count()).toBe(0);
+    expect(await user.locator(".bubble").textContent()).toContain("Original user message");
+    await page.close();
+  });
+
+  it("replays a fork daemon verdict that arrives before provider binding", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    let releaseFork = () => {};
+    let noteForkRequest = () => {};
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    const forkRequested = new Promise<void>((resolve) => {
+      noteForkRequest = resolve;
+    });
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__forkAnalysisEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/fork") {
+        noteForkRequest();
+        await forkGate;
+        await route.fulfill({
+          json: {
+            ok: true,
+            session: "fork-provider-fast-analysis",
+            parentSessionId: "s1",
+            generating: false,
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await page.locator("#input").fill("fork with an immediate daemon verdict");
+    await page.locator("#forkBtn").click();
+    await forkRequested;
+
+    await page.evaluate(async () => {
+      const source = (globalThis as unknown as Record<string, unknown>)
+        .__forkAnalysisEventSource as {
+        onmessage: ((event: { data: string }) => void) | null;
+      };
+      source.onmessage?.({
+        data: JSON.stringify({
+          kind: "analysis",
+          sessionId: "fork-provider-fast-analysis",
+          analysis: {
+            brief: "Fork daemon brief",
+            state: "needs_input",
+            priority: 8,
+            etaMin: 12,
+            reason: "Fork daemon reason",
+            nextStep: "Answer the fork",
+            probe: null,
+          },
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    releaseFork();
+
+    const forkCard = page.locator("#list .item", {
+      hasText: "fork with an immediate daemon verdict",
+    });
+    await expect.poll(() => forkCard.count()).toBe(1);
+    await forkCard.click();
+    await expect.poll(() => page.locator("#h-title").textContent()).toContain("Fork daemon brief");
+    await expect.poll(() => page.locator("#h-sig").textContent()).toContain("Fork daemon reason");
+    expect(await page.locator("#h-sig").textContent()).toContain("12m");
+    await page.close();
+  });
+
   it("preserves completed tool status when forking from an edited message", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
     let releaseFork = () => {};
     const forkGate = new Promise<void>((resolve) => {
       releaseFork = resolve;
@@ -2855,13 +5413,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
           json: [
@@ -2985,12 +5548,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
           json: [
@@ -3046,6 +5614,101 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("keeps arrow navigation inside soft-wrapped composer lines before traversing history", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    const latestHistory =
+      "latest history message wraps across several narrow composer visual lines";
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            { role: "user", text: "older history message" },
+            { role: "assistant", text: "Earlier answer" },
+            { role: "user", text: latestHistory },
+          ],
+        });
+      } else await route.fulfill({ json: { ok: true, items: [] } });
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await expect.poll(() => page.locator("#msgs .msg.user").count()).toBe(2);
+
+    const input = page.locator("#input");
+    type ComposerTextarea = {
+      scrollHeight: number;
+      selectionStart: number;
+      setSelectionRange(start: number, end: number): void;
+      style: {
+        width: string;
+        maxWidth: string;
+        flex: string;
+        paddingLeft: string;
+        paddingRight: string;
+        fontFamily: string;
+        fontSize: string;
+        lineHeight: string;
+      };
+      value: string;
+    };
+    await input.evaluate((node) => {
+      const textarea = node as unknown as ComposerTextarea;
+      textarea.style.width = "140px";
+      textarea.style.maxWidth = "140px";
+      textarea.style.flex = "0 0 140px";
+      textarea.style.paddingLeft = "0";
+      textarea.style.paddingRight = "0";
+      textarea.style.fontFamily = "monospace";
+      textarea.style.fontSize = "16px";
+      textarea.style.lineHeight = "20px";
+    });
+    const draft = "draft text wraps across several narrow composer visual lines";
+    await input.fill(draft);
+    expect(
+      await input.evaluate((node) => (node as unknown as ComposerTextarea).scrollHeight > 3 * 20),
+    ).toBe(true);
+
+    await input.evaluate((node) => (node as unknown as ComposerTextarea).setSelectionRange(30, 30));
+    await input.press("ArrowUp");
+    expect(await input.inputValue()).toBe(draft);
+    expect(
+      await input.evaluate((node) => (node as unknown as ComposerTextarea).selectionStart),
+    ).toBeLessThan(30);
+
+    await input.evaluate((node) => (node as unknown as ComposerTextarea).setSelectionRange(3, 3));
+    await input.press("ArrowUp");
+    expect(await input.inputValue()).toBe(latestHistory);
+
+    await input.evaluate((node) => (node as unknown as ComposerTextarea).setSelectionRange(25, 25));
+    await input.press("ArrowDown");
+    expect(await input.inputValue()).toBe(latestHistory);
+    expect(
+      await input.evaluate((node) => (node as unknown as ComposerTextarea).selectionStart),
+    ).toBeGreaterThan(25);
+
+    await input.evaluate((node) => {
+      const textarea = node as unknown as ComposerTextarea;
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+    await input.press("ArrowDown");
+    expect(await input.inputValue()).toBe(draft);
+    await page.close();
+  });
+
   it("keeps terminal-style message history and drafts isolated by session", async () => {
     const page = await browser.newPage();
     await page.addInitScript(() => {
@@ -3053,12 +5716,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/chat/messages") {
         const firstSession = url.searchParams.get("file") === "/tmp/session-1.jsonl";
         await route.fulfill({
@@ -3107,7 +5775,9 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     const rootA = "/work/vault-a";
     const rootB = "/work/vault-b";
@@ -3128,7 +5798,9 @@ describe("console browser behavior", () => {
         });
       }
       if (url.pathname === "/dirs/suggest") {
-        return route.fulfill({ json: { dirs: [{ path: childDir, source: "folder" }] } });
+        return route.fulfill({
+          json: { dirs: [{ path: childDir, source: "folder" }] },
+        });
       }
       return route.fulfill({ json: {} });
     });
@@ -3173,7 +5845,9 @@ describe("console browser behavior", () => {
         onerror: (() => void) | null = null;
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("http://attend.test/", (route) =>
       route.fulfill({ contentType: "text/html", body: renderConsole(view) }),
@@ -3189,7 +5863,9 @@ describe("console browser behavior", () => {
           click(): void;
         };
         const browserGlobal = globalThis as unknown as {
-          document: { querySelectorAll(selector: string): ArrayLike<BrowserButton> };
+          document: {
+            querySelectorAll(selector: string): ArrayLike<BrowserButton>;
+          };
         };
         const labelOf = (button: BrowserButton) =>
           button.firstChild?.textContent ?? button.textContent;
@@ -3220,7 +5896,7 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("opens a sidebar comment badge with one click while the composer is focused", async () => {
+  it("opens a sidebar comment badge with one click and closes it when switching chats", async () => {
     const page = await browser.newPage();
     await page.addInitScript(() => {
       const browserGlobal = globalThis as unknown as { EventSource: unknown };
@@ -3228,12 +5904,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(commentView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
       } else if (url.pathname === "/comments/messages") {
         await route.fulfill({
           json: {
@@ -3247,7 +5928,9 @@ describe("console browser behavior", () => {
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
 
-    const session = page.locator("#list .item", { hasText: "Avoidance session" });
+    const session = page.locator("#list .item", {
+      hasText: "Avoidance session",
+    });
     await page.locator("#list .item", { hasText: "Other session" }).click();
     await page.locator("#input").focus();
     await session.locator(".it-comment").click();
@@ -3273,7 +5956,7 @@ describe("console browser behavior", () => {
     expect(resizedDrawerBox.width).toBeCloseTo(resizedMainBox.width, 0);
     await page.locator("#sessionPanelList .item", { hasText: "Other session" }).click();
     expect(await page.locator("#h-title").textContent()).toContain("Other session");
-    expect(await page.locator("#commentDrawer").isVisible()).toBe(true);
+    expect(await page.locator("#commentDrawer").isHidden()).toBe(true);
     await page.close();
   });
 
@@ -3284,16 +5967,25 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(commentMotionView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentMotionView),
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
           json: [
-            { role: "assistant", text: "A comment reply is still generating", tools: [] },
+            {
+              role: "assistant",
+              text: "A comment reply is still generating",
+              tools: [],
+            },
             { role: "assistant", text: "A comment reply is unread", tools: [] },
           ],
         });
@@ -3303,15 +5995,18 @@ describe("console browser behavior", () => {
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
 
-    const session = page.locator("#list .item", { hasText: "Avoidance session" });
+    const session = page.locator("#list .item", {
+      hasText: "Avoidance session",
+    });
     const sidebarBadge = session.locator(".it-comment.generating");
     await expect.poll(() => sidebarBadge.isVisible()).toBe(true);
     expect(await sidebarBadge.textContent()).toBe("1");
+    expect(await sidebarBadge.locator(".it-comment-spinner").count()).toBe(1);
     expect(
-      await sidebarBadge.evaluate((badge) => {
-        const view = badge.ownerDocument.defaultView;
+      await sidebarBadge.locator(".it-comment-spinner").evaluate((spinner) => {
+        const view = spinner.ownerDocument.defaultView;
         if (!view) throw new Error("Missing browser window");
-        const icon = view.getComputedStyle(badge, "::before");
+        const icon = view.getComputedStyle(spinner);
         return {
           animationName: icon.animationName,
           animationPlayState: icon.animationPlayState,
@@ -3324,7 +6019,7 @@ describe("console browser behavior", () => {
     const unreadPin = page.locator("#pinTray .pincomment.unread");
     await expect.poll(() => generatingPin.isVisible()).toBe(true);
     expect(await generatingPin.textContent()).toBe("");
-    expect(await unreadPin.textContent()).toBe("comments");
+    expect(await unreadPin.locator(".pincomment-icon").count()).toBe(1);
     expect(
       await generatingPin.locator(".pincomment-spinner").evaluate((spinner) => {
         const view = spinner.ownerDocument.defaultView;
@@ -3370,6 +6065,166 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("groups a promoted comment session with its parent chat", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1100, height: 800 },
+    });
+    const uiPatches: Array<Record<string, unknown>> = [];
+    let releasePromotion = () => {};
+    let notePromotionRequest = () => {};
+    const promotionGate = new Promise<void>((resolve) => {
+      releasePromotion = resolve;
+    });
+    const promotionRequested = new Promise<void>((resolve) => {
+      notePromotionRequest = resolve;
+    });
+    const promotedView = {
+      ...raceView.sessions[0],
+      sessionId: "comment-provider-1",
+      title: "Follow this thread",
+      brief: "Follow this thread",
+      file: "/tmp/promoted-comment.jsonl",
+      unread: true,
+      seen: false,
+    };
+    const pinnedCommentView: ConsoleView = {
+      ...commentView,
+      vaultState: {
+        ...commentView.vaultState,
+        sessionPins: { s1: 1 },
+      },
+    };
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__promoteAnalysisEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pinnedCommentView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/comments/messages") {
+        await route.fulfill({
+          json: {
+            thread: commentView.vaultState?.commentThreads?.["comment-1"],
+            messages: [
+              { role: "user", text: "Follow this thread" },
+              { role: "assistant", text: "Ready to promote" },
+            ],
+          },
+        });
+      } else if (url.pathname === "/comments/promote") {
+        notePromotionRequest();
+        await promotionGate;
+        await route.fulfill({
+          json: {
+            ok: true,
+            session: promotedView.sessionId,
+            vendor: promotedView.vendor,
+            cwd: promotedView.cwd,
+            view: promotedView,
+          },
+        });
+      } else if (url.pathname === "/vault/ui-state" && request.method() === "POST") {
+        uiPatches.push(request.postDataJSON() as Record<string, unknown>);
+        await route.fulfill({ json: { ok: true } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#sessionPanelToggle").click();
+    await page.locator('#list .item[data-session-id="s1"] .it-comment').click();
+    const promote = page.locator("#commentPromote");
+    await expect.poll(() => promote.isEnabled()).toBe(true);
+    await promote.click();
+    await promotionRequested;
+    await page.evaluate(async () => {
+      const source = (globalThis as unknown as Record<string, unknown>)
+        .__promoteAnalysisEventSource as {
+        onmessage: ((event: { data: string }) => void) | null;
+      };
+      source.onmessage?.({
+        data: JSON.stringify({
+          kind: "analysis",
+          sessionId: "comment-provider-1",
+          analysis: {
+            brief: "Promoted daemon brief",
+            state: "needs_decision",
+            priority: 9,
+            etaMin: 7,
+            reason: "Promoted daemon reason",
+            nextStep: "Decide the promoted task",
+            probe: null,
+          },
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    releasePromotion();
+
+    await expect.poll(() => page.locator("#commentDrawer").isHidden()).toBe(true);
+    const promotedCard = page.locator(
+      '#sessionPanelList .item[data-session-id="comment-provider-1"]',
+    );
+    await expect.poll(() => promotedCard.count()).toBe(1);
+    expect(
+      await promotedCard.evaluate((node) =>
+        node.previousElementSibling?.classList.contains("session-pin-divider"),
+      ),
+    ).toBe(true);
+    await expect.poll(() => page.locator("#chatTabs .chat-tab").count()).toBe(2);
+    expect(
+      await page
+        .locator("#chatTabs .chat-tab")
+        .evaluateAll((tabs) => tabs.map((tab) => tab.getAttribute("data-session-id"))),
+    ).toEqual(["s1", "comment-provider-1"]);
+    expect(await page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id")).toBe(
+      "comment-provider-1",
+    );
+    await expect
+      .poll(() => page.locator("#h-title").textContent())
+      .toContain("Promoted daemon brief");
+    expect(await page.locator("#h-title").getAttribute("class")).not.toContain("manual");
+    expect(await page.locator("#h-title").textContent()).not.toContain("Follow this thread");
+    await expect
+      .poll(() => page.locator("#h-sig").textContent())
+      .toContain("Promoted daemon reason");
+    expect(await page.locator("#h-sig").textContent()).toContain("7m");
+
+    await expect.poll(() => uiPatches.some((patch) => !!patch.chatGroups)).toBe(true);
+    const groupRecords = uiPatches.flatMap((patch) =>
+      Object.values(
+        (patch.chatGroups as Record<string, { members?: unknown[] }> | undefined) ?? {},
+      ),
+    );
+    expect(groupRecords).toContainEqual(
+      expect.objectContaining({
+        members: [
+          { vendor: "claude", sessionId: "s1" },
+          { vendor: "claude", sessionId: "comment-provider-1" },
+        ],
+      }),
+    );
+    await page.close();
+  });
+
   it("replaces comment history without retaining stale bubbles", async () => {
     const page = await browser.newPage();
     page.setDefaultTimeout(2_000);
@@ -3378,7 +6233,9 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     const messages = [
       { role: "user", text: "first question" },
@@ -3389,7 +6246,10 @@ describe("console browser behavior", () => {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(commentView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
       } else if (url.pathname === "/comments/messages") {
         await route.fulfill({
           json: {
@@ -3399,7 +6259,13 @@ describe("console browser behavior", () => {
         });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
-          json: [{ role: "assistant", text: "An answer with an unread comment", tools: [] }],
+          json: [
+            {
+              role: "assistant",
+              text: "An answer with an unread comment",
+              tools: [],
+            },
+          ],
         });
       } else {
         await route.fulfill({ json: { ok: true } });
@@ -3425,6 +6291,96 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("sends only context before an assistant comment anchor", async () => {
+    const testCase = {
+      role: "assistant",
+      target: ".msg.assistant",
+      targetIndex: 0,
+      anchorKey: "assistant:1",
+      expectedContext: [{ role: "user", text: "earlier setup", tools: [] }],
+    };
+    const page = await browser.newPage();
+    page.setDefaultTimeout(2_000);
+    let sentBody: Record<string, unknown> | undefined;
+    const messages = [
+      { role: "user", text: "earlier setup" },
+      { role: "assistant", text: "earlier answer" },
+      { role: "user", text: "anchored user requirement" },
+      { role: "assistant", text: "response after anchor" },
+      { role: "user", text: "LATER BAIT QUESTION" },
+    ];
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: messages });
+      } else if (url.pathname === "/comments/send") {
+        sentBody = request.postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: {
+              id: sentBody.threadId,
+              parentSessionId: sentBody.parentSessionId,
+              anchorKey: sentBody.anchorKey,
+              anchorText: sentBody.anchorText,
+              anchorData: sentBody.anchorData,
+              providerSessionId: `comment-${testCase.role}-provider`,
+              vendor: "claude",
+              cwd: "/tmp/project",
+              createdAt: Date.now(),
+              status: "generating",
+              messageCount: 1,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    const anchor = page.locator(`#msgs > ${testCase.target}`).nth(testCase.targetIndex);
+    await expect.poll(() => anchor.isVisible()).toBe(true);
+    await anchor.evaluate((node) => {
+      node.querySelector(".bubble")?.dispatchEvent(new Event("pointermove", { bubbles: true }));
+      (
+        node.ownerDocument.querySelector("#msgFloatComment") as {
+          click(): void;
+        } | null
+      )?.click();
+    });
+    await expect.poll(() => page.locator("#commentDrawer").isVisible()).toBe(true);
+    await page.locator("#commentInput").fill("How should this be improved?");
+    await page.locator("#commentSend").click();
+
+    await expect.poll(() => sentBody).toBeTruthy();
+    expect(sentBody).toMatchObject({
+      anchorKey: testCase.anchorKey,
+      anchorData: { kind: "message", role: testCase.role },
+      question: "How should this be improved?",
+      contextMessages: testCase.expectedContext,
+    });
+    expect(JSON.stringify(sentBody?.contextMessages)).not.toContain("LATER BAIT QUESTION");
+    expect(JSON.stringify(sentBody?.contextMessages)).not.toContain("response after anchor");
+    await page.close();
+  });
+
   it("renders persisted and live tool blocks in the comment panel", async () => {
     const page = await browser.newPage();
     page.setDefaultTimeout(2_000);
@@ -3438,12 +6394,17 @@ describe("console browser behavior", () => {
         }
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(commentView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
       } else if (url.pathname === "/comments/messages") {
         await route.fulfill({
           json: {
@@ -3467,7 +6428,13 @@ describe("console browser behavior", () => {
         });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({
-          json: [{ role: "assistant", text: "An answer with an unread comment", tools: [] }],
+          json: [
+            {
+              role: "assistant",
+              text: "An answer with an unread comment",
+              tools: [],
+            },
+          ],
         });
       } else {
         await route.fulfill({ json: { ok: true } });
@@ -3543,26 +6510,47 @@ describe("console browser behavior", () => {
       releaseNewSession = resolve;
     });
     const tagRequests: Array<{ session: string; tags: string[] }> = [];
+    const pinnedPendingTagView: ConsoleView = {
+      ...pendingTagView,
+      vaultState: {
+        ...pendingTagView.vaultState,
+        sessionPins: { s1: 1 },
+      },
+    };
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pendingTagView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pinnedPendingTagView),
+        });
       } else if (url.pathname === "/chat/new") {
         await newSessionGate;
         await route.fulfill({
-          json: { ok: true, session: "new-provider-1", cwd: "/tmp/new-project" },
+          json: {
+            ok: true,
+            session: "new-provider-1",
+            cwd: "/tmp/new-project",
+          },
         });
       } else if (url.pathname === "/session/tags") {
         const body = route.request().postDataJSON() as { tags: string[] };
-        tagRequests.push({ session: url.searchParams.get("session") ?? "", tags: body.tags });
-        await route.fulfill({ json: { ok: true, sessionTags: body.tags, tags: ["work"] } });
+        tagRequests.push({
+          session: url.searchParams.get("session") ?? "",
+          tags: body.tags,
+        });
+        await route.fulfill({
+          json: { ok: true, sessionTags: body.tags, tags: ["work"] },
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else {
@@ -3571,20 +6559,37 @@ describe("console browser behavior", () => {
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
 
+    await page.locator("#sessionPanelToggle").click();
     await page.locator("#newToggle").click();
     await page.locator("#np").fill("start pending session");
     await page.locator("#nbtn").click();
+    const pendingCard = page.locator("#sessionPanelList .item", {
+      hasText: "start pending session",
+    });
+    await expect.poll(() => pendingCard.count()).toBe(1);
+    expect(
+      await pendingCard.evaluate((node) =>
+        node.previousElementSibling?.classList.contains("session-pin-divider"),
+      ),
+    ).toBe(true);
+    const headerHeightBefore = await page.locator("#h-tags").evaluate((node) => node.offsetHeight);
     await page.locator("#h-tags .it-tagadd").click();
-    const tagEditorGeometry = await page.locator("#h-tags .tagedit").evaluate((editor) => {
-      const input = editor.querySelector(".tagedit-input");
-      const suggestions = editor.querySelector(".tagsug");
+    const tagEditorGeometry = await page.locator("#sessionTagPopover").evaluate((editor) => {
+      const input = editor.querySelector(".sessiontag-input");
+      const suggestions = editor.querySelector(".sessiontag-list");
       const close = editor.querySelector(".edit-cancel");
       if (!input || !suggestions || !close) throw new Error("Missing tag editor controls");
       const inputBox = input.getBoundingClientRect();
       const suggestionsBox = suggestions.getBoundingClientRect();
       const closeBox = close.getBoundingClientRect();
       return {
-        input: { left: inputBox.left, right: inputBox.right, width: inputBox.width },
+        position: editor.ownerDocument.defaultView?.getComputedStyle(editor).position,
+        parent: editor.parentElement?.tagName,
+        input: {
+          left: inputBox.left,
+          right: inputBox.right,
+          width: inputBox.width,
+        },
         suggestions: {
           left: suggestionsBox.left,
           right: suggestionsBox.right,
@@ -3593,24 +6598,27 @@ describe("console browser behavior", () => {
         close: { left: closeBox.left, right: closeBox.right },
       };
     });
-    expect(
-      Math.abs(tagEditorGeometry.input.width - tagEditorGeometry.suggestions.width),
-    ).toBeLessThan(1);
-    expect(
-      Math.abs(tagEditorGeometry.input.left - tagEditorGeometry.suggestions.left),
-    ).toBeLessThan(1);
-    expect(
-      Math.abs(tagEditorGeometry.input.right - tagEditorGeometry.suggestions.right),
-    ).toBeLessThan(1);
+    expect(tagEditorGeometry.position).toBe("fixed");
+    expect(tagEditorGeometry.parent).toBe("BODY");
+    expect(await page.locator("#h-tags").evaluate((node) => node.offsetHeight)).toBe(
+      headerHeightBefore,
+    );
+    expect(tagEditorGeometry.suggestions.left).toBeGreaterThanOrEqual(tagEditorGeometry.input.left);
+    expect(tagEditorGeometry.suggestions.right).toBeLessThanOrEqual(tagEditorGeometry.input.right);
     expect(tagEditorGeometry.close.left).toBeGreaterThan(tagEditorGeometry.input.left);
     expect(tagEditorGeometry.close.right).toBeLessThan(tagEditorGeometry.input.right);
-    await page.locator("#h-tags .tagsug-opt", { hasText: "work" }).click();
+    await page.locator("#sessionTagList .sessiontag-option", { hasText: "work" }).click();
 
     expect(await page.locator("#h-tags .it-tag", { hasText: "work" }).count()).toBe(1);
     expect(tagRequests).toEqual([]);
 
     releaseNewSession();
     await expect.poll(() => tagRequests).toEqual([{ session: "new-provider-1", tags: ["work"] }]);
+    expect(
+      await pendingCard.evaluate((node) =>
+        node.previousElementSibling?.classList.contains("session-pin-divider"),
+      ),
+    ).toBe(true);
     await page.locator("#newToggle").click();
     await page.locator("#ndir").fill("");
     await expect
@@ -3635,12 +6643,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pendingTagView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pendingTagView),
+        });
       } else if (url.pathname === "/chat/new") {
         const body = route.request().postDataJSON() as { text: string };
         prompts.push(body.text);
@@ -3684,19 +6697,27 @@ describe("console browser behavior", () => {
     const page = await browser.newPage();
     page.setDefaultTimeout(2_000);
     let queuePresent = true;
-    let forkRequest: { item: string | null; body: Record<string, unknown> } | null = null;
+    let forkRequest: {
+      item: string | null;
+      body: Record<string, unknown>;
+    } | null = null;
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
       } else if (url.pathname === "/chat/queue/fork") {
         forkRequest = {
           item: url.searchParams.get("item"),
@@ -3782,8 +6803,16 @@ describe("console browser behavior", () => {
       tags: ["work"],
       vaultState: {
         ...composerRailView.vaultState,
+        sessionPins: { s1: 1 },
         sessionNotes: {
-          s1: [{ id: "note-1", text: "Keep the parent constraint", createdAt: 1, updatedAt: 1 }],
+          s1: [
+            {
+              id: "note-1",
+              text: "Keep the parent constraint",
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
         },
         sessionTodos: {
           s1: [
@@ -3804,27 +6833,39 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(forkContextView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(forkContextView),
+        });
       } else if (url.pathname === "/chat/fork") {
         await forkGate;
         await route.fulfill({
           json: { ok: true, session: "fork-provider-1", parentSessionId: "s1" },
         });
       } else if (url.pathname === "/chat/goal") {
-        await route.fulfill({ json: { ok: true, supported: true, goal: inheritedGoal } });
+        await route.fulfill({
+          json: { ok: true, supported: true, goal: inheritedGoal },
+        });
       } else if (url.pathname === "/vault/ui-state") {
         uiPatches.push(request.postDataJSON() as Record<string, unknown>);
         await route.fulfill({ json: { ok: true } });
       } else if (url.pathname === "/session/tags") {
         const body = request.postDataJSON() as { tags: string[] };
-        tagRequests.push({ session: url.searchParams.get("session") ?? "", tags: body.tags });
-        await route.fulfill({ json: { ok: true, sessionTags: body.tags, tags: ["work"] } });
+        tagRequests.push({
+          session: url.searchParams.get("session") ?? "",
+          tags: body.tags,
+        });
+        await route.fulfill({
+          json: { ok: true, sessionTags: body.tags, tags: ["work"] },
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else {
@@ -3833,9 +6874,19 @@ describe("console browser behavior", () => {
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
 
+    await page.locator("#sessionPanelToggle").click();
     await page.locator("#list .item", { hasText: "Avoidance session" }).click();
     await page.locator("#input").fill("fork immediately");
     await page.locator("#forkBtn").click();
+    const pendingForkCard = page.locator("#sessionPanelList .item", {
+      hasText: "fork immediately",
+    });
+    await expect.poll(() => pendingForkCard.count()).toBe(1);
+    expect(
+      await pendingForkCard.evaluate((node) =>
+        node.previousElementSibling?.classList.contains("session-pin-divider"),
+      ),
+    ).toBe(true);
     await page.locator("#list .item", { hasText: "fork immediately" }).click();
     expect(await page.locator("#railVendor").textContent()).toContain("claude");
     expect(await page.locator("#railModel").textContent()).toContain("Claude Sonnet");
@@ -3843,13 +6894,18 @@ describe("console browser behavior", () => {
     expect(await page.locator("#railTodos .railbtn-count").textContent()).toBe("1");
     expect(await page.locator("#goalToggle").getAttribute("class")).toContain("active");
     await page.locator("#h-tags .it-tagadd").click();
-    await page.locator("#h-tags .tagsug-opt", { hasText: "work" }).click();
+    await page.locator("#sessionTagList .sessiontag-option", { hasText: "work" }).click();
 
     expect(await page.locator("#h-tags .it-tag", { hasText: "work" }).count()).toBe(1);
     expect(tagRequests).toEqual([]);
 
     releaseFork();
     await expect.poll(() => tagRequests).toEqual([{ session: "fork-provider-1", tags: ["work"] }]);
+    expect(
+      await pendingForkCard.evaluate((node) =>
+        node.previousElementSibling?.classList.contains("session-pin-divider"),
+      ),
+    ).toBe(true);
     await expect.poll(() => page.locator("#goalToggle").isEnabled()).toBe(true);
     expect(await page.locator("#goalToggle").getAttribute("class")).toContain("active");
     await expect
@@ -3887,16 +6943,23 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(untaggedView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(untaggedView),
+        });
       } else if (url.pathname === "/session/tags") {
         const body = route.request().postDataJSON() as { tags: string[] };
         tagWrites.push(body.tags);
-        await route.fulfill({ json: { ok: true, sessionTags: body.tags, tags: ["work"] } });
+        await route.fulfill({
+          json: { ok: true, sessionTags: body.tags, tags: ["work"] },
+        });
       } else {
         await route.fulfill({ json: { ok: true } });
       }
@@ -3918,18 +6981,25 @@ describe("console browser behavior", () => {
   });
 
   it("wraps tag-header controls as whole buttons when the sidebar narrows", async () => {
-    const page = await browser.newPage({ viewport: { width: 480, height: 720 } });
+    const page = await browser.newPage({
+      viewport: { width: 480, height: 720 },
+    });
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else {
         await route.fulfill({ json: { ok: true } });
       }
@@ -3985,19 +7055,152 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("opens a resizable middle chats panel driven by the sidebar filters", async () => {
-    const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+  it("searches Today by default and switches through the custom time-range menu", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1000, height: 760 },
+    });
+    const now = Date.now();
+    const rangeView: ConsoleView = {
+      ...raceView,
+      sessions: raceView.sessions.map((session, index) => ({
+        ...session,
+        lastTs: index === 0 ? now : now - 3 * 86_400_000,
+        sortTs: index === 0 ? now : now - 3 * 86_400_000,
+        ageDays: index === 0 ? 0 : 3,
+      })),
+    };
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(rangeView),
+        });
+      } else if (url.pathname === "/search") {
+        await route.fulfill({ json: { results: [] } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    expect(await page.locator("#list .item").count()).toBe(2);
+    expect(await page.locator("#searchRangeText").textContent()).toBe("Today");
+    await page.locator("#search").fill("session");
+    expect(await page.locator("#list .item").count()).toBe(1);
+    expect(await page.locator('#list .item[data-session-id="s1"]').count()).toBe(1);
+
+    await page.locator("#searchRangeButton").click();
+    expect(await page.locator("#searchRangeMenu").isVisible()).toBe(true);
+    expect(await page.locator('#searchRangeMenu [aria-selected="true"]').textContent()).toContain(
+      "Today",
+    );
+    await page.locator('.search-range-option[data-range="7d"]').click();
+
+    expect(await page.locator("#searchRangeText").textContent()).toBe("7 days");
+    expect(await page.locator("#list .item").count()).toBe(2);
+    expect(await page.locator("#searchRangeMenu").isHidden()).toBe(true);
+
+    await page.locator("#searchRangeButton").click();
+    await page.locator('.search-range-option[data-range="custom"]').click();
+    expect(await page.locator("#searchRangeMenu").getAttribute("role")).toBe("dialog");
+    expect(await page.locator("#searchRangeCustomStart").isVisible()).toBe(true);
+    expect(await page.locator("#searchRangeCustomEnd").isVisible()).toBe(true);
+    expect(await page.locator(".search-range-datetime.scheduledatetime").count()).toBe(2);
+    await page.locator(".search-range-custom-field:first-child .scheduledatetime-toggle").click();
+    expect(await page.locator(".search-range-custom-picker.schedulepicker").isVisible()).toBe(true);
+    expect(await page.locator(".search-range-custom-picker .schedulepicker-days").isVisible()).toBe(
+      true,
+    );
+    expect(
+      await page.locator(".search-range-custom-picker .scheduletime-hours button").count(),
+    ).toBe(24);
+    expect(
+      await page.locator(".search-range-custom-picker .scheduletime-minutes button").count(),
+    ).toBe(4);
+    await page
+      .locator(".search-range-custom-picker .scheduletime-minutes button")
+      .filter({ hasText: "15" })
+      .click();
+    expect(await page.locator("#searchRangeCustomStart").inputValue()).toMatch(/:15$/);
+
+    const localDateTimeValues = await page.evaluate(
+      ({ start, end }) => {
+        const format = (timestamp: number) => {
+          const date = new Date(timestamp);
+          const pad = (value: number) => String(value).padStart(2, "0");
+          return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        };
+        return { start: format(start), end: format(end) };
+      },
+      {
+        start: now - 3 * 86_400_000 - 3_600_000,
+        end: now - 3 * 86_400_000 + 3_600_000,
+      },
+    );
+    await page.locator("#searchRangeCustomStart").fill(localDateTimeValues.end);
+    await page.locator("#searchRangeCustomEnd").fill(localDateTimeValues.start);
+    await page.locator(".search-range-custom-apply").click();
+    expect(await page.locator("#searchRangeCustomError").textContent()).toContain(
+      "after the start",
+    );
+    expect(await page.locator("#searchRangeMenu").isVisible()).toBe(true);
+
+    await page.locator("#searchRangeCustomStart").fill(localDateTimeValues.start);
+    await page.locator("#searchRangeCustomEnd").fill(localDateTimeValues.end);
+    await page.locator(".search-range-custom-apply").click();
+    expect(await page.locator("#searchRangeMenu").isHidden()).toBe(true);
+    expect(await page.locator("#searchRangeText").textContent()).not.toBe("Custom");
+    expect(await page.locator("#list .item").count()).toBe(1);
+    expect(await page.locator('#list .item[data-session-id="s2"]').count()).toBe(1);
+    await page.close();
+  });
+
+  it("opens a resizable middle chats panel driven by the sidebar filters", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1600, height: 900 },
+    });
+    const statusPanelView: ConsoleView = {
+      ...raceView,
+      tags: ["work", "urgent"],
+      vaultState: { sessionPins: { s1: 1 } },
+      sessions: raceView.sessions.map((session, index) => ({
+        ...session,
+        generating: index === 0,
+        unread: index === 1,
+        seen: index === 0,
+      })),
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(statusPanelView),
+        });
+      } else if (url.pathname === "/session/tags") {
+        const body = route.request().postDataJSON() as { tags: string[] };
+        await route.fulfill({
+          json: { ok: true, sessionTags: body.tags, tags: ["work", "urgent"] },
+        });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
       } else {
@@ -4006,12 +7209,106 @@ describe("console browser behavior", () => {
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
 
+    expect(
+      await page.locator("#list").evaluate((list) =>
+        Array.from(
+          list.children as unknown as ArrayLike<{
+            classList: { contains(value: string): boolean };
+            getAttribute(name: string): string | null;
+          }>,
+        ).map((node) =>
+          node.classList.contains("session-pin-divider")
+            ? "divider"
+            : node.getAttribute("data-session-id"),
+        ),
+      ),
+    ).toEqual(["s1", "divider", "s2"]);
     expect(await page.locator("#sessionPanel").isHidden()).toBe(true);
     await page.locator("#sessionPanelToggle").click();
     expect(await page.locator("#sessionPanel").isVisible()).toBe(true);
     expect(await page.locator("#sessionPanelToggle").getAttribute("aria-expanded")).toBe("true");
     expect(await page.locator("#sessionPanelList .item").count()).toBe(2);
     expect(await page.locator("#sessionPanel input, #sessionPanel .tagbar").count()).toBe(0);
+    expect(
+      await page.locator("#sessionPanelList").evaluate((list) =>
+        Array.from(
+          list.children as unknown as ArrayLike<{
+            classList: { contains(value: string): boolean };
+            getAttribute(name: string): string | null;
+          }>,
+        ).map((node) =>
+          node.classList.contains("session-pin-divider")
+            ? "divider"
+            : node.getAttribute("data-session-id"),
+        ),
+      ),
+    ).toEqual(["s1", "divider", "s2"]);
+    const generatingCard = page.locator('#sessionPanelList .item[data-session-id="s1"]');
+    const unreadCard = page.locator('#sessionPanelList .item[data-session-id="s2"]');
+    const dividerBox = await page.locator("#sessionPanelList .session-pin-divider").boundingBox();
+    const cardBox = await generatingCard.boundingBox();
+    if (!dividerBox || !cardBox) throw new Error("session pin divider layout is unavailable");
+    expect(dividerBox.width).toBeGreaterThan(cardBox.width * 1.5);
+    const unreadHeightBefore = await unreadCard.evaluate((node) => node.offsetHeight);
+    await unreadCard.locator(".it-tagadd").click();
+    expect(await unreadCard.evaluate((node) => node.offsetHeight)).toBe(unreadHeightBefore);
+    const panelTagInput = page.locator("#sessionTagInput");
+    await panelTagInput.fill("urg");
+    const panelTagOption = page.locator("#sessionTagList .sessiontag-option", {
+      hasText: "urgent",
+    });
+    expect(await panelTagOption.isVisible()).toBe(true);
+    await panelTagInput.press("ArrowDown");
+    await panelTagInput.press("Enter");
+    expect(await unreadCard.locator(".it-tag", { hasText: "urgent" }).count()).toBe(1);
+    await unreadCard.locator(".it-tagadd").click();
+    const selectedUrgent = page.locator("#sessionTagList .sessiontag-option", {
+      hasText: "urgent",
+    });
+    expect(await selectedUrgent.getAttribute("aria-selected")).toBe("true");
+    expect((await selectedUrgent.locator(".sessiontag-check").textContent())?.trim()).toBe("✓");
+    await selectedUrgent.click();
+    expect(await unreadCard.locator(".it-tag", { hasText: "urgent" }).count()).toBe(0);
+    expect(await generatingCard.getAttribute("class")).toContain("session-status-generating");
+    expect(await unreadCard.getAttribute("class")).toContain("session-status-unread");
+    const cardBorderMatchesStatus = (card: typeof generatingCard, variable: string) =>
+      card.evaluate((node, property) => {
+        const view = node.ownerDocument.defaultView;
+        if (!view) return false;
+        const probe = node.ownerDocument.createElement("span");
+        probe.style.color = `var(${property})`;
+        node.appendChild(probe);
+        const expected = view.getComputedStyle(probe).color;
+        probe.remove();
+        return view.getComputedStyle(node).borderTopColor === expected;
+      }, variable);
+    expect(await cardBorderMatchesStatus(generatingCard, "--status-generating")).toBe(true);
+    expect(await cardBorderMatchesStatus(unreadCard, "--status-unread")).toBe(true);
+    await generatingCard.click();
+    const lightActiveStyle = await generatingCard.evaluate((node) => {
+      const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+      return {
+        backgroundImage: style?.backgroundImage ?? "",
+        boxShadow: style?.boxShadow ?? "",
+      };
+    });
+    expect(lightActiveStyle.backgroundImage).not.toBe("none");
+    expect(lightActiveStyle.boxShadow).toContain("inset");
+    await page.locator("html").evaluate((node) => node.setAttribute("data-theme", "dark"));
+    expect(await generatingCard.getAttribute("class")).toContain("active");
+    const darkActiveStyle = await generatingCard.evaluate((node) => {
+      const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+      return {
+        backgroundImage: style?.backgroundImage ?? "",
+        boxShadow: style?.boxShadow ?? "",
+      };
+    });
+    expect(darkActiveStyle.backgroundImage).not.toBe("none");
+    expect(darkActiveStyle.boxShadow).toContain("inset");
+    expect(await generatingCard.getAttribute("class")).toContain("session-status-generating");
+    await unreadCard.locator(".it-status").click();
+    expect(await unreadCard.getAttribute("class")).toContain("session-status-read");
+    expect(await unreadCard.getAttribute("class")).not.toContain("session-status-unread");
 
     const columnsBefore = await page
       .locator("#sessionPanelList")
@@ -4043,6 +7340,7 @@ describe("console browser behavior", () => {
     await page.locator("#search").fill("Other session");
     expect(await page.locator("#list .item").count()).toBe(1);
     expect(await page.locator("#sessionPanelList .item").count()).toBe(1);
+    expect(await page.locator(".session-pin-divider").count()).toBe(0);
 
     await page.locator("#search").press("Escape");
     expect(await page.locator("#search").inputValue()).toBe("");
@@ -4069,12 +7367,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(untaggedView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(untaggedView),
+        });
       } else {
         await route.fulfill({ json: { ok: true } });
       }
@@ -4124,18 +7427,26 @@ describe("console browser behavior", () => {
 
   it("keeps manually dormant tags in a collapsible hidden area", async () => {
     const page = await browser.newPage();
-    const visibilityWrites: Array<{ hiddenTags?: string[]; pinnedTags?: string[] }> = [];
+    const visibilityWrites: Array<{
+      hiddenTags?: string[];
+      pinnedTags?: string[];
+    }> = [];
     await page.addInitScript(() => {
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(hiddenTagsView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(hiddenTagsView),
+        });
       } else if (url.pathname === "/vault/ui-state") {
         visibilityWrites.push(route.request().postDataJSON());
         await route.fulfill({ json: { ok: true } });
@@ -4191,7 +7502,9 @@ describe("console browser behavior", () => {
 
     const hideTransfer = await page.evaluateHandle(() => {
       const BrowserDataTransfer = (
-        globalThis as unknown as { DataTransfer: new () => Record<string, never> }
+        globalThis as unknown as {
+          DataTransfer: new () => Record<string, never>;
+        }
       ).DataTransfer;
       return new BrowserDataTransfer();
     });
@@ -4251,13 +7564,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(tagPinView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(tagPinView),
+        });
       } else if (url.pathname === "/vault/ui-state") {
         const body = request.postDataJSON() as { pinnedTags?: string[] };
         if (body.pinnedTags) pinWrites.push(body.pinnedTags);
@@ -4282,7 +7600,9 @@ describe("console browser behavior", () => {
       const target = tag(targetName);
       const transfer = await page.evaluateHandle(() => {
         const BrowserDataTransfer = (
-          globalThis as unknown as { DataTransfer: new () => Record<string, never> }
+          globalThis as unknown as {
+            DataTransfer: new () => Record<string, never>;
+          }
         ).DataTransfer;
         return new BrowserDataTransfer();
       });
@@ -4310,14 +7630,18 @@ describe("console browser behavior", () => {
     expect(await tag("old").getAttribute("class")).toContain("tag-pinned");
     expect(await page.locator("#tagFilters .tag-pin-divider").count()).toBe(1);
     expect(await page.locator("#tagFilters .tag-pin-empty").count()).toBe(0);
-    const middleSession = page.locator("#list .item", { hasText: "Middle session" });
+    const middleSession = page.locator("#list .item", {
+      hasText: "Middle session",
+    });
     await middleSession.locator(".it-tagadd").click();
-    const pinnedBindingOption = middleSession.locator(".tagsug-opt", { hasText: "old" });
+    const pinnedBindingOption = page.locator("#sessionTagList .sessiontag-option", {
+      hasText: "old",
+    });
     await expect.poll(() => pinnedBindingOption.locator(".tag-option-pin").count()).toBe(1);
     expect(await pinnedBindingOption.getAttribute("aria-label")).toBe("old (pinned)");
     expect(
-      await middleSession
-        .locator(".tagsug-opt", { hasText: "new" })
+      await page
+        .locator("#sessionTagList .sessiontag-option", { hasText: "new" })
         .locator(".tag-option-pin")
         .count(),
     ).toBe(0);
@@ -4404,11 +7728,15 @@ describe("console browser behavior", () => {
 
     const pinTransfer = await page.evaluateHandle(() => {
       const BrowserDataTransfer = (
-        globalThis as unknown as { DataTransfer: new () => Record<string, never> }
+        globalThis as unknown as {
+          DataTransfer: new () => Record<string, never>;
+        }
       ).DataTransfer;
       return new BrowserDataTransfer();
     });
-    await tag("middle").dispatchEvent("dragstart", { dataTransfer: pinTransfer });
+    await tag("middle").dispatchEvent("dragstart", {
+      dataTransfer: pinTransfer,
+    });
     const pinBox = await page.locator("#tagFilters .tag-pin-empty").boundingBox();
     if (!pinBox) throw new Error("missing pin target bounds");
     await page.locator("#tagFilters .tag-pin-empty").dispatchEvent("dragover", {
@@ -4429,10 +7757,16 @@ describe("console browser behavior", () => {
     expect(
       await pinPreview.evaluate((node) => {
         const style = node.ownerDocument.defaultView?.getComputedStyle(node);
-        return { borderStyle: style?.borderStyle, backgroundColor: style?.backgroundColor };
+        return {
+          borderStyle: style?.borderStyle,
+          backgroundColor: style?.backgroundColor,
+        };
       }),
     ).toEqual(
-      expect.objectContaining({ borderStyle: "dashed", backgroundColor: "rgba(0, 0, 0, 0)" }),
+      expect.objectContaining({
+        borderStyle: "dashed",
+        backgroundColor: "rgba(0, 0, 0, 0)",
+      }),
     );
     expect(await pinPreview.evaluate((node) => node.nextElementSibling?.className)).toContain(
       "tag-pin-divider",
@@ -4454,6 +7788,65 @@ describe("console browser behavior", () => {
     await page.close();
   }, 15_000);
 
+  it("uses the selected recent or fixed order in both tag binding lists", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      localStorage.setItem("attend.tagOrderMode.v1", "recent");
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(tagPickerOrderView),
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const card = page.locator("#list .item", { hasText: "Tag picker target" });
+    const cardOrder = () =>
+      page
+        .locator("#sessionTagList .sessiontag-option")
+        .evaluateAll((options) => options.map((option) => option.getAttribute("data-val")));
+    const newOrder = () =>
+      page
+        .locator("#newTagSug .newtagopt")
+        .evaluateAll((options) => options.map((option) => option.getAttribute("data-val")));
+
+    const cardHeightBefore = await card.evaluate((node) => node.offsetHeight);
+    await card.locator(".it-tagadd").click();
+    await expect.poll(cardOrder).toEqual(["old", "new", "middle"]);
+    expect(await card.evaluate((node) => node.offsetHeight)).toBe(cardHeightBefore);
+    expect(
+      await page.locator("#sessionTagPopover").evaluate((node) => node.parentElement?.tagName),
+    ).toBe("BODY");
+    await card.locator(".it-tagadd").click();
+    await page.locator("#newToggle").click();
+    await page.locator("#newTagAdd").click();
+    await expect.poll(newOrder).toEqual(["old", "new", "middle"]);
+    await page.locator("#newClose").click();
+
+    await page.locator("#tagOrderToggle").click();
+    expect((await page.locator("#tagOrderValue").textContent())?.trim()).toBe("fixed");
+    await card.locator(".it-tagadd").click();
+    await expect.poll(cardOrder).toEqual(["old", "middle", "new"]);
+    await card.locator(".it-tagadd").click();
+    await page.locator("#newToggle").click();
+    await page.locator("#newTagAdd").click();
+    await expect.poll(newOrder).toEqual(["old", "middle", "new"]);
+    await page.close();
+  });
+
   it("pins an unpinned tag when dropped in the gap before the pin divider", async () => {
     const page = await browser.newPage();
     const pinWrites: string[][] = [];
@@ -4463,13 +7856,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(tagPinView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(tagPinView),
+        });
       } else if (url.pathname === "/vault/ui-state") {
         const body = request.postDataJSON() as { pinnedTags?: string[] };
         if (body.pinnedTags) pinWrites.push(body.pinnedTags);
@@ -4523,13 +7921,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(tagPinView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(tagPinView),
+        });
       } else if (url.pathname === "/vault/ui-state") {
         const body = request.postDataJSON() as { pinnedTags?: string[] };
         if (body.pinnedTags) pinWrites.push(body.pinnedTags);
@@ -4566,7 +7969,9 @@ describe("console browser behavior", () => {
 
     const transfer = await page.evaluateHandle(() => {
       const BrowserDataTransfer = (
-        globalThis as unknown as { DataTransfer: new () => Record<string, never> }
+        globalThis as unknown as {
+          DataTransfer: new () => Record<string, never>;
+        }
       ).DataTransfer;
       return new BrowserDataTransfer();
     });
@@ -4585,7 +7990,9 @@ describe("console browser behavior", () => {
     await page.evaluate(() => {
       const browserGlobal = globalThis as unknown as {
         tagDragMutationCount: number;
-        tagDragMutationObserver: { observe(node: unknown, options: unknown): void };
+        tagDragMutationObserver: {
+          observe(node: unknown, options: unknown): void;
+        };
         MutationObserver: new (
           callback: (records: Array<{ type: string }>) => void,
         ) => { observe(node: unknown, options: unknown): void };
@@ -4598,7 +8005,10 @@ describe("console browser behavior", () => {
         ).length;
       });
       const wrap = browserGlobal.document.querySelector("#tagFilters");
-      if (wrap) browserGlobal.tagDragMutationObserver.observe(wrap, { childList: true });
+      if (wrap)
+        browserGlobal.tagDragMutationObserver.observe(wrap, {
+          childList: true,
+        });
     });
     for (let index = 0; index < 10; index += 1) {
       await newer.dispatchEvent("dragover", {
@@ -4615,7 +8025,9 @@ describe("console browser behavior", () => {
     ).toBe(0);
     await page.evaluate(() => {
       (
-        globalThis as unknown as { tagDragMutationObserver: { disconnect(): void } }
+        globalThis as unknown as {
+          tagDragMutationObserver: { disconnect(): void };
+        }
       ).tagDragMutationObserver.disconnect();
     });
     for (let index = 0; index < 20; index += 1) {
@@ -4727,7 +8139,9 @@ describe("console browser behavior", () => {
     expect(Math.abs(oldBox.y - middleBox.y)).toBeGreaterThan(2);
     const crossRowTransfer = await page.evaluateHandle(() => {
       const BrowserDataTransfer = (
-        globalThis as unknown as { DataTransfer: new () => Record<string, never> }
+        globalThis as unknown as {
+          DataTransfer: new () => Record<string, never>;
+        }
       ).DataTransfer;
       return new BrowserDataTransfer();
     });
@@ -4758,7 +8172,9 @@ describe("console browser behavior", () => {
       (node as unknown as { style: { width: string } }).style.width = "";
     });
 
-    await middle.dragTo(newer, { targetPosition: { x: 1, y: newBox.height / 2 } });
+    await middle.dragTo(newer, {
+      targetPosition: { x: 1, y: newBox.height / 2 },
+    });
 
     await expect.poll(() => userOrder()).toEqual(["old", "middle", "new"]);
     expect(await middle.getAttribute("class")).not.toContain("tag-pinned");
@@ -4775,13 +8191,18 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(untaggedView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(untaggedView),
+        });
       } else if (url.pathname === "/tags/clear-session-bindings") {
         requests.push({
           method: request.method(),
@@ -4813,7 +8234,13 @@ describe("console browser behavior", () => {
     await page.locator("#tagActionClear").click();
     await expect
       .poll(() => requests)
-      .toEqual([{ method: "POST", path: "/tags/clear-session-bindings", body: { name: "work" } }]);
+      .toEqual([
+        {
+          method: "POST",
+          path: "/tags/clear-session-bindings",
+          body: { name: "work" },
+        },
+      ]);
     expect(await page.locator("#tagFilters .gtag:not(.auto)").count()).toBe(1);
     expect(await page.locator("#tagFilters .gtag:not(.auto) .gtagcount").textContent()).toBe("0");
 
@@ -4824,7 +8251,11 @@ describe("console browser behavior", () => {
     await expect
       .poll(() => requests)
       .toEqual([
-        { method: "POST", path: "/tags/clear-session-bindings", body: { name: "work" } },
+        {
+          method: "POST",
+          path: "/tags/clear-session-bindings",
+          body: { name: "work" },
+        },
         { method: "DELETE", path: "/tags" },
       ]);
     expect(await page.locator("#tagAction").isVisible()).toBe(false);
@@ -4839,12 +8270,17 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pendingTagView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pendingTagView),
+        });
       } else {
         await route.fulfill({ json: { ok: true } });
       }
@@ -4868,10 +8304,15 @@ describe("console browser behavior", () => {
         static readonly CLOSED = 2;
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("http://attend.test/", (route) =>
-      route.fulfill({ contentType: "text/html", body: renderConsole(forkTreeView) }),
+      route.fulfill({
+        contentType: "text/html",
+        body: renderConsole(forkTreeView),
+      }),
     );
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
 
@@ -4891,11 +8332,16 @@ describe("console browser behavior", () => {
         }
       ).WheelEvent;
       const doc = viewport.ownerDocument;
-      const dispatcher = viewport as unknown as { dispatchEvent(event: BrowserWheel): boolean };
+      const dispatcher = viewport as unknown as {
+        dispatchEvent(event: BrowserWheel): boolean;
+      };
       const pan = doc.querySelector("#forkTreePan") as unknown as StyledNode | null;
       const stage = doc.querySelector("#forkTreeStage") as unknown as StyledNode | null;
       if (!pan || !stage) throw new Error("fork tree canvas is missing");
-      const snapshot = () => ({ pan: pan.style.transform, stage: stage.style.transform });
+      const snapshot = () => ({
+        pan: pan.style.transform,
+        stage: stage.style.transform,
+      });
       const before = snapshot();
       const scroll = new BrowserWheelEvent("wheel", {
         deltaX: 30,
@@ -4931,6 +8377,48 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("shows the full truncated avoidance suggestion on hover", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 900, height: 700 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: {} });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+
+    const suggestion = page.locator("#avoidPanel .avoidpanel-draft");
+    const fullText = await suggestion.textContent();
+    await suggestion.evaluate((node) => {
+      (node as unknown as { style: { width: string } }).style.width = "120px";
+    });
+    await suggestion.hover();
+
+    expect(await suggestion.getAttribute("data-hover-tip")).toBe(fullText);
+    await expect.poll(() => page.locator("#hoverTip").textContent()).toBe(fullText);
+    expect(await page.locator("#hoverTip").isVisible()).toBe(true);
+    await page.close();
+  });
+
   it("keeps the target session generating across an immediate tab switch and stale snapshot", async () => {
     const page = await browser.newPage();
     const pageErrors: string[] = [];
@@ -4951,12 +8439,17 @@ describe("console browser behavior", () => {
         }
         close() {}
       }
-      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/chat/send") {
         await sendGate;
         await route.fulfill({ json: { ok: false, error: "late response" } });
@@ -4988,7 +8481,12 @@ describe("console browser behavior", () => {
         onmessage(event: { data: string }): void;
       };
       source.onmessage({
-        data: JSON.stringify({ active: [], startedAt: {}, lastAssistantAt: {}, queues: {} }),
+        data: JSON.stringify({
+          active: [],
+          startedAt: {},
+          lastAssistantAt: {},
+          queues: {},
+        }),
       });
     });
     await expect
@@ -5055,12 +8553,17 @@ describe("console browser behavior", () => {
         onerror: (() => void) | null = null;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(liveView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(liveView),
+        });
       } else if (url.pathname === "/session/status") {
         const id = url.searchParams.get("session");
         const session = liveSessions.find((candidate) => candidate.sessionId === id);
@@ -5068,7 +8571,13 @@ describe("console browser behavior", () => {
           json: {
             ok: true,
             view: session
-              ? { ...session, lastTs: 1_000, sortTs: 1_000, unread: false, seen: true }
+              ? {
+                  ...session,
+                  lastTs: 1_000,
+                  sortTs: 1_000,
+                  unread: false,
+                  seen: true,
+                }
               : null,
           },
         });
@@ -5106,12 +8615,17 @@ describe("console browser behavior", () => {
         onerror: (() => void) | null = null;
         close() {}
       }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
     });
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
       } else if (url.pathname === "/session/status") {
         const session = raceView.sessions.find(
           (candidate) => candidate.sessionId === url.searchParams.get("session"),
@@ -5155,8 +8669,12 @@ describe("console browser behavior", () => {
   });
 
   it("hands wheel scrolling from expanded edit diffs back to the chat at both boundaries", async () => {
-    const page = await browser.newPage({ viewport: { width: 1000, height: 600 } });
-    await page.setContent(renderConsole(view), { waitUntil: "domcontentloaded" });
+    const page = await browser.newPage({
+      viewport: { width: 1000, height: 600 },
+    });
+    await page.setContent(renderConsole(view), {
+      waitUntil: "domcontentloaded",
+    });
     await page.locator("#msgs").evaluate((host) => {
       const doc = host.ownerDocument;
       doc.body.classList.remove("no-session");
@@ -5224,7 +8742,9 @@ describe("console browser behavior", () => {
       const host = inner.closest("#msgs");
       const target = inner.querySelector(".dtext") || inner;
       if (!host || !target) throw new Error("nested chat scroller is missing");
-      const dispatcher = target as unknown as { dispatchEvent(event: BrowserWheel): boolean };
+      const dispatcher = target as unknown as {
+        dispatchEvent(event: BrowserWheel): boolean;
+      };
       const innerMax = inner.scrollHeight - inner.clientHeight;
       const outerMax = host.scrollHeight - host.clientHeight;
 
@@ -5265,8 +8785,12 @@ describe("console browser behavior", () => {
   });
 
   it("keeps tool names visible beside the collapse control in a narrow chat", async () => {
-    const page = await browser.newPage({ viewport: { width: 240, height: 480 } });
-    await page.setContent(renderConsole(view), { waitUntil: "domcontentloaded" });
+    const page = await browser.newPage({
+      viewport: { width: 240, height: 480 },
+    });
+    await page.setContent(renderConsole(view), {
+      waitUntil: "domcontentloaded",
+    });
     await page.locator("#msgs").evaluate((host) => {
       const doc = host.ownerDocument;
       doc.body.classList.remove("no-session");
@@ -5292,9 +8816,181 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("places a compact icon-only back button above the mobile chat title", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 780 },
+    });
+    await page.setContent(renderConsole(raceView), {
+      waitUntil: "domcontentloaded",
+    });
+    await page
+      .locator(".main")
+      .evaluate((main) => main.ownerDocument.body.classList.add("show-chat"));
+
+    const backButton = page.locator("#backbtn");
+    expect(await backButton.isVisible()).toBe(true);
+    expect((await backButton.textContent())?.trim()).toBe("");
+    expect(await backButton.getAttribute("aria-label")).toBe("back to sessions");
+
+    const layout = await page.locator(".head").evaluate((head) => {
+      const button = head.querySelector("#backbtn")?.getBoundingClientRect();
+      const title = head.querySelector(".headmain")?.getBoundingClientRect();
+      if (!button || !title) throw new Error("mobile chat header is incomplete");
+      return {
+        buttonWidth: button.width,
+        buttonBottom: button.bottom,
+        titleTop: title.top,
+      };
+    });
+    expect(layout.buttonWidth).toBeLessThan(40);
+    expect(layout.buttonBottom).toBeLessThanOrEqual(layout.titleTop);
+    await page.close();
+  });
+
+  it("opens a simple unfiltered Todo popover after New and keeps standalone items unbound", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 820 },
+    });
+    const uiPatches: Record<string, unknown>[] = [];
+    const todoView: ConsoleView = {
+      ...composerRailView,
+      vaultState: {
+        ...composerRailView.vaultState,
+        inboxTodos: [
+          {
+            id: "inbox-1",
+            text: "Triage the release",
+            createdAt: 10,
+            updatedAt: 10,
+            completed: false,
+          },
+          {
+            id: "inbox-done",
+            text: "Archive the release notes",
+            createdAt: 9,
+            updatedAt: 9,
+            completed: true,
+          },
+        ],
+        sessionTodos: {
+          s1: [
+            {
+              id: "session-1",
+              text: "Verify the migration",
+              createdAt: 20,
+              updatedAt: 20,
+              completed: false,
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(todoView),
+        });
+      } else if (url.pathname === "/vault/ui-state") {
+        uiPatches.push(request.postDataJSON() as Record<string, unknown>);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    expect(
+      await page.locator(".topnav").evaluate((topnav) => {
+        const newButton = topnav.querySelector("#newToggle");
+        const todoButton = topnav.querySelector("#todoHubToggle");
+        return !!(newButton && todoButton && newButton.compareDocumentPosition(todoButton) & 4);
+      }),
+    ).toBe(true);
+    expect(await page.locator("#todoHubCount").textContent()).toBe("2");
+    await page.locator("#newToggle").click();
+    expect(await page.locator("#newbox").getAttribute("class")).toContain("open");
+    await page.locator("#todoHubToggle").click();
+    expect(await page.locator("#newbox").getAttribute("class")).not.toContain("open");
+    expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
+    expect(await page.locator("#todoHub").textContent()).toContain("Triage the release");
+    expect(await page.locator("#todoHub").textContent()).toContain("Verify the migration");
+    expect(await page.locator("#todoHub .todohub-tools").count()).toBe(0);
+    expect(await page.locator("#todoHub .todohub-filter").count()).toBe(0);
+    expect(await page.locator("#todoHubSearch").count()).toBe(0);
+    expect(await page.locator("#todoHub").textContent()).not.toContain("Inbox");
+    expect(await page.locator("#todoHubAddInput").getAttribute("placeholder")).toBe("Add a todo…");
+    expect(await page.locator('[aria-label="Clear completed todos"]').count()).toBe(1);
+    await page.locator('[aria-label="Clear completed todos"]').click();
+    expect(await page.locator('[aria-label="Clear completed todos"]').count()).toBe(0);
+    expect(await page.locator('[data-todo-id="inbox-done"]').count()).toBe(0);
+    await expect
+      .poll(() =>
+        uiPatches.some(
+          (patch) =>
+            Array.isArray(patch.inboxTodos) &&
+            !patch.inboxTodos.some((item: { id?: string }) => item.id === "inbox-done"),
+        ),
+      )
+      .toBe(true);
+
+    await page.locator("#todoHubAddInput").fill("Document the fallback");
+    await page.locator("#todoHubAddInput").press("Enter");
+    await expect.poll(() => page.locator("#todoHubCount").textContent()).toBe("3");
+    await expect.poll(() => uiPatches.some((patch) => Array.isArray(patch.inboxTodos))).toBe(true);
+
+    const inboxRow = page.locator('.todohub-item[data-todo-id="inbox-1"]');
+    expect(await inboxRow.locator(".todohub-check").getAttribute("class")).toContain(
+      "rail-todo-check",
+    );
+    expect(await inboxRow.locator('[aria-label="Delete todo"]').getAttribute("class")).toContain(
+      "qdel",
+    );
+    expect(await page.locator('#todoHub [aria-label*="Move todo"]').count()).toBe(0);
+    expect(await page.locator('#todoHub [aria-label*="Attach todo"]').count()).toBe(0);
+    const addedRow = page.locator(".todohub-item", { hasText: "Document the fallback" });
+    await addedRow.locator('[aria-label="Delete todo"]').click();
+    await expect.poll(() => page.locator("#todoHubCount").textContent()).toBe("2");
+
+    await page.locator("#todoHubClose").click();
+    await page.locator("#sessionPanelToggle").click();
+    await page.locator("#todoHubToggle").click();
+    expect(await page.locator("#todoHub").getAttribute("class")).toContain("panel-hosted");
+    const [todoBox, sessionPanel] = await Promise.all([
+      page.locator("#todoHub").boundingBox(),
+      page.locator("#sessionPanel").boundingBox(),
+    ]);
+    if (!todoBox || !sessionPanel) throw new Error("Missing Todo popover geometry");
+    expect(todoBox.x).toBeGreaterThanOrEqual(sessionPanel.x - 20);
+    expect(todoBox.x + todoBox.width).toBeLessThanOrEqual(sessionPanel.x + sessionPanel.width);
+
+    await page.locator('.todohub-item[data-todo-id="session-1"] .todohub-text').click();
+    await expect.poll(() => page.locator("#h-title").textContent()).toContain("Avoidance session");
+    await page.locator("#railTodos").click();
+    expect(await page.locator("#composerRailPop").textContent()).toContain("Verify the migration");
+    await page.close();
+  });
+
   it("sizes a collapsed tool call like an assistant text block", async () => {
-    const page = await browser.newPage({ viewport: { width: 1000, height: 600 } });
-    await page.setContent(renderConsole(view), { waitUntil: "domcontentloaded" });
+    const page = await browser.newPage({
+      viewport: { width: 1000, height: 600 },
+    });
+    await page.setContent(renderConsole(view), {
+      waitUntil: "domcontentloaded",
+    });
     await page.locator("#msgs").evaluate((host) => {
       const doc = host.ownerDocument;
       doc.body.classList.remove("no-session");

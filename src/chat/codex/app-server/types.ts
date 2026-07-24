@@ -22,7 +22,11 @@ export interface AppServerThread {
 export interface AppServerTurn {
   id: string;
   status: "completed" | "interrupted" | "failed" | "inProgress";
-  error?: { message?: string } | null;
+  error?: {
+    message?: string;
+    codexErrorInfo?: unknown;
+    additionalDetails?: string | null;
+  } | null;
 }
 
 export interface AppServerItem {

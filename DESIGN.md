@@ -328,6 +328,11 @@ Both fields ride the existing turn-end analyzer verdict, cache, initial session 
 update path, so the second lane adds no extra model call. This supersedes v2.8's `#railNextStep`
 pill UI while preserving the fill-not-send boundary.
 
+**Follow-up — keep the prediction visible before focus.** The empty main composer now renders the
+`nextStep` ghost even when another control owns focus, so returning to a chat exposes its likely
+next move immediately. Accepting the prediction remains focus-gated: Tab only completes it after
+the composer itself owns focus, while typed shortcut suggestions remain focused-only.
+
 Both drafts are scoped to the latest completed assistant turn. An accepted `user_turn_started` or
 `queued_turn_started` clears them in the client and persisted analysis cache. The orchestrator also
 bumps an analysis epoch, so a verdict that began before that user turn but finishes afterward is

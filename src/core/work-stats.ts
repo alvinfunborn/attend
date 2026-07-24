@@ -50,7 +50,7 @@ export interface WorkStats {
   range: WorkStatsRange;
   windowStart: number;
   elapsedHours: number;
-  timelineUnit: "hour" | "day";
+  timelineUnit: "hour";
   summary: {
     sessionsTouched: number;
     prompts: number;
@@ -331,45 +331,21 @@ function modeHours(samples: HourSample[]): Record<WorkMode, number> {
   return out;
 }
 
-function timelineBuckets(
-  samples: HourSample[],
-  range: WorkStatsRange,
-): { unit: "hour" | "day"; buckets: WorkStatsTimelineBucket[] } {
-  if (range.endsWith("h") || range === "today") {
-    return {
-      unit: "hour",
-      buckets: samples.map((sample) => ({
-        start: sample.start,
-        end: sample.end,
-        sessions: sample.sessionKeys.size,
-        prompts: sample.prompts.length,
-        promptedHours: sample.prompts.length ? 1 : 0,
-        switches: sample.switches,
-        modeHours: modeHours([sample]),
-      })),
-    };
-  }
-  const byDay = new Map<number, HourSample[]>();
-  for (const sample of samples) {
-    const start = localDayStart(sample.start);
-    const list = byDay.get(start) ?? [];
-    list.push(sample);
-    byDay.set(start, list);
-  }
+function timelineBuckets(samples: HourSample[]): {
+  unit: "hour";
+  buckets: WorkStatsTimelineBucket[];
+} {
   return {
-    unit: "day",
-    buckets: [...byDay.entries()].map(([start, daySamples]) => {
-      const prompts = daySamples.flatMap((sample) => sample.prompts);
-      return {
-        start,
-        end: addLocalDays(start, 1),
-        sessions: new Set(prompts.map((event) => event.sessionId)).size,
-        prompts: prompts.length,
-        promptedHours: daySamples.filter((sample) => sample.prompts.length > 0).length,
-        switches: daySamples.reduce((sum, sample) => sum + sample.switches, 0),
-        modeHours: modeHours(daySamples),
-      };
-    }),
+    unit: "hour",
+    buckets: samples.map((sample) => ({
+      start: sample.start,
+      end: sample.end,
+      sessions: sample.sessionKeys.size,
+      prompts: sample.prompts.length,
+      promptedHours: sample.prompts.length ? 1 : 0,
+      switches: sample.switches,
+      modeHours: modeHours([sample]),
+    })),
   };
 }
 
@@ -585,7 +561,7 @@ export function buildWorkStats(
   attentionItems.sort(sortDormant);
   blockedItems.sort(sortDormant);
 
-  const timeline = timelineBuckets(samples, range);
+  const timeline = timelineBuckets(samples);
   const queues = Object.values(options.queues ?? {});
   return {
     generatedAt: now,

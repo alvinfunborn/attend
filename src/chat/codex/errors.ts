@@ -2,7 +2,12 @@ import { type PublicProviderError, errorText } from "../provider-errors.js";
 
 export function classifyCodexError(error: unknown): PublicProviderError | null {
   const detail = errorText(error).trim();
+  const info =
+    error && typeof error === "object"
+      ? String((error as { codexErrorInfo?: unknown }).codexErrorInfo ?? "")
+      : "";
   if (
+    info === "unauthorized" ||
     /(?:not logged in|login[_ ]required|authentication[_ ](?:required|failed)|unauthorized|invalid.*(?:token|credentials)|\b401\b)/i.test(
       detail,
     )
@@ -16,7 +21,8 @@ export function classifyCodexError(error: unknown): PublicProviderError | null {
     };
   }
   if (
-    /(?:usage limit|rate[_ ]limit|limit[_ ]reached|quota exceeded|insufficient quota|too many requests|\b429\b)/i.test(
+    info === "usageLimitExceeded" ||
+    /(?:usage limit|rate[_ ]limit|limit[_ ]reached|quota exceeded|insufficient quota|too many requests|(?:no|0)\s+(?:weighted\s+)?tokens?\s+(?:left|remaining)|tokens?\s+(?:exhausted|depleted)|\b429\b)/i.test(
       detail,
     )
   ) {

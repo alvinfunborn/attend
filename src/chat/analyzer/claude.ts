@@ -9,6 +9,7 @@ import {
   parseAvoidancePrompt,
   parseCollaborationLabels,
 } from "../../core/daemon/parse.js";
+import type { TranscriptPathWriter } from "../../core/vendor/transcript-index.js";
 import type { QueryFn } from "../claude/driver.js";
 import { toUiEventsFromClaude } from "../claude/events.js";
 import { readClaudeTranscript } from "../transcript.js";
@@ -51,6 +52,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
   constructor(
     private readonly claudeProjects: string,
     private readonly queryFn: QueryFn,
+    private readonly transcriptIndex?: TranscriptPathWriter,
   ) {}
 
   async spawn(cwd: string): Promise<string | null> {
@@ -138,6 +140,8 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
 
   /** Locate a task session's JSONL by id (its cwd-encoded project dir is opaque). */
   private findSessionFile(sessionId: string): string | null {
+    const indexed = this.transcriptIndex?.get(this.vendor, sessionId);
+    if (indexed) return indexed;
     let dirs: fs.Dirent[];
     try {
       dirs = fs.readdirSync(this.claudeProjects, { withFileTypes: true });
@@ -147,7 +151,10 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       const f = path.join(this.claudeProjects, d.name, `${sessionId}.jsonl`);
-      if (fs.existsSync(f)) return f;
+      if (fs.existsSync(f)) {
+        this.transcriptIndex?.set(this.vendor, sessionId, f);
+        return f;
+      }
     }
     return null;
   }

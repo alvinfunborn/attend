@@ -68,7 +68,16 @@ export interface PinChatReference {
   pinSessionId?: string;
 }
 
-export type ChatReference = PinChatReference;
+/** Ephemeral assistant text quoted directly into one draft without creating a Pin. */
+export interface QuoteChatReference {
+  kind: "quote";
+  text: string;
+  role: "assistant" | "selected";
+  /** Stable UI message key used for display/deduplication only. */
+  sourceKey?: string;
+}
+
+export type ChatReference = PinChatReference | QuoteChatReference;
 
 export interface UserTurn {
   text: string;
@@ -123,10 +132,15 @@ export interface ChatDriver {
   start(opts: StartOpts): Promise<string>;
   /** Send a user turn to a live run. Returns false if it can't accept one now. */
   send(sessionId: string, turn: UserTurn): boolean;
+  /** Whether an in-flight turn can accept user guidance without starting a new turn. */
+  canSteer(sessionId: string): boolean;
+  /** Inject user guidance into an in-flight turn. The current turn stays active. */
+  steer(sessionId: string, turn: UserTurn): Promise<boolean>;
   /** Answer an interactive tool call (e.g. AskUserQuestion) on a live run. */
   answer(sessionId: string, answer: ToolAnswer): boolean;
-  /** Interrupt the in-flight turn. Returns false if there's nothing to stop. */
-  interrupt(sessionId: string): Promise<boolean>;
+  /** Interrupt the in-flight turn. An external transcript can provide its exact
+   * provider turn id, avoiding a racy status lookup after Attend restarts. */
+  interrupt(sessionId: string, options?: { turnId?: string | null }): Promise<boolean>;
   /** Replay buffered events then stream new ones; returns an unsubscribe fn. */
   subscribe(sessionId: string, onEvent: (ev: UiEvent) => void): () => void;
   /** Session ids with a turn currently in flight. */

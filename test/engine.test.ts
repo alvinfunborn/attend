@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ChatEngine, type QueryFn } from "../src/chat/engine.js";
 import type { UiEvent } from "../src/chat/events.js";
 
@@ -123,6 +123,40 @@ describe("ChatEngine", () => {
   it("send returns false for an unknown session", () => {
     const engine = new ChatEngine(fakeQuery);
     expect(engine.send("nope", { text: "x" })).toBe(false);
+  });
+
+  it("steers a Claude turn through its live input stream", async () => {
+    const seen: Array<{ message?: { content?: unknown } }> = [];
+    const steeringQuery = ((args: { prompt: AsyncIterable<unknown> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-steer" };
+        for await (const message of args.prompt) {
+          seen.push(message as { message?: { content?: unknown } });
+          if (seen.length === 1) {
+            yield {
+              type: "assistant",
+              message: { content: [{ type: "text", text: "working" }] },
+              session_id: "sess-steer",
+            };
+            continue;
+          }
+          yield { type: "result", subtype: "success", result: "done", session_id: "sess-steer" };
+          return;
+        }
+      }
+      return gen();
+    }) as unknown as QueryFn;
+    const engine = new ChatEngine(steeringQuery);
+    const id = await engine.start({ cwd: ".", firstText: "start" });
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+
+    expect(engine.canSteer(id)).toBe(true);
+    expect(await engine.steer(id, { text: "change direction" })).toBe(true);
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    expect(seen[1]).toMatchObject({
+      type: "user",
+      message: { role: "user", content: "change direction" },
+    });
   });
 
   it("sends Claude attachment blocks alongside the text summary", async () => {
@@ -696,6 +730,40 @@ describe("ChatEngine", () => {
 
     expect(closed).toBe(true);
     expect(engine.send(id, { text: "after close" })).toBe(false);
+  });
+
+  it("closes an idle Claude stream only after the shared session TTL", async () => {
+    vi.useFakeTimers();
+    let closed = false;
+    const query = ((args: { prompt: AsyncIterable<unknown> }) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-idle-ttl" };
+        try {
+          for await (const _message of args.prompt) {
+            // Keep the provider stream warm until its input is closed by the TTL.
+          }
+        } finally {
+          closed = true;
+        }
+      }
+      return gen();
+    }) as unknown as QueryFn;
+    const engine = new ChatEngine(query, 0, 1_000);
+    try {
+      const id = await engine.start({ cwd: "." });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(engine.get(id)).toBeDefined();
+      expect(closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.resolve();
+      expect(engine.get(id)).toBeUndefined();
+      expect(closed).toBe(true);
+    } finally {
+      engine.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   it("shutdown does not interrupt an active Claude turn", async () => {

@@ -42,7 +42,7 @@ function analysis(state: Analysis["state"], priority = 5): Analysis {
 }
 
 describe("buildWorkStats", () => {
-  it("uses globally aligned one-hour breadth samples and daily stacked allocation", () => {
+  it("uses globally aligned one-hour breadth samples for every range", () => {
     const now = new Date(2026, 6, 11, 18).getTime();
     const at = (daysAgo: number, hour: number, minute: number) => {
       const value = new Date(now);
@@ -64,8 +64,8 @@ describe("buildWorkStats", () => {
 
     const stats = buildWorkStats([], now, "7d", { events: promptEvents });
 
-    expect(stats.timelineUnit).toBe("day");
-    expect(stats.timeline).toHaveLength(7);
+    expect(stats.timelineUnit).toBe("hour");
+    expect(stats.timeline).toHaveLength(Math.ceil((now - stats.windowStart) / HOUR));
     expect(stats.summary).toMatchObject({ sessionsTouched: 12, prompts: 12, promptedHours: 3 });
     expect(stats.modes.find((item) => item.mode === "focus")).toMatchObject({
       promptedHours: 1,
@@ -179,7 +179,9 @@ describe("buildWorkStats", () => {
     const midnight = new Date(now);
     midnight.setHours(0, 0, 0, 0);
     expect(today.windowStart).toBe(midnight.getTime());
-    expect(buildWorkStats([], now, "15d", { events }).timeline).toHaveLength(15);
+    const fifteenDays = buildWorkStats([], now, "15d", { events });
+    expect(fifteenDays.timelineUnit).toBe("hour");
+    expect(fifteenDays.timeline).toHaveLength(Math.ceil((now - fifteenDays.windowStart) / HOUR));
     expect(today.coverage).toMatchObject({
       promptSince: events[0]?.at,
       turnSince: null,

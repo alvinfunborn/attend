@@ -3,6 +3,7 @@ import { ClaudeSource } from "./claude.js";
 import { CodexSource } from "./codex.js";
 import { CursorSource } from "./cursor.js";
 import type { ScanCache } from "./scan-cache.js";
+import type { TranscriptPathWriter } from "./transcript-index.js";
 
 /** Persistent per-vendor parse caches, so rebuilding the sources each scan (to
  *  keep config late-bound) doesn't throw away the mtime memoization. */
@@ -10,6 +11,7 @@ export interface SourceCaches {
   claude?: ScanCache;
   codex?: ScanCache;
   cursor?: ScanCache;
+  cursorCaptured?: ScanCache;
 }
 
 /**
@@ -31,11 +33,18 @@ export interface SessionSourceConfig {
 export function buildSources(
   config: SessionSourceConfig,
   caches: SourceCaches = {},
+  transcriptIndex?: TranscriptPathWriter,
 ): SessionSource[] {
   return [
-    new ClaudeSource(config.claudeProjects, caches.claude),
-    new CodexSource(config.codexSessions, caches.codex),
-    new CursorSource(config.cursorProjects, config.cursorSessions, caches.cursor),
+    new ClaudeSource(config.claudeProjects, caches.claude, transcriptIndex),
+    new CodexSource(config.codexSessions, caches.codex, transcriptIndex),
+    new CursorSource(
+      config.cursorProjects,
+      config.cursorSessions,
+      caches.cursor,
+      caches.cursorCaptured,
+      transcriptIndex,
+    ),
   ];
 }
 

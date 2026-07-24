@@ -62,6 +62,10 @@ export interface RawSession {
    *  Attend did not launch and therefore cannot track in its live engine. */
   active?: boolean;
   activeStartedAt?: number | null;
+  /** Provider turn id recovered from an unterminated transcript, when available.
+   * Lets control actions target the exact external turn instead of racing a
+   * second provider-side status lookup. */
+  activeTurnId?: string | null;
   /** Vendor-owned model/reasoning/speed recovered from this session's history. */
   runConfig?: ProviderSessionRunConfig;
 }

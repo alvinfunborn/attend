@@ -6,6 +6,48 @@ import { SqliteDocument } from "../src/core/state-database.js";
 import { VaultUiStateStore } from "../src/core/ui-state.js";
 
 describe("VaultUiStateStore", () => {
+  it("keeps Inbox todos scope-local and merges them in a multi-directory view", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-ui-inbox-"));
+    const file = path.join(dir, "ui-state.json");
+    const first = new VaultUiStateStore(file, "scope:first");
+    const second = new VaultUiStateStore(file, "scope:second");
+    const firstTodo = {
+      id: "first",
+      text: "First vault task",
+      completed: false,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const secondTodo = {
+      id: "second",
+      text: "Second vault task",
+      completed: false,
+      createdAt: 2,
+      updatedAt: 2,
+    };
+    first.patch({ inboxTodos: [firstTodo] });
+    second.patch({ inboxTodos: [secondTodo] });
+
+    expect(new VaultUiStateStore(file, "scope:first").get().inboxTodos).toEqual([firstTodo]);
+    expect(new VaultUiStateStore(file, "scope:second").get().inboxTodos).toEqual([secondTodo]);
+
+    const combined = new VaultUiStateStore(file, "scope:combined", undefined, [
+      "scope:first",
+      "scope:second",
+    ]);
+    expect(combined.get().inboxTodos).toEqual([firstTodo, secondTodo]);
+    combined.patch({ inboxTodos: [firstTodo, secondTodo] });
+    expect(new VaultUiStateStore(file, "scope:first").get().inboxTodos).toEqual([
+      firstTodo,
+      secondTodo,
+    ]);
+    expect(new VaultUiStateStore(file, "scope:second").get().inboxTodos).toEqual([
+      firstTodo,
+      secondTodo,
+    ]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("persists exact session configs and does not let observations replace them", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-session-config-"));
     const file = path.join(dir, "ui-state.json");
@@ -69,6 +111,16 @@ describe("VaultUiStateStore", () => {
       sessionPins: { s1: 123 },
       sessionTitles: { s1: "Customer escalation" },
       forkParents: { s2: "s1" },
+      chatGroups: {
+        g1: {
+          id: "g1",
+          members: [
+            { vendor: "claude", sessionId: "s1" },
+            { vendor: "codex", sessionId: "s2" },
+          ],
+          updatedAt: 124,
+        },
+      },
       commentThreads: {
         c1: {
           id: "c1",
@@ -80,6 +132,7 @@ describe("VaultUiStateStore", () => {
           cwd: dir,
           createdAt: 123,
           lastUserMessageAt: 456,
+          lastUserText: "Can you verify the edge case?",
           status: "unread",
           messageCount: 2,
         },
@@ -109,6 +162,16 @@ describe("VaultUiStateStore", () => {
       sessionPins: { s1: 123 },
       sessionTitles: { s1: "Customer escalation" },
       forkParents: { s2: "s1" },
+      chatGroups: {
+        g1: {
+          id: "g1",
+          members: [
+            { vendor: "claude", sessionId: "s1" },
+            { vendor: "codex", sessionId: "s2" },
+          ],
+          updatedAt: 124,
+        },
+      },
       commentThreads: {
         c1: expect.objectContaining({
           parentSessionId: "s1",
@@ -117,6 +180,7 @@ describe("VaultUiStateStore", () => {
           status: "unread",
           messageCount: 2,
           lastUserMessageAt: 456,
+          lastUserText: "Can you verify the edge case?",
         }),
       },
     });
@@ -128,15 +192,51 @@ describe("VaultUiStateStore", () => {
     const file = path.join(dir, "ui-state.json");
     const first = new VaultUiStateStore(file);
     const second = new VaultUiStateStore(file);
-    first.patch({ sessionTitles: { s1: "One" }, pins: { s1: [{ key: "a" }] } });
-    second.patch({ sessionTitles: { s2: "Two" }, pins: { s2: [{ key: "b" }] } });
-    first.patch({ sessionTitles: { s1: null }, pins: { s1: null } });
+    first.patch({
+      sessionTitles: { s1: "One" },
+      pins: { s1: [{ key: "a" }] },
+      chatGroups: {
+        g1: {
+          id: "g1",
+          members: [
+            { vendor: "claude", sessionId: "s1" },
+            { vendor: "claude", sessionId: "s2" },
+          ],
+          updatedAt: 1,
+        },
+      },
+    });
+    second.patch({
+      sessionTitles: { s2: "Two" },
+      pins: { s2: [{ key: "b" }] },
+      chatGroups: {
+        g2: {
+          id: "g2",
+          members: [
+            { vendor: "codex", sessionId: "s3" },
+            { vendor: "codex", sessionId: "s4" },
+          ],
+          updatedAt: 2,
+        },
+      },
+    });
+    first.patch({ sessionTitles: { s1: null }, pins: { s1: null }, chatGroups: { g1: null } });
     expect(second.get()).toMatchObject({
       sessionTitles: { s2: "Two" },
       pins: { s2: [{ key: "b" }] },
     });
     expect(second.get().sessionTitles).not.toHaveProperty("s1");
     expect(second.get().pins).not.toHaveProperty("s1");
+    expect(second.get().chatGroups).toEqual({
+      g2: {
+        id: "g2",
+        members: [
+          { vendor: "codex", sessionId: "s3" },
+          { vendor: "codex", sessionId: "s4" },
+        ],
+        updatedAt: 2,
+      },
+    });
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -256,6 +356,16 @@ describe("VaultUiStateStore", () => {
       pinnedTags: ["urgent"],
       hiddenTags: ["stable"],
       sessionTitles: { s1: "Shared title" },
+      chatGroups: {
+        shared: {
+          id: "shared",
+          members: [
+            { vendor: "claude", sessionId: "s1" },
+            { vendor: "claude", sessionId: "s2" },
+          ],
+          updatedAt: 10,
+        },
+      },
     });
     child.patch({
       focusViewPatch: { child: { id: "child", name: "Child", tags: ["frontend"] } },
@@ -270,6 +380,7 @@ describe("VaultUiStateStore", () => {
     expect(child.get().pinnedTags).toEqual(["later"]);
     expect(child.get().hiddenTags).toEqual([]);
     expect(child.get().sessionTitles).toEqual({ s1: "Shared title" });
+    expect(child.get().chatGroups).toEqual(parent.get().chatGroups);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

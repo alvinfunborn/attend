@@ -12,7 +12,12 @@ export type ProviderErrorPayload =
   | { message: string; code?: never; vendor?: never; command?: never; retryable?: never };
 
 export function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return String(error);
 }
 
 export function providerErrorPayload(

@@ -62,6 +62,26 @@ export class DriverRuntime<Run extends DriverRun> {
     return this.runs.delete(sessionId);
   }
 
+  /**
+   * Remove a live provider run while keeping its subscribers parked for a later
+   * resume of the same durable session.
+   */
+  release(sessionId: string, expected?: Run): boolean {
+    const run = this.runs.get(sessionId);
+    if (!run || (expected && run !== expected)) return false;
+    const listeners = run.emitter.listeners("event") as Array<(event: UiEvent) => void>;
+    run.emitter.removeAllListeners("event");
+    if (listeners.length) {
+      let waiting = this.pending.get(sessionId);
+      if (!waiting) {
+        waiting = new Set();
+        this.pending.set(sessionId, waiting);
+      }
+      for (const listener of listeners) waiting.add(listener);
+    }
+    return this.runs.delete(sessionId);
+  }
+
   /** Bound completed-session metadata while retaining recent sync snapshots. */
   pruneInactive(maxInactive = 256): void {
     let inactive = 0;

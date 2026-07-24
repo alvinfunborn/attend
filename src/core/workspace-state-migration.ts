@@ -116,7 +116,14 @@ function mergeUiState(target: JsonObject, source: JsonObject): void {
   target.shortcuts = mergeTextItems(target.shortcuts, source.shortcuts);
   mergeSessionTextItems(target, source, "sessionNotes");
   mergeSessionTextItems(target, source, "sessionTodos");
-  for (const key of ["pins", "sessionPins", "sessionTitles", "forkParents", "commentThreads"]) {
+  for (const key of [
+    "pins",
+    "sessionPins",
+    "sessionTitles",
+    "forkParents",
+    "chatGroups",
+    "commentThreads",
+  ]) {
     target[key] = { ...record(source[key]), ...record(target[key]) };
   }
   const scopes = record(target.scopes);
