@@ -1,6 +1,6 @@
 {
   "name": "@sinphife/attend",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Local web dashboard for AI coding sessions, with integrations for Claude Code, Codex/ChatGPT, and Cursor CLI.",
   "repository": {
     "type": "git",

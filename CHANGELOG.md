@@ -2,6 +2,12 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.2.3 — 2026-07-24
+
+### Fixed
+
+- Stabilize browser layout tests around asynchronous session-card read-state projection.
+
 ## 1.2.2 — 2026-07-24
 
 ### Documentation

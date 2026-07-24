@@ -2697,7 +2697,7 @@ describe("console browser behavior", () => {
       .poll(() => page.locator("#msgs .bubble").first().textContent())
       .toContain("Second session message 1");
     const progress = page.locator('#list .item[data-session-id="s1"] .session-read-progress');
-    expect(await progress.isVisible()).toBe(true);
+    await expect.poll(() => progress.isVisible()).toBe(true);
     expect(Number(await progress.getAttribute("data-unread-ratio"))).toBeCloseTo(
       reading.unreadRatio,
       2,
