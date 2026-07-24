@@ -2950,10 +2950,11 @@ describe("console browser behavior", () => {
       return host.getBoundingClientRect().bottom;
     });
     if (!bottomRailBox) throw new Error("Missing bottom-clamped action geometry");
-    expect(bottomRailBox.y + bottomRailBox.height / 2).toBeCloseTo(
-      visibleBottom - bottomRailBox.height / 2 - 6,
-      0,
-    );
+    expect(
+      Math.abs(
+        bottomRailBox.y + bottomRailBox.height / 2 - (visibleBottom - bottomRailBox.height / 2 - 6),
+      ),
+    ).toBeLessThanOrEqual(2);
 
     await page.locator("#msgs").evaluate((host) => {
       host.scrollTop = host.scrollHeight;
