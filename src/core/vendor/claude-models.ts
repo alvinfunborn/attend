@@ -66,9 +66,11 @@ function modelOptions(models: ModelInfo[]): ModelOption[] {
         )
       : [];
     const supportsFastMode = model.supportsFastMode === true;
+    const resolved = text((model as ModelInfo & { resolvedModel?: unknown }).resolvedModel);
     out.push({
       value,
       label,
+      ...(resolved && resolved !== value ? { resolvedModel: resolved } : {}),
       ...(efforts.length ? { efforts } : {}),
       ...(supportsFastMode
         ? {

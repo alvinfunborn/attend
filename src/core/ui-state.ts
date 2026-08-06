@@ -29,7 +29,7 @@ export interface VaultUiState {
   /** Lightweight UI mirror for provider-native Goals (Claude needs this across reloads). */
   sessionGoals?: Record<string, UiSessionGoal>;
   pins?: Record<string, unknown[]>;
-  /** provider session id -> time pinned in the sidebar */
+  /** provider session id -> sortable pin position (new pins start with a timestamp) */
   sessionPins?: Record<string, number>;
   sessionTitles?: Record<string, string>;
   /** child provider session id -> parent provider session id */

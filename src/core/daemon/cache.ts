@@ -57,6 +57,18 @@ export class AnalysisCache {
     });
   }
 
+  /** Carry a cached verdict to a new task id when the provider rolled the session's
+   *  id mid-session (e.g. Claude /clear), so the continued session keeps its analysis. */
+  move(oldTaskId: string, newTaskId: string): void {
+    if (!oldTaskId || !newTaskId || oldTaskId === newTaskId) return;
+    this.data.update((analyses) => {
+      const current = analyses[oldTaskId];
+      if (current === undefined) return;
+      delete analyses[oldTaskId];
+      analyses[newTaskId] = current;
+    });
+  }
+
   /** `nextStep` and `probe` describe only the latest completed assistant turn.
    *  Keep the durable handoff fields, but invalidate both drafts once the human
    *  advances the session so a refresh cannot resurrect stale suggestions. */

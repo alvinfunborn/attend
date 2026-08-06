@@ -1,9 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import {
-  MAX_PENDING_TURNS_PER_ANALYSIS,
-  projectCollaborationTurns,
-} from "../../core/collaboration.js";
+import { MAX_PENDING_TURNS_PER_ANALYSIS } from "../../core/collaboration.js";
 import {
   parseAnalysis,
   parseAvoidancePrompt,
@@ -12,12 +9,11 @@ import {
 import type { TranscriptPathWriter } from "../../core/vendor/transcript-index.js";
 import type { QueryFn } from "../claude/driver.js";
 import { toUiEventsFromClaude } from "../claude/events.js";
-import { readClaudeTranscript } from "../transcript.js";
+import { type AnalyzerContextReader, readAnalyzerContextFile } from "./context.js";
 import {
   REQUEST_RULES,
   RESPONSE_SHAPE,
   avoidancePromptRequest,
-  condenseTranscript,
   requestPrompt,
 } from "./contract.js";
 import type { AnalyzerVerdict, SessionAnalyzer } from "./index.js";
@@ -53,16 +49,20 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     private readonly claudeProjects: string,
     private readonly queryFn: QueryFn,
     private readonly transcriptIndex?: TranscriptPathWriter,
+    private readonly contextReader?: AnalyzerContextReader,
   ) {}
 
-  async spawn(cwd: string): Promise<string | null> {
+  async spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null> {
     let sessionId: string | null = null;
     const stream = this.queryFn({ prompt: SEED, options: this.options(cwd) });
     await consumeAnalyzerStream(
       stream,
       (msg) => {
-        for (const ev of toUiEventsFromClaude(msg))
-          if (ev.kind === "session" && ev.sessionId) sessionId = ev.sessionId;
+        for (const ev of toUiEventsFromClaude(msg)) {
+          if (ev.kind !== "session" || !ev.sessionId) continue;
+          if (sessionId !== ev.sessionId) onSessionId?.(ev.sessionId);
+          sessionId = ev.sessionId;
+        }
       },
       () => stream.interrupt(),
     );
@@ -77,13 +77,14 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     analysisFromAt: number | null = null,
     uiContext = "",
   ): Promise<AnalyzerVerdict | null> {
-    const file = this.findSessionFile(taskId);
+    const file = await this.findSessionFile(taskId);
     // The daemon needs the true session opening, not "the first message from the
     // last 200 rows"; otherwise long sessions collapse to a late subtask such as
     // "create PR". We read the full transcript, then condense it ourselves.
-    const messages = file ? readClaudeTranscript(file, Number.POSITIVE_INFINITY) : [];
-    const transcript = condenseTranscript(messages);
-    const observedTurns = projectCollaborationTurns("claude", taskId, messages, analysisFromAt);
+    const context = file
+      ? await this.readContext(file, taskId, analysisFromAt)
+      : { transcript: "", observedTurns: [] };
+    const { transcript, observedTurns } = context;
     const pendingTurns = observedTurns
       .filter((turn) => !knownTurnIds.has(turn.turnId))
       .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
@@ -116,10 +117,8 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     taskId: string,
     uiContext = "",
   ): Promise<string | null> {
-    const file = this.findSessionFile(taskId);
-    const transcript = file
-      ? condenseTranscript(readClaudeTranscript(file, Number.POSITIVE_INFINITY))
-      : "";
+    const file = await this.findSessionFile(taskId);
+    const transcript = file ? (await this.readContext(file, taskId)).transcript : "";
     let text = "";
     const options = { ...this.options(cwd), resume: daemonId };
     const stream = this.queryFn({ prompt: avoidancePromptRequest(transcript, uiContext), options });
@@ -135,27 +134,37 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
   }
 
   private options(cwd: string): { cwd: string } {
-    return { cwd: cwd && fs.existsSync(cwd) ? cwd : process.cwd() };
+    return { cwd: cwd || process.cwd() };
   }
 
   /** Locate a task session's JSONL by id (its cwd-encoded project dir is opaque). */
-  private findSessionFile(sessionId: string): string | null {
+  private async findSessionFile(sessionId: string): Promise<string | null> {
     const indexed = this.transcriptIndex?.get(this.vendor, sessionId);
     if (indexed) return indexed;
     let dirs: fs.Dirent[];
     try {
-      dirs = fs.readdirSync(this.claudeProjects, { withFileTypes: true });
+      dirs = await fs.promises.readdir(this.claudeProjects, { withFileTypes: true });
     } catch {
       return null;
     }
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       const f = path.join(this.claudeProjects, d.name, `${sessionId}.jsonl`);
-      if (fs.existsSync(f)) {
+      try {
+        await fs.promises.access(f);
         this.transcriptIndex?.set(this.vendor, sessionId, f);
         return f;
+      } catch {
+        // Continue through opaque Claude project directory names.
       }
     }
     return null;
+  }
+
+  private readContext(file: string, sessionId: string, analysisFromAt: number | null = null) {
+    return (
+      this.contextReader?.readAnalyzerContext(file, this.vendor, sessionId, analysisFromAt) ??
+      readAnalyzerContextFile(file, this.vendor, sessionId, analysisFromAt)
+    );
   }
 }

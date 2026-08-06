@@ -1,6 +1,7 @@
 # attend
 
-一个用于管理 AI coding 任务注意力的本地网页控制台。目前已接入 Claude Code、Codex/ChatGPT 和 Cursor CLI。
+一个用于管理 AI coding 任务注意力的本地网页控制台。目前已接入 Claude Code、Codex/ChatGPT、
+Cursor CLI、Antigravity CLI 和 GitHub Copilot CLI。
 
 [English README](README.md)
 
@@ -18,7 +19,8 @@ Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向�
 ## 主要能力
 
 - 用 tag、搜索和 Focus 视图组织多个项目里的 session，并区分正在生成、未读、待继续和已处理的任务。
-- 直接在网页里新建或继续 Claude Code、Codex/ChatGPT 与 Cursor CLI 会话，支持附件、交互提问、停止和持久消息队列。
+- 直接在网页里新建或继续 Claude Code、Codex/ChatGPT、Cursor CLI、Antigravity CLI 与 GitHub
+  Copilot CLI 会话，支持附件、停止和持久消息队列。
 - 在 composer 旁保存 shortcuts、notes、todos 和 Goal；也可以 pin 消息，并用 `@` 把需要的上下文带入下一轮。
 - Fork session、评论某条回复，或把旁支讨论升级成独立任务，同时保留它与原任务的关系。
 - 编辑标题和注意力信号，查看近期工作统计，并在明暗主题之间切换。
@@ -62,11 +64,17 @@ Attend 创建的受支持 session 会在每轮结束后得到简短的 `brief`�
 要求：
 
 - Node.js `>= 22.13`
-- 至少安装一个已支持的 CLI：Claude Code、Codex/ChatGPT 或 Cursor CLI（`cursor-agent`）
+- 至少安装一个已支持的 CLI：Claude Code、Codex/ChatGPT、Cursor CLI（`cursor-agent`）、
+  独立版 Antigravity CLI（`agy`）或 GitHub Copilot CLI（`copilot`）
 
 Attend 会在启动时检测这些系统 CLI，只显示实际可运行的 Vendor。如果一个都不可用，选择器会
 显示所有 Vendor 并提供安装提示。Claude Code 最低要求为 `2.1.0`；版本过旧时会被禁用并
 明确提示升级。
+
+每个网页内创建的 session 都会由同 vendor 的 analyzer daemon 分析。Cursor daemon 使用原生只读
+`ask` 模式并启用 sandbox；Antigravity 与 Copilot daemon 使用各自的 headless/JSONL 接口。Claude 与
+Codex 支持原生 fork；Cursor、Antigravity 和 Copilot 的 headless CLI 没有原生 fork 命令，因此分支会
+创建新 session，并用父 session 的可见 transcript 作为上下文。
 
 ### Claude 认证
 
@@ -157,6 +165,10 @@ npm run demo:readme
 ```
 
 它会在 `http://127.0.0.1:5099` 提供 demo，不会读取或修改真实的 Attend 状态。
+
+如需定位本地性能问题，可以打开运行中 Attend 的 `/debug/performance`。该接口会报告 route
+延迟、event-loop 卡顿、session index 进度与扫描字节数、worker 错误以及后台 model refresh
+状态；请求本身不会读取 transcript 正文。
 
 检查：
 

@@ -94,6 +94,35 @@ describe("WorkEventStore", () => {
     fs.rmSync(file, { force: true });
   });
 
+  it("reconciles a live prompt that arrives after transcript indexing", () => {
+    const file = path.join(os.tmpdir(), `attend-work-events-${Date.now()}-reverse-race.sqlite3`);
+    const store = new WorkEventStore(file);
+    const now = Date.now();
+    expect(store.backfillPrompts([session("comment", [now - 2_000])])).toBe(1);
+
+    store.record({
+      kind: "user_prompt",
+      at: now,
+      sessionId: "comment",
+      vendor: "codex",
+      chars: 3,
+      source: "live",
+    });
+
+    expect(store.list()).toMatchObject([
+      {
+        kind: "user_prompt",
+        at: now,
+        sessionId: "comment",
+        vendor: "codex",
+        chars: 3,
+        source: "live",
+      },
+    ]);
+    store.close();
+    fs.rmSync(file, { force: true });
+  });
+
   it("deduplicates repeated live callbacks within the configured window", () => {
     const file = path.join(os.tmpdir(), `attend-work-events-${Date.now()}-${Math.random()}.json`);
     const store = new WorkEventStore(file);

@@ -84,6 +84,14 @@ class DeferredTurnAppServer extends FakeAppServer {
   }
 }
 
+class RejectInterruptAppServer extends FakeAppServer {
+  override async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method !== "turn/interrupt") return super.request<T>(method, params);
+    this.requests.push({ method, params });
+    throw new Error("interrupt transport failed");
+  }
+}
+
 describe("CodexAppServerDriver", () => {
   it("restores the provider-returned configuration when resuming cold", async () => {
     const client = new FakeAppServer();
@@ -408,6 +416,24 @@ describe("CodexAppServerDriver", () => {
     expect(driver.answer(id, { toolUseId: "command-1", text: "Approve", toolUseResult: {} })).toBe(
       false,
     );
+  });
+
+  it("preserves the live turn and late output when app-server rejects interrupt", async () => {
+    const client = new RejectInterruptAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "run a long command" });
+    const events: UiEvent[] = [];
+    driver.subscribe(id, (event) => events.push(event));
+
+    await expect(driver.interrupt(id)).resolves.toBe(false);
+    expect(events).not.toContainEqual({ kind: "result", ok: false, text: "interrupted" });
+    expect(driver.activeSessions()).toContain(id);
+
+    client.emit({
+      method: "item/agentMessage/delta",
+      params: { threadId: id, turnId: "turn-1", itemId: "late", delta: "too late" },
+    });
+    expect(events).toContainEqual({ kind: "assistant_text", text: "too late" });
   });
 
   it("recovers an in-progress app-server turn when Attend lost its local runtime", async () => {

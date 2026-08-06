@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import type { RawSession } from "../core/types.js";
 import { readCodexTranscript } from "./codex/transcript.js";
+import { readCopilotTranscript } from "./copilot/transcript.js";
 import { readCursorTranscript } from "./cursor/transcript.js";
 import { parseSearchQuery } from "./search-query.js";
 import { type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
@@ -43,7 +44,7 @@ function chunksFromMessages(messages: TranscriptMsg[]): SearchHit[] {
   return chunks;
 }
 
-function readChunks(session: RawSession): SearchHit[] {
+export function readSearchChunks(session: RawSession): SearchHit[] {
   let st: fs.Stats;
   try {
     st = fs.statSync(session.path);
@@ -65,7 +66,11 @@ function readChunks(session: RawSession): SearchHit[] {
       ? readCodexTranscript
       : session.vendor === "cursor"
         ? readCursorTranscript
-        : readClaudeTranscript;
+        : session.vendor === "antigravity"
+          ? readAntigravityTranscript
+          : session.vendor === "copilot"
+            ? readCopilotTranscript
+            : readClaudeTranscript;
   const chunks = chunksFromMessages(read(session.path, Number.POSITIVE_INFINITY));
   const bytes = chunks.reduce((total, chunk) => total + Buffer.byteLength(chunk.text), 0);
   transcriptSearchCache.set(session.path, { mtimeMs: st.mtimeMs, size: st.size, chunks, bytes });
@@ -104,7 +109,7 @@ export function searchSessions(
     if (out.length >= maxResults) break;
     const hits: SearchHit[] = [];
     let count = 0;
-    const chunks = readChunks(session);
+    const chunks = readSearchChunks(session);
     const searchable = chunks.map((chunk) => chunk.text).join("\n");
     if (!parsed.test(searchable)) continue;
     const positive = parsed.matchingClauses(searchable).filter((clause) => !clause.exclude);
@@ -129,3 +134,4 @@ export function searchSessions(
   }
   return out;
 }
+import { readAntigravityTranscript } from "./antigravity/transcript.js";

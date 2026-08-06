@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ModelOption } from "../model-options.js";
+import { runMetadataCommand } from "./async-command.js";
 
 interface CachedModel {
   slug?: unknown;
@@ -143,6 +145,65 @@ export function inspectCodexModels(
     };
   }
   return cached;
+}
+
+/** Async production equivalent of {@link inspectCodexModels}. The synchronous
+ * runner remains an injectable compatibility seam for pure unit tests only. */
+export async function inspectCodexModelsAsync(
+  codexBin: string | null,
+  cachePath = defaultCodexModelsCachePath(),
+): Promise<CodexModelCacheInspection> {
+  if (codexBin) {
+    const live = await runMetadataCommand(codexBin, ["debug", "models"], 15_000);
+    const liveModels = live.status === 0 ? inspectCatalogJson(live.stdout) : [];
+    if (liveModels.length) return { models: liveModels, warning: null };
+
+    const bundled = await runMetadataCommand(codexBin, ["debug", "models", "--bundled"], 15_000);
+    const bundledModels = bundled.status === 0 ? inspectCatalogJson(bundled.stdout) : [];
+    if (bundledModels.length) {
+      return {
+        models: bundledModels,
+        warning: "Live Codex model discovery failed; using the catalog bundled with Codex.",
+      };
+    }
+  }
+  const cached = await inspectCodexModelCacheAsync(cachePath);
+  if (cached.models.length) {
+    return {
+      models: cached.models,
+      warning: "Codex CLI model discovery is unavailable; using its internal cache as fallback.",
+    };
+  }
+  return cached;
+}
+
+export async function inspectCodexModelCacheAsync(
+  cachePath = defaultCodexModelsCachePath(),
+): Promise<CodexModelCacheInspection> {
+  try {
+    const parsed = JSON.parse(await readFile(cachePath, "utf8")) as { models?: unknown };
+    if (!Array.isArray(parsed.models)) {
+      return {
+        models: [],
+        warning: "Codex internal model cache changed format; using Attend's last known models.",
+      };
+    }
+    const models = modelOptions(parsed.models);
+    return {
+      models,
+      warning: models.length
+        ? null
+        : "Codex internal model cache contains no visible models; using Attend's last known models.",
+    };
+  } catch (error) {
+    const missing = error instanceof Error && "code" in error && error.code === "ENOENT";
+    return {
+      models: [],
+      warning: missing
+        ? "Codex internal model cache is unavailable; using Attend's last known models."
+        : "Codex internal model cache could not be parsed; using Attend's last known models.",
+    };
+  }
 }
 
 export function inspectCodexModelCache(

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  DAEMON_PROMPT_MARKERS,
   RESPONSE_SHAPE,
   avoidancePromptRequest,
   condenseUiContext,
+  looksLikeDaemonPrompt,
   requestPrompt,
 } from "../src/chat/analyzer/contract.js";
 
@@ -48,5 +50,32 @@ describe("prompt uiContext injection", () => {
 describe("RESPONSE_SHAPE", () => {
   it("declares the nextStep field so the daemon emits it", () => {
     expect(RESPONSE_SHAPE).toContain('"nextStep"');
+  });
+});
+
+// These markers back the last-resort daemon filter (isLikelyDaemonSession in server.ts).
+// They previously drifted out of sync with the prompts and silently stopped matching, so
+// lock them to the real prompt text here: change a prompt and this fails.
+describe("daemon prompt markers", () => {
+  it("still match the current analyze + avoidance prompts", () => {
+    const analyze = requestPrompt("some transcript", [], "");
+    expect(analyze.startsWith(DAEMON_PROMPT_MARKERS.analyzePrefix)).toBe(true);
+    expect(analyze.includes(DAEMON_PROMPT_MARKERS.analyzeReply)).toBe(true);
+
+    const avoidance = avoidancePromptRequest("some transcript", "");
+    expect(avoidance.startsWith(DAEMON_PROMPT_MARKERS.avoidancePrefix)).toBe(true);
+  });
+
+  it("recognize a daemon transcript by seed title or analyze/avoidance last prompt", () => {
+    expect(looksLikeDaemonPrompt(`${DAEMON_PROMPT_MARKERS.seedPrefix} …`, "hi")).toBe(true);
+    expect(looksLikeDaemonPrompt("Refactor parser", requestPrompt("t", [], ""))).toBe(true);
+    expect(looksLikeDaemonPrompt("Refactor parser", avoidancePromptRequest("t", ""))).toBe(true);
+  });
+
+  it("do not mistake a real user session for a daemon", () => {
+    expect(looksLikeDaemonPrompt("Fix funnel breakdown bug", "storm 已经停了，首次完成功能")).toBe(
+      false,
+    );
+    expect(looksLikeDaemonPrompt("", "")).toBe(false);
   });
 });

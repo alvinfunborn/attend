@@ -6,6 +6,12 @@ export interface ToolCall {
   input: unknown;
   result?: string;
   isError?: boolean;
+  /** Stable content identity used for direct Pin history lookup. */
+  historyId?: string;
+  /** Stable ordinal within the server's bounded history tail. */
+  historyOrdinal?: number;
+  /** Array position within the file-versioned bounded history snapshot. */
+  historyIndex?: number;
 }
 
 export interface TranscriptMsg {
@@ -14,6 +20,12 @@ export interface TranscriptMsg {
   tools: ToolCall[];
   /** epoch ms parsed from the transcript row, when the vendor records one */
   ts?: number;
+  /** Stable content identity used for direct Pin history lookup. */
+  historyId?: string;
+  /** Stable text-message ordinal within the server's bounded history tail. */
+  historyOrdinal?: number;
+  /** Array position within the file-versioned bounded history snapshot. */
+  historyIndex?: number;
 }
 
 interface Block {
@@ -127,13 +139,7 @@ function resultText(content: unknown): string {
  * Tool calls keep their input, and their result is correlated back by
  * tool_use_id so the console can render each tool as an expandable block.
  */
-export function readClaudeTranscript(file: string, limit = 200): TranscriptMsg[] {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(file, "utf-8");
-  } catch {
-    return [];
-  }
+export function parseClaudeTranscriptMessages(raw: string, limit = 200): TranscriptMsg[] {
   const msgs: TranscriptMsg[] = [];
   const toolById = new Map<string, ToolCall>();
 
@@ -192,4 +198,12 @@ export function readClaudeTranscript(file: string, limit = 200): TranscriptMsg[]
     }
   }
   return msgs.slice(-limit);
+}
+
+export function readClaudeTranscript(file: string, limit = 200): TranscriptMsg[] {
+  try {
+    return parseClaudeTranscriptMessages(fs.readFileSync(file, "utf-8"), limit);
+  } catch {
+    return [];
+  }
 }

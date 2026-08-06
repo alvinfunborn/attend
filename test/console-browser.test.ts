@@ -1,5 +1,6 @@
 import { type Browser, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { ScheduledItem } from "../src/core/schedules.js";
 import { type ConsoleView, renderConsole } from "../src/ui/console.js";
 
 const view: ConsoleView = {
@@ -374,6 +375,338 @@ describe("console browser behavior", () => {
 
   afterAll(async () => {
     await browser.close();
+  });
+
+  it("tracks the focused session directory in the tab title using only the vetted label", async () => {
+    const page = await browser.newPage();
+    const secret = "do-not-project-this-passphrase";
+    const [first, second] = raceView.sessions;
+    if (!first || !second) throw new Error("Missing session fixtures");
+    const titleView: ConsoleView = {
+      ...raceView,
+      pageTitle: "Attend — vault",
+      sessions: [
+        {
+          ...first,
+          cwd: `/tmp/${secret}`,
+          project: secret,
+          tabTitle: "safe-session-dir",
+        },
+        {
+          ...second,
+          cwd: "/tmp/other-raw-dir",
+          project: "other-raw-dir",
+          tabTitle: "other-safe-dir",
+        },
+      ],
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(titleView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    expect(await page.title()).toBe("Attend — vault");
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.title()).toBe("Attend — safe-session-dir");
+    expect(await page.title()).not.toContain(secret);
+
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await expect.poll(() => page.title()).toBe("Attend — other-safe-dir");
+    await page.close();
+  });
+
+  it("hydrates a cold SSE session index without dropping replayed events or scheduled cards", async () => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(3_000);
+    const now = Date.now();
+    const scheduled: ScheduledItem = {
+      id: "cold-schedule",
+      jobId: "cold-job",
+      kind: "session",
+      runAt: now + 60_000,
+      timezone: "UTC",
+      status: "scheduled",
+      payload: {
+        kind: "session",
+        mode: "new",
+        clientSessionId: "cold-scheduled-client",
+        cwd: "/tmp/scheduled",
+        vendor: "claude",
+        text: "scheduled before indexing finishes",
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const coldView: ConsoleView = {
+      ...view,
+      sessionsPending: true,
+      sessionIndexEpoch: "cold-server",
+      sessionIndexRevision: 0,
+      schedules: [scheduled],
+    };
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__coldIndexEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(coldView) });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await expect
+        .poll(() => page.locator('[data-session-id="cold-scheduled-client"]').count())
+        .toBe(1);
+
+      // Reconnect replay is ordered before the authoritative index handshake.
+      // The event is initially orphaned, then must be drained when s1 arrives.
+      await page.evaluate(() => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__coldIndexEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "s1",
+            vendor: "claude",
+            emittedAt: Date.now(),
+            event: { kind: "user_turn_started", text: "replayed before index" },
+          }),
+        });
+        source.onmessage?.({
+          data: JSON.stringify({
+            active: ["s1"],
+            startedAt: { s1: Date.now() },
+            lastAssistantAt: {},
+            clientSessionIds: {},
+            queues: {},
+            stats: { sessions1h: 0, prompts1h: 0, chars1h: 0 },
+          }),
+        });
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "cold-server",
+            revision: 1,
+            pending: false,
+            sessions: [
+              {
+                vendor: "claude",
+                sessionId: "s1",
+                title: "Avoidance session",
+                lastPrompt: "old prompt",
+                cwd: "/tmp/project",
+                project: "project",
+                file: "/tmp/session-1.jsonl",
+                ageDays: 0,
+                lastTs: 100,
+                prompts: 1,
+                pattern: "avoidance",
+                patternReason: "revisited without sending",
+                state: "needs_input",
+                score: 8,
+                reason: "needs a reply",
+                etaMin: 10,
+                brief: "Avoidance session",
+                tags: [],
+                seen: true,
+              },
+              {
+                vendor: "claude",
+                sessionId: "s2",
+                title: "Other session",
+                lastPrompt: "other prompt",
+                cwd: "/tmp/project",
+                project: "project",
+                file: "/tmp/session-2.jsonl",
+                ageDays: 0,
+                lastTs: 90,
+                prompts: 1,
+                pattern: "unknown",
+                state: null,
+                score: 5,
+                reason: "",
+                etaMin: 10,
+                brief: "Other session",
+                tags: [],
+              },
+            ],
+            knownDirs: ["/tmp/project"],
+            defaultNewDir: "/tmp/project",
+            tags: ["work"],
+            sessions1h: 2,
+            prompts1h: 5,
+            chars1h: 1250,
+            scannedAt: Date.now(),
+          }),
+        });
+      });
+      await expect.poll(() => page.locator('[data-session-id="s1"]').count()).toBe(1);
+      await expect
+        .poll(() => page.locator('[data-session-id="cold-scheduled-client"]').count())
+        .toBe(1);
+      await expect.poll(() => page.locator("#sessions1h").textContent()).toBe("2");
+      await expect.poll(() => page.locator("#tagFilters").textContent()).toContain("work");
+      await expect
+        .poll(() => page.locator('[data-session-id="s1"] .it-status').getAttribute("class"))
+        .toContain("generating");
+
+      // A stale revision cannot roll the catalog back.
+      await page.evaluate(() => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__coldIndexEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "cold-server",
+            revision: 0,
+            pending: false,
+            sessions: [],
+            tags: ["stale"],
+          }),
+        });
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(await page.locator('[data-session-id="s1"]').count()).toBe(1);
+      expect(await page.locator("#tagFilters").textContent()).not.toContain("stale");
+
+      // A restarted server has a new epoch, so revision zero is still newer.
+      await page.evaluate((sessions) => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__coldIndexEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "restarted-server",
+            revision: 0,
+            pending: false,
+            sessions,
+            knownDirs: ["/tmp/project"],
+            defaultNewDir: "/tmp/project",
+            tags: ["reconnected"],
+            sessions1h: 3,
+            prompts1h: 6,
+            chars1h: 1500,
+            scannedAt: Date.now(),
+          }),
+        });
+      }, raceView.sessions);
+      await expect.poll(() => page.locator("#tagFilters").textContent()).toContain("reconnected");
+      await expect.poll(() => page.locator("#sessions1h").textContent()).toBe("3");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("evicts a selected daemon card when the authoritative index marks it hidden", async () => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(3_000);
+    const baseSession = raceView.sessions[0];
+    if (!baseSession) throw new Error("missing base session");
+    const daemonSession = {
+      ...baseSession,
+      sessionId: "daemon-race",
+      title: "(no prompt)",
+      lastPrompt: null,
+      brief: null,
+      file: "/tmp/daemon-race.jsonl",
+      lastTs: 110,
+    };
+    const daemonView: ConsoleView = {
+      ...raceView,
+      sessions: [daemonSession, baseSession],
+      sessionIndexEpoch: "daemon-server",
+      sessionIndexRevision: 1,
+    };
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__daemonIndexEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(daemonView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: { messages: [] } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.locator('.item[data-session-id="daemon-race"]').click();
+      await expect.poll(() => page.locator('.item[data-session-id="daemon-race"]').count()).toBe(1);
+
+      await page.evaluate(
+        (sessions) => {
+          const source = (globalThis as unknown as Record<string, unknown>)
+            .__daemonIndexEventSource as {
+            onmessage: ((event: { data: string }) => void) | null;
+          };
+          source.onmessage?.({
+            data: JSON.stringify({
+              kind: "session_index",
+              epoch: "daemon-server",
+              revision: 2,
+              pending: false,
+              hiddenSessionIds: ["daemon-race"],
+              sessions,
+              knownDirs: ["/tmp/project"],
+              defaultNewDir: "/tmp/project",
+              tags: [],
+              scannedAt: Date.now(),
+            }),
+          });
+        },
+        [baseSession],
+      );
+
+      await expect.poll(() => page.locator('.item[data-session-id="daemon-race"]').count()).toBe(0);
+      await expect.poll(() => page.locator('.item[data-session-id="s1"]').count()).toBe(1);
+    } finally {
+      await page.close();
+    }
   });
 
   it("shares one clock interaction and projects scheduled sessions/comments into existing UI", async () => {
@@ -1501,7 +1834,7 @@ describe("console browser behavior", () => {
       await page.locator(".head-actions").evaluate((actions) => {
         const refresh = actions.querySelector("#refreshBtn");
         const pin = actions.querySelector("#headerPinBtn");
-        return !!(refresh && pin && refresh.compareDocumentPosition(pin) & 4);
+        return !!(refresh && pin && pin.compareDocumentPosition(refresh) & 4);
       }),
     ).toBe(true);
     expect(await headerPin.getAttribute("aria-label")).toBe("Unpin session");
@@ -1525,6 +1858,342 @@ describe("console browser behavior", () => {
     expect(
       await page.locator('#list .item[data-session-id="s1"] .it-pin').getAttribute("aria-pressed"),
     ).toBe("true");
+    await page.close();
+  });
+
+  it("keeps pinned session order fixed across recent, search, and priority sorting", async () => {
+    const page = await browser.newPage();
+    const [first, second] = raceView.sessions;
+    if (!first || !second) throw new Error("Missing session fixtures");
+    const pinPatches: Array<Record<string, number | null>> = [];
+    const pinnedOrderView: ConsoleView = {
+      ...raceView,
+      vaultState: {
+        ...raceView.vaultState,
+        sessionPins: {
+          "pinned-old": 100,
+          "pinned-new": 200,
+        },
+      },
+      sessions: [
+        {
+          ...first,
+          sessionId: "pinned-old",
+          title: "Pinned old",
+          brief: "Pinned old",
+          project: "needle",
+          file: "/tmp/pinned-old.jsonl",
+          lastTs: 100,
+          score: 1,
+        },
+        {
+          ...second,
+          sessionId: "pinned-new",
+          title: "needle",
+          brief: "needle",
+          file: "/tmp/pinned-new.jsonl",
+          lastTs: 400,
+          score: 10,
+        },
+        {
+          ...first,
+          sessionId: "unpinned-recent",
+          title: "Needle recent",
+          brief: "Needle recent",
+          file: "/tmp/unpinned-recent.jsonl",
+          lastTs: 300,
+          score: 4,
+        },
+        {
+          ...second,
+          sessionId: "unpinned-old",
+          title: "Older unpinned",
+          brief: "Older unpinned",
+          lastPrompt: "needle older",
+          file: "/tmp/unpinned-old.jsonl",
+          lastTs: 50,
+          score: 8,
+        },
+      ],
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        const body = renderConsole(pinnedOrderView).replace(
+          '<div id="list"></div>',
+          '<select id="sort" hidden><option value="recent" selected>recent</option><option value="priority">priority</option></select><div id="list"></div>',
+        );
+        await route.fulfill({ contentType: "text/html", body });
+      } else if (url.pathname === "/vault/ui-state") {
+        const body = request.postDataJSON() as {
+          sessionPins?: Record<string, number | null>;
+        };
+        if (body.sessionPins) pinPatches.push(body.sessionPins);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/search") {
+        await route.fulfill({ json: { results: [] } });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const sidebarOrder = () =>
+      page.locator("#list").evaluate((list) =>
+        Array.from(
+          list.children as unknown as ArrayLike<{
+            classList: { contains(value: string): boolean };
+            getAttribute(name: string): string | null;
+          }>,
+        ).map((node) =>
+          node.classList.contains("session-pin-divider")
+            ? "divider"
+            : node.getAttribute("data-session-id"),
+        ),
+      );
+
+    expect(await sidebarOrder()).toEqual([
+      "pinned-old",
+      "pinned-new",
+      "divider",
+      "unpinned-recent",
+      "unpinned-old",
+    ]);
+
+    await page.locator("#search").fill("needle");
+    await expect
+      .poll(sidebarOrder)
+      .toEqual(["pinned-old", "pinned-new", "divider", "unpinned-recent", "unpinned-old"]);
+
+    await page.locator("#sort").evaluate((node) => {
+      (node as { value: string }).value = "priority";
+    });
+    await page.locator("#search").fill("");
+    await expect
+      .poll(sidebarOrder)
+      .toEqual(["pinned-old", "pinned-new", "divider", "unpinned-old", "unpinned-recent"]);
+
+    await page.locator('#list .item[data-session-id="unpinned-recent"] .it-pin').click();
+    await expect
+      .poll(sidebarOrder)
+      .toEqual(["pinned-old", "pinned-new", "unpinned-recent", "divider", "unpinned-old"]);
+    await expect
+      .poll(() => pinPatches.some((patch) => Number(patch["unpinned-recent"] ?? 0) > 200))
+      .toBe(true);
+    await page.close();
+  });
+
+  it("reorders pinned sessions from both session surfaces with a polished drop preview", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1500, height: 900 },
+    });
+    const [first, second] = raceView.sessions;
+    if (!first || !second) throw new Error("Missing session fixtures");
+    const pinWrites: Array<Record<string, number | null>> = [];
+    const draggablePinsView: ConsoleView = {
+      ...raceView,
+      vaultState: {
+        ...raceView.vaultState,
+        sessionPins: {
+          "pin-a": 100,
+          "pin-b": 200,
+          "pin-c": 300,
+        },
+      },
+      sessions: [
+        {
+          ...first,
+          sessionId: "pin-a",
+          title: "Pinned alpha",
+          brief: "Pinned alpha",
+          file: "/tmp/pin-a.jsonl",
+          lastTs: 100,
+        },
+        {
+          ...second,
+          sessionId: "pin-b",
+          title: "Pinned beta",
+          brief: "Pinned beta",
+          file: "/tmp/pin-b.jsonl",
+          lastTs: 400,
+        },
+        {
+          ...first,
+          sessionId: "pin-c",
+          title: "Pinned gamma",
+          brief: "Pinned gamma",
+          file: "/tmp/pin-c.jsonl",
+          lastTs: 250,
+        },
+        {
+          ...second,
+          sessionId: "free",
+          title: "Regular session",
+          brief: "Regular session",
+          file: "/tmp/free.jsonl",
+          lastTs: 350,
+        },
+      ],
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(draggablePinsView),
+        });
+      } else if (url.pathname === "/vault/ui-state") {
+        const body = request.postDataJSON() as {
+          sessionPins?: Record<string, number | null>;
+        };
+        if (body.sessionPins) pinWrites.push(body.sessionPins);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#sessionPanelToggle").click();
+
+    const sessionOrder = (surface: "sidebar" | "panel") => {
+      const host = surface === "panel" ? "#sessionPanelList" : "#list";
+      return page
+        .locator(`${host} > .item`)
+        .evaluateAll((cards) => cards.map((card) => card.getAttribute("data-session-id")));
+    };
+    const persistedOrder = () => {
+      const latest = pinWrites[pinWrites.length - 1] ?? {};
+      return Object.entries(latest)
+        .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+        .sort((a, b) => a[1] - b[1])
+        .map(([id]) => id);
+    };
+    const createTransfer = () =>
+      page.evaluateHandle(() => {
+        const BrowserDataTransfer = (
+          globalThis as unknown as {
+            DataTransfer: new () => Record<string, never>;
+          }
+        ).DataTransfer;
+        return new BrowserDataTransfer();
+      });
+    const nextFrame = () =>
+      page.evaluate(() => {
+        const browserWindow = globalThis as unknown as {
+          requestAnimationFrame(callback: () => void): number;
+        };
+        return new Promise<void>((resolve) => {
+          browserWindow.requestAnimationFrame(() => resolve());
+        });
+      });
+
+    expect(await sessionOrder("sidebar")).toEqual(["pin-a", "pin-b", "pin-c", "free"]);
+    expect(await sessionOrder("panel")).toEqual(["pin-a", "pin-b", "pin-c", "free"]);
+
+    const sidebarPinned = page.locator('#list > .item[data-session-id="pin-a"]');
+    const sidebarRegular = page.locator('#list > .item[data-session-id="free"]');
+    const panelPinned = page.locator('#sessionPanelList > .item[data-session-id="pin-a"]');
+    const panelRegular = page.locator('#sessionPanelList > .item[data-session-id="free"]');
+    const background = (card: typeof sidebarPinned) =>
+      card.evaluate((node) => {
+        const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+        return `${style?.backgroundImage}|${style?.backgroundColor}`;
+      });
+    expect(await background(sidebarPinned)).not.toBe(await background(sidebarRegular));
+    expect(await background(panelPinned)).not.toBe(await background(panelRegular));
+    expect(
+      await page
+        .locator("#list > .session-pin-divider")
+        .evaluate((node) => node.ownerDocument.defaultView?.getComputedStyle(node).backgroundImage),
+    ).toBe("none");
+
+    const sidebarSource = page.locator('#list > .item[data-session-id="pin-c"]');
+    const sidebarTarget = page.locator('#list > .item[data-session-id="pin-a"]');
+    const sidebarTransfer = await createTransfer();
+    await sidebarSource.dispatchEvent("dragstart", { dataTransfer: sidebarTransfer });
+    await nextFrame();
+    const sidebarTargetBox = await sidebarTarget.boundingBox();
+    if (!sidebarTargetBox) throw new Error("Missing sidebar pin target bounds");
+    const sidebarPoint = {
+      clientX: sidebarTargetBox.x + sidebarTargetBox.width / 2,
+      clientY: sidebarTargetBox.y + 2,
+      dataTransfer: sidebarTransfer,
+    };
+    await page.locator("#list").dispatchEvent("dragover", sidebarPoint);
+
+    const sidebarPreview = page.locator("#list > .session-pin-drop-placeholder");
+    expect((await sidebarPreview.textContent())?.trim()).toBe("Pinned position");
+    expect(
+      await sidebarPreview.evaluate((node) => {
+        const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+        return {
+          animationName: style?.animationName,
+          borderStyle: style?.borderStyle,
+          backgroundColor: style?.backgroundColor,
+        };
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        animationName: "sessionPinDropIn",
+        borderStyle: "dashed",
+      }),
+    );
+    expect(await sidebarSource.getAttribute("class")).toContain("session-pin-drag-layout-source");
+    await page.locator("#list").dispatchEvent("drop", sidebarPoint);
+    await sidebarTransfer.dispose();
+
+    await expect.poll(() => sessionOrder("sidebar")).toEqual(["pin-c", "pin-a", "pin-b", "free"]);
+    await expect.poll(() => sessionOrder("panel")).toEqual(["pin-c", "pin-a", "pin-b", "free"]);
+    await expect.poll(() => pinWrites.length).toBe(1);
+    expect(persistedOrder()).toEqual(["pin-c", "pin-a", "pin-b"]);
+    expect(await sidebarPreview.count()).toBe(0);
+
+    const panelSource = page.locator('#sessionPanelList > .item[data-session-id="pin-a"]');
+    const panelTarget = page.locator('#sessionPanelList > .item[data-session-id="pin-b"]');
+    const panelTransfer = await createTransfer();
+    await panelSource.dispatchEvent("dragstart", { dataTransfer: panelTransfer });
+    await nextFrame();
+    const panelTargetBox = await panelTarget.boundingBox();
+    if (!panelTargetBox) throw new Error("Missing panel pin target bounds");
+    const panelPoint = {
+      clientX: panelTargetBox.x + panelTargetBox.width - 2,
+      clientY: panelTargetBox.y + panelTargetBox.height / 2,
+      dataTransfer: panelTransfer,
+    };
+    await page.locator("#sessionPanelList").dispatchEvent("dragover", panelPoint);
+    expect(await page.locator("#sessionPanelList .session-pin-drop-placeholder").count()).toBe(1);
+    await page.locator("#sessionPanelList").dispatchEvent("drop", panelPoint);
+    await panelTransfer.dispose();
+
+    await expect.poll(() => sessionOrder("sidebar")).toEqual(["pin-c", "pin-b", "pin-a", "free"]);
+    await expect.poll(() => sessionOrder("panel")).toEqual(["pin-c", "pin-b", "pin-a", "free"]);
+    await expect.poll(() => pinWrites.length).toBe(2);
+    expect(persistedOrder()).toEqual(["pin-c", "pin-b", "pin-a"]);
+    expect(await page.locator(".session-pin-drop-placeholder").count()).toBe(0);
     await page.close();
   });
 
@@ -1605,6 +2274,267 @@ describe("console browser behavior", () => {
       });
     await expect.poll(() => page.locator("#goalToggle").isEnabled()).toBe(true);
     expect(await page.locator("#goalToggle").getAttribute("class")).toContain("active");
+    await page.close();
+  });
+
+  it("keeps an optimistic opener when a partial index arrives before new-session completion", async () => {
+    const page = await browser.newPage();
+    let clientSessionId = "";
+    let prefer = "";
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as {
+        __newSessionEventSource?: {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+      };
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          browserGlobal.__newSessionEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(pendingTagView),
+        });
+      } else if (url.pathname === "/chat/new") {
+        const body = request.postDataJSON() as { clientSessionId?: string };
+        clientSessionId = body.clientSessionId ?? "";
+        prefer = request.headers().prefer ?? "";
+        await route.fulfill({
+          status: 202,
+          json: {
+            ok: true,
+            accepted: true,
+            operationId: "operation-new-1",
+            clientSessionId,
+          },
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#newToggle").click();
+    await page.locator("#np").fill("keep this optimistic opener");
+    await page.locator("#nbtn").click();
+    await expect.poll(() => clientSessionId).not.toBe("");
+    expect(prefer).toContain("respond-async");
+
+    await page.evaluate(
+      ({ clientId, partialSession }) => {
+        const source = (
+          globalThis as unknown as {
+            __newSessionEventSource?: {
+              onmessage: ((event: { data: string }) => void) | null;
+            };
+          }
+        ).__newSessionEventSource;
+        const emit = (message: Record<string, unknown>) =>
+          source?.onmessage?.({ data: JSON.stringify(message) });
+        emit({
+          kind: "session_event",
+          sessionId: "provider-new-1",
+          clientSessionId: clientId,
+          vendor: "claude",
+          emittedAt: Date.now(),
+          event: {
+            kind: "user_turn_started",
+            text: "keep this optimistic opener",
+            attachments: [],
+          },
+        });
+        emit({
+          kind: "session_index",
+          epoch: "partial-index",
+          revision: 1,
+          pending: false,
+          scannedAt: Date.now(),
+          sessions: [partialSession],
+          knownDirs: ["/tmp/project"],
+          defaultNewDir: "/tmp/project",
+          tags: ["work"],
+        });
+        emit({
+          kind: "session_operation",
+          operationId: "operation-new-1",
+          clientSessionId: clientId,
+          operation: "new",
+          status: "completed",
+          result: {
+            ok: true,
+            session: "provider-new-1",
+            clientSessionId: clientId,
+            vendor: "claude",
+            cwd: "/tmp/project",
+          },
+        });
+      },
+      {
+        clientId: clientSessionId,
+        partialSession: {
+          ...raceView.sessions[0],
+          sessionId: "provider-new-1",
+          title: "",
+          lastPrompt: null,
+          prompts: 0,
+          brief: null,
+          file: "/tmp/provider-new-1.jsonl",
+        },
+      },
+    );
+
+    const optimisticRow = page.locator(`#list .item[data-session-id="${clientSessionId}"]`);
+    await expect.poll(() => optimisticRow.count()).toBe(1);
+    await expect.poll(() => optimisticRow.textContent()).toContain("keep this optimistic opener");
+    expect(await page.locator("#h-title").textContent()).toContain("keep this optimistic opener");
+    await page.close();
+  });
+
+  it("follows a rolled provider id (/clear) into one tab instead of spawning a second", async () => {
+    const page = await browser.newPage();
+    let clientSessionId = "";
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as {
+        __newSessionEventSource?: { onmessage: ((event: { data: string }) => void) | null };
+      };
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          browserGlobal.__newSessionEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({ ...pendingTagView, sessions: [] }),
+        });
+      } else if (url.pathname === "/chat/new") {
+        const body = request.postDataJSON() as { clientSessionId?: string };
+        clientSessionId = body.clientSessionId ?? "";
+        await route.fulfill({
+          status: 202,
+          json: { ok: true, accepted: true, operationId: "op-clear-1", clientSessionId },
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#newToggle").click();
+    await page.locator("#np").fill("first task before clear");
+    await page.locator("#nbtn").click();
+    await expect.poll(() => clientSessionId).not.toBe("");
+
+    // Bind the pre-clear provider id, run a turn, then finish it.
+    await page.evaluate((clientId) => {
+      const source = (
+        globalThis as unknown as {
+          __newSessionEventSource?: { onmessage: ((e: { data: string }) => void) | null };
+        }
+      ).__newSessionEventSource;
+      const emit = (message: Record<string, unknown>) =>
+        source?.onmessage?.({ data: JSON.stringify(message) });
+      emit({
+        kind: "session_event",
+        sessionId: "provider-before",
+        clientSessionId: clientId,
+        vendor: "claude",
+        emittedAt: Date.now(),
+        event: { kind: "user_turn_started", text: "first task before clear", attachments: [] },
+      });
+      emit({
+        kind: "session_event",
+        sessionId: "provider-before",
+        clientSessionId: clientId,
+        vendor: "claude",
+        emittedAt: Date.now(),
+        event: { kind: "result", ok: true, text: "done" },
+      });
+    }, clientSessionId);
+
+    // The tab exists once, still keyed by its stable client id.
+    const tab = page.locator(`#list .item[data-session-id="${clientSessionId}"]`);
+    await expect.poll(() => tab.count()).toBe(1);
+
+    // /clear rolls the provider id: a new turn arrives under a fresh session id but the
+    // SAME clientSessionId, then the disk scan surfaces that new id as a session_index row.
+    await page.evaluate((clientId) => {
+      const source = (
+        globalThis as unknown as {
+          __newSessionEventSource?: { onmessage: ((e: { data: string }) => void) | null };
+        }
+      ).__newSessionEventSource;
+      const emit = (message: Record<string, unknown>) =>
+        source?.onmessage?.({ data: JSON.stringify(message) });
+      emit({
+        kind: "session_event",
+        sessionId: "provider-after",
+        clientSessionId: clientId,
+        vendor: "claude",
+        emittedAt: Date.now(),
+        event: { kind: "user_turn_started", text: "clear then new task", attachments: [] },
+      });
+      emit({
+        kind: "session_index",
+        epoch: "roll-index",
+        revision: 1,
+        pending: false,
+        scannedAt: Date.now(),
+        sessions: [
+          {
+            vendor: "claude",
+            sessionId: "provider-after",
+            title: "clear then new task",
+            lastPrompt: "clear then new task",
+            cwd: "/tmp/project",
+            project: "project",
+            file: "/tmp/provider-after.jsonl",
+            ageDays: 0,
+            lastTs: 200,
+            prompts: 1,
+            brief: "clear then new task",
+            state: "continue_ready",
+            tags: [],
+            seen: true,
+          },
+        ],
+        knownDirs: ["/tmp/project"],
+        defaultNewDir: "/tmp/project",
+        tags: [],
+      });
+    }, clientSessionId);
+
+    // The tab FOLLOWED the roll: the scanned new id merged into the one existing tab rather
+    // than appearing as a second, unrelated card. This is the /clear "two sessions" bug.
+    await expect.poll(() => page.locator("#list .item").count()).toBe(1);
+    await expect
+      .poll(() => page.locator('#list .item[data-session-id="provider-after"]').count())
+      .toBe(0);
+    await expect.poll(() => tab.count()).toBe(1);
     await page.close();
   });
 
@@ -1829,6 +2759,7 @@ describe("console browser behavior", () => {
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
     await page.locator("#newToggle").click();
 
+    expect(await page.locator("#newGoalToggle").isHidden()).toBe(true);
     expect(await page.locator("#neffort").inputValue()).toBe("medium");
     expect(await page.locator("#nspeed").inputValue()).toBe("false");
     await page.locator("#nspeed").selectOption("true");
@@ -2240,6 +3171,519 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("keeps streamed deltas in one bubble while a virtualized transcript is measured", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
+    const history = Array.from({ length: 121 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      text: `Historical message ${index}`,
+    }));
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__virtualStreamEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: history });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs").getAttribute("data-transcript-total-blocks"))
+      .toBe("121");
+
+    const emit = (event: Record<string, unknown>) =>
+      page.evaluate((nextEvent) => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__virtualStreamEventSource as {
+          onmessage(event: { data: string }): void;
+        };
+        source.onmessage({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "s1",
+            emittedAt: Date.now(),
+            event: nextEvent,
+          }),
+        });
+      }, event);
+    await emit({ kind: "user_turn_started", text: "Start a live answer" });
+    await emit({ kind: "assistant_text", text: "CPU peak was 49" });
+    await page.waitForTimeout(50);
+    await emit({ kind: "assistant_text", text: "% and memory stayed below 8GB." });
+
+    const streamed = page.locator("#msgs .msg.assistant:not(.thinking)", {
+      hasText: "CPU peak was 49",
+    });
+    await expect.poll(() => streamed.count()).toBe(1);
+    await expect.poll(() => streamed.textContent()).toContain("memory stayed below 8GB");
+    expect(
+      await page
+        .locator("#msgs .msg.assistant:not(.thinking)", { hasText: "memory stayed below 8GB" })
+        .count(),
+    ).toBe(1);
+    await page.close();
+  });
+
+  it("restores an unchanged hot transcript with the same pane and scroll anchor", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
+    const historyRequests: string[] = [];
+    const histories: Record<string, Array<{ role: string; text: string }>> = {};
+    for (const sessionId of ["s1", "s2"]) {
+      histories[sessionId] = Array.from({ length: 70 }, (_, index) => [
+        { role: "user", text: `${sessionId} user turn ${index}` },
+        {
+          role: "assistant",
+          text: `${sessionId} assistant turn ${index}. ${"detail ".repeat(30)}`,
+        },
+      ]).flat();
+    }
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+      } else if (url.pathname === "/chat/messages") {
+        const sessionId = url.searchParams.get("session") || "s1";
+        historyRequests.push(sessionId);
+        await route.fulfill({ json: histories[sessionId] || [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs").getAttribute("data-transcript-total-blocks"))
+      .toBe("140");
+    await page.locator("#msgs").evaluate((host) => {
+      host.scrollTop = Math.round((host.scrollHeight - host.clientHeight) * 0.43);
+      host.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForTimeout(50);
+    const readingTop = await page.locator("#msgs").evaluate((host) => host.scrollTop);
+    await page.evaluate(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown> & {
+        document: {
+          querySelector(selector: string): {
+            setAttribute(name: string, value: string): void;
+          } | null;
+        };
+      };
+      const host = browserGlobal.document.querySelector("#msgs");
+      if (!host) throw new Error("Missing first transcript pane");
+      host.setAttribute("data-hot-pane-sentinel", "s1");
+      browserGlobal.__hotTranscriptPane = host;
+    });
+
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("s2 assistant turn 69");
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs").getAttribute("data-transcript-total-blocks"))
+      .toBe("140");
+
+    expect(
+      await page.evaluate(() => {
+        const browserGlobal = globalThis as unknown as Record<string, unknown> & {
+          document: { querySelector(selector: string): unknown };
+        };
+        return browserGlobal.document.querySelector("#msgs") === browserGlobal.__hotTranscriptPane;
+      }),
+    ).toBe(true);
+    expect(await page.locator("#msgs").getAttribute("data-hot-pane-sentinel")).toBe("s1");
+    expect(
+      await page
+        .locator("#msgs")
+        .evaluate((host, top) => Math.abs(host.scrollTop - top), readingTop),
+    ).toBe(0);
+    expect(await page.locator('[id="msgs"]').count()).toBe(1);
+    expect(await page.locator(".msgs-pane").count()).toBe(2);
+    expect(historyRequests.filter((sessionId) => sessionId === "s1")).toHaveLength(1);
+    expect(historyRequests.filter((sessionId) => sessionId === "s2")).toHaveLength(1);
+    await page.close();
+  });
+
+  it("does not retain loading panes across a rapid first-load tab switch", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
+    const releases: Record<string, (() => void) | undefined> = {};
+    const gates: Record<string, Promise<void>> = {};
+    const requests: string[] = [];
+    for (const sessionId of ["s1", "s2"]) {
+      gates[sessionId] = new Promise<void>((resolve) => {
+        releases[sessionId] = resolve;
+      });
+    }
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+      } else if (url.pathname === "/chat/messages") {
+        const sessionId = url.searchParams.get("session") || "";
+        requests.push(sessionId);
+        const gate = gates[sessionId];
+        if (gate) await gate;
+        await route.fulfill({
+          json: [{ role: "assistant", text: `Resolved history for ${sessionId}` }],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => requests).toContain("s1");
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("Loading");
+
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await expect.poll(() => requests).toContain("s2");
+    expect(await page.locator(".msgs-pane").count()).toBe(1);
+    expect(await page.locator('[id="ph"]').count()).toBe(1);
+
+    releases.s1?.();
+    await page.waitForTimeout(20);
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("Loading");
+    releases.s2?.();
+    await expect
+      .poll(() => page.locator("#msgs").textContent())
+      .toContain("Resolved history for s2");
+
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs").textContent())
+      .toContain("Resolved history for s1");
+    expect(requests.filter((sessionId) => sessionId === "s1")).toHaveLength(1);
+    expect(await page.locator('[id="msgs"]').count()).toBe(1);
+    expect(await page.locator('[id="ph"]').count()).toBe(0);
+    await page.close();
+  });
+
+  it("bounds retained transcript DOM with an LRU while keeping transcript data warm", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
+    const baseSession = raceView.sessions[0];
+    if (!baseSession) throw new Error("Missing base session fixture");
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      ...baseSession,
+      sessionId: `pane-${index}`,
+      title: `Pane session ${index}`,
+      brief: `Pane session ${index}`,
+      file: `/tmp/pane-${index}.jsonl`,
+      lastTs: 10_000 - index,
+      sortTs: 10_000 - index,
+    }));
+    const requests: string[] = [];
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({ ...raceView, sessions }),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        const sessionId = url.searchParams.get("session") || "";
+        requests.push(sessionId);
+        await route.fulfill({
+          json: [{ role: "assistant", text: `History for ${sessionId}` }],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    for (let index = 0; index < sessions.length; index += 1) {
+      await page.locator(`#list .item[data-session-id="pane-${index}"]`).click();
+      await expect.poll(() => page.locator("#msgs").textContent()).toContain(`pane-${index}`);
+      if (index === 0) {
+        await page.evaluate(() => {
+          const browserGlobal = globalThis as unknown as Record<string, unknown> & {
+            document: { querySelector(selector: string): unknown };
+          };
+          browserGlobal.__firstTranscriptPane = browserGlobal.document.querySelector("#msgs");
+        });
+      }
+    }
+
+    expect(await page.locator(".msgs-pane").count()).toBeLessThanOrEqual(5);
+    expect(
+      await page.evaluate(() => {
+        const pane = (globalThis as unknown as Record<string, unknown>).__firstTranscriptPane as {
+          isConnected: boolean;
+        };
+        return !pane.isConnected;
+      }),
+    ).toBe(true);
+
+    await page.locator('#list .item[data-session-id="pane-0"]').click();
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("pane-0");
+    expect(
+      await page.evaluate(() => {
+        const browserGlobal = globalThis as unknown as Record<string, unknown> & {
+          document: { querySelector(selector: string): unknown };
+        };
+        return (
+          browserGlobal.document.querySelector("#msgs") !== browserGlobal.__firstTranscriptPane
+        );
+      }),
+    ).toBe(true);
+    expect(await page.locator(".msgs-pane").count()).toBeLessThanOrEqual(5);
+    expect(requests.filter((sessionId) => sessionId === "pane-0")).toHaveLength(1);
+    await page.close();
+  });
+
+  it("loads only the recent chat page and prepends earlier history on demand", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(3_000);
+    const historyRequests: string[] = [];
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+      } else if (url.pathname === "/chat/messages") {
+        historyRequests.push(url.search);
+        const before = url.searchParams.get("before");
+        if (before === "4") {
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: [
+                { role: "user", text: "old question 0", tools: [], historyOrdinal: 0 },
+                { role: "assistant", text: "old answer 0", tools: [], historyOrdinal: 1 },
+                { role: "user", text: "old question 1", tools: [], historyOrdinal: 2 },
+                { role: "assistant", text: "old answer 1", tools: [], historyOrdinal: 3 },
+              ],
+              page: {
+                before: 0,
+                hasMore: false,
+                total: 6,
+                version: "history-v1",
+                sourceTruncated: false,
+              },
+            },
+          });
+        } else {
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: [
+                { role: "user", text: "recent question", tools: [], historyOrdinal: 4 },
+                { role: "assistant", text: "recent answer", tools: [], historyOrdinal: 5 },
+              ],
+              page: {
+                before: 4,
+                hasMore: true,
+                total: 6,
+                version: "history-v1",
+                sourceTruncated: false,
+              },
+            },
+          });
+        }
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("recent answer");
+    expect(await page.locator("#msgs").textContent()).not.toContain("old question 0");
+    expect(historyRequests).toHaveLength(1);
+    expect(historyRequests[0]).toContain("session=s1");
+    expect(historyRequests[0]).not.toContain("file=");
+    expect(
+      await page.locator("#msgs .msg", { hasText: "recent question" }).getAttribute("data-msg-key"),
+    ).toBe("user:4");
+
+    await page.locator(".history-loader-button").click();
+    await expect.poll(() => historyRequests.length).toBe(2);
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("old question 0");
+    expect(await page.locator(".history-loader-button").count()).toBe(0);
+    expect(
+      await page.locator("#msgs .msg", { hasText: "recent question" }).getAttribute("data-msg-key"),
+    ).toBe("user:4");
+    await page.close();
+  });
+
+  it("loads one targeted window when a Pin is outside the recent chat page", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(3_000);
+    const historyRequests: string[] = [];
+    const pinView: ConsoleView = {
+      ...raceView,
+      vaultState: {
+        pins: {
+          "attend.pins.v1:s1": [
+            {
+              key: "assistant:20",
+              role: "claude",
+              text: "Pinned old answer",
+              pinnedAt: 1,
+              historyId: "m_pin_target",
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(pinView) });
+      } else if (url.pathname === "/chat/messages") {
+        historyRequests.push(url.search);
+        if (url.searchParams.get("around") === "m_pin_target") {
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: [
+                {
+                  role: "user",
+                  text: "nearby old question",
+                  tools: [],
+                  historyId: "m_pin_before",
+                  historyOrdinal: 19,
+                  historyIndex: 19,
+                },
+                {
+                  role: "assistant",
+                  text: "Pinned old answer",
+                  tools: [],
+                  historyId: "m_pin_target",
+                  historyOrdinal: 20,
+                  historyIndex: 20,
+                },
+                {
+                  role: "user",
+                  text: "nearby old follow-up",
+                  tools: [],
+                  historyId: "m_pin_after",
+                  historyOrdinal: 21,
+                  historyIndex: 21,
+                },
+              ],
+              page: {
+                before: 19,
+                hasMore: true,
+                total: 42,
+                version: "history-v1",
+                sourceTruncated: false,
+              },
+              window: {
+                historyId: "m_pin_target",
+                center: 20,
+                start: 19,
+                end: 22,
+                hasEarlier: true,
+                hasLater: true,
+                total: 42,
+                version: "history-v1",
+              },
+            },
+          });
+        } else {
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: [
+                {
+                  role: "user",
+                  text: "recent question",
+                  tools: [],
+                  historyId: "m_recent_question",
+                  historyOrdinal: 40,
+                  historyIndex: 40,
+                },
+                {
+                  role: "assistant",
+                  text: "recent answer",
+                  tools: [],
+                  historyId: "m_recent_answer",
+                  historyOrdinal: 41,
+                  historyIndex: 41,
+                },
+              ],
+              page: {
+                before: 40,
+                hasMore: true,
+                total: 42,
+                version: "history-v1",
+                sourceTruncated: false,
+              },
+            },
+          });
+        }
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("recent answer");
+    expect(historyRequests).toHaveLength(1);
+
+    await page.locator("#pinTray .pinitem").click();
+    await expect.poll(() => historyRequests.length).toBe(2);
+    expect(historyRequests[1]).toContain("around=m_pin_target");
+    expect(historyRequests[1]).toContain("radius=20");
+    expect(historyRequests[1]).not.toContain("before=");
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("Pinned old answer");
+    expect(await page.locator("#msgs").textContent()).toContain("recent answer");
+    expect(
+      await page.locator('#msgs [data-history-id="m_pin_target"]').getAttribute("data-msg-key"),
+    ).toBe("assistant:20");
+    await page.close();
+  });
+
   it("restores existing fork relations as a chat tab group", async () => {
     const page = await browser.newPage({
       viewport: { width: 1100, height: 800 },
@@ -2270,6 +3714,56 @@ describe("console browser behavior", () => {
     await page.locator('#list .item[data-session-id="s2"]').click();
 
     expect(await page.locator("#chatTabs").isVisible()).toBe(true);
+    expect(await page.locator("#chatTabs .chat-tab").count()).toBe(2);
+    expect(await page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id")).toBe("s2");
+    await page.close();
+  });
+
+  it("keeps the open fork tab group active across session-index refreshes", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__forkGroupIndexEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(forkTreeView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s2"]').click();
+    await expect.poll(() => page.locator("#chatTabs .chat-tab").count()).toBe(2);
+
+    await page.evaluate((sessions) => {
+      const source = (globalThis as unknown as Record<string, unknown>)
+        .__forkGroupIndexEventSource as {
+        onmessage: ((event: { data: string }) => void) | null;
+      };
+      source.onmessage?.({
+        data: JSON.stringify({
+          kind: "session_index",
+          epoch: "fork-group-refresh",
+          revision: 1,
+          pending: false,
+          sessions,
+        }),
+      });
+    }, forkTreeView.sessions);
+
+    await expect.poll(() => page.locator("#chatTabs").isVisible()).toBe(true);
     expect(await page.locator("#chatTabs .chat-tab").count()).toBe(2);
     expect(await page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id")).toBe("s2");
     await page.close();
@@ -2503,6 +3997,185 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("opens Mermaid diagrams at the preview viewport size without a hover tooltip", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+      const browserGlobal = globalThis as unknown as {
+        __attendMermaidReady: Promise<void>;
+        mermaid: {
+          initialize: () => void;
+          render: () => Promise<{ svg: string }>;
+        };
+      };
+      browserGlobal.__attendMermaidReady = Promise.resolve();
+      browserGlobal.mermaid = {
+        initialize() {},
+        render: async () => ({
+          svg: [
+            '<svg xmlns="http://www.w3.org/2000/svg" width="100%"',
+            ' style="max-width: 1120px;" viewBox="0 0 1120 1360">',
+            '<rect width="1120" height="1360" fill="white"/>',
+            '<rect x="100" y="100" width="920" height="1160" fill="#eef2ff"/>',
+            "</svg>",
+          ].join(""),
+        }),
+      };
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: "```mermaid\nflowchart TD\nA --> B\n```",
+            },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+
+    const diagram = page.locator(".diagram-mermaid[data-rendered='ok']");
+    await expect.poll(() => diagram.count()).toBe(1);
+    expect(await diagram.getAttribute("title")).toBeNull();
+    expect(await diagram.getAttribute("data-hover-tip")).toBeNull();
+    expect(await diagram.getAttribute("aria-label")).toBe("Open Mermaid diagram");
+    await diagram.hover();
+    expect(await page.locator("#hoverTip").isHidden()).toBe(true);
+
+    await diagram.click();
+    const previewSvg = page.locator("#imgPreviewHtml > svg");
+    await expect.poll(() => previewSvg.count()).toBe(1);
+    const previewBox = await previewSvg.boundingBox();
+    expect(previewBox?.width).toBeGreaterThan(1000);
+    expect(previewBox?.height).toBeGreaterThan(700);
+    await page.close();
+  });
+
+  it("uses the same large, tooltip-free preview for PlantUML and sent image attachments", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+      const browserGlobal = globalThis as unknown as {
+        __attendPakoReady: Promise<void>;
+        pako: { deflateRaw: () => Uint8Array };
+        confirm: () => boolean;
+      };
+      browserGlobal.__attendPakoReady = Promise.resolve();
+      browserGlobal.pako = { deflateRaw: () => new Uint8Array([1, 2, 3]) };
+      browserGlobal.confirm = () => true;
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "user",
+              text: "See attachment",
+              attachments: [
+                {
+                  kind: "image",
+                  name: "pixel.gif",
+                  mediaType: "image/gif",
+                  data: "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+                },
+              ],
+            },
+            {
+              role: "assistant",
+              text: "```plantuml\nAlice -> Bob: hello\n```",
+            },
+          ],
+        });
+      } else if (url.hostname === "www.plantuml.com") {
+        await route.fulfill({
+          contentType: "image/svg+xml",
+          body: [
+            '<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1360"',
+            ' viewBox="0 0 1120 1360">',
+            '<rect width="1120" height="1360" fill="white"/>',
+            '<rect x="100" y="100" width="920" height="1160" fill="#eef2ff"/>',
+            "</svg>",
+          ].join(""),
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+
+    const attachment = page.locator(".msg.user .attcard.image");
+    await expect.poll(() => attachment.count()).toBe(1);
+    expect(await attachment.getAttribute("title")).toBeNull();
+    expect(await attachment.getAttribute("data-hover-tip")).toBeNull();
+    expect(await attachment.getAttribute("aria-label")).toBe("Open pixel.gif");
+    expect(
+      await attachment.evaluate(
+        (node) => node.ownerDocument.defaultView?.getComputedStyle(node).cursor,
+      ),
+    ).toBe("zoom-in");
+    await attachment.hover();
+    expect(await page.locator("#hoverTip").isHidden()).toBe(true);
+    await attachment.click();
+    const imagePreview = page.locator("#imgPreviewImg");
+    const attachmentPreviewBox = await imagePreview.boundingBox();
+    expect(attachmentPreviewBox?.width).toBeGreaterThan(1000);
+    expect(attachmentPreviewBox?.height).toBeGreaterThan(700);
+    await page.keyboard.press("Escape");
+
+    const plantUml = page.locator(".diagram-plantuml");
+    await plantUml.locator(".diagram-render").click();
+    await expect.poll(() => plantUml.getAttribute("data-rendered")).toBe("ok");
+    expect(await plantUml.getAttribute("title")).toBeNull();
+    expect(await plantUml.getAttribute("data-hover-tip")).toBeNull();
+    expect(await plantUml.getAttribute("aria-label")).toBe("Open PlantUML diagram");
+    expect(
+      await plantUml.evaluate(
+        (node) => node.ownerDocument.defaultView?.getComputedStyle(node).cursor,
+      ),
+    ).toBe("zoom-in");
+    await plantUml.hover();
+    expect(await page.locator("#hoverTip").isHidden()).toBe(true);
+    await plantUml.click();
+    const plantUmlPreviewBox = await imagePreview.boundingBox();
+    expect(plantUmlPreviewBox?.width).toBeGreaterThan(1000);
+    expect(plantUmlPreviewBox?.height).toBeGreaterThan(700);
+    await page.close();
+  });
+
   it("auto-links complete bare URLs without requiring a leading boundary", async () => {
     const page = await browser.newPage();
     const linksView: ConsoleView = {
@@ -2664,7 +4337,7 @@ describe("console browser behavior", () => {
           body: renderConsole(raceView),
         });
       } else if (url.pathname === "/chat/messages") {
-        const sessionId = url.searchParams.get("file") === "/tmp/session-1.jsonl" ? "s1" : "s2";
+        const sessionId = url.searchParams.get("session") === "s1" ? "s1" : "s2";
         await route.fulfill({ json: histories[sessionId] });
       } else {
         await route.fulfill({ json: { ok: true, items: [] } });
@@ -3574,15 +5247,15 @@ describe("console browser behavior", () => {
       const theme = await button.evaluate((node, useHover) => {
         const style = node.ownerDocument.defaultView?.getComputedStyle(node);
         const probe = node.ownerDocument.createElement("span");
-        node.ownerDocument.body.appendChild(probe);
+        node.appendChild(probe);
         const resolve = (name: string) => {
           probe.style.color = `var(${name})`;
           return node.ownerDocument.defaultView?.getComputedStyle(probe).color ?? "";
         };
         const expected = {
-          background: resolve(useHover ? "--primary-hover" : "--primary-bg"),
-          border: resolve(useHover ? "--primary-hover" : "--primary-bg"),
-          color: resolve("--primary-fg"),
+          background: resolve(useHover ? "--vendor-action-hover" : "--vendor-action-bg"),
+          border: resolve(useHover ? "--vendor-action-hover" : "--vendor-action-bg"),
+          color: resolve("--vendor-action-fg"),
         };
         probe.remove();
         return {
@@ -3597,6 +5270,8 @@ describe("console browser behavior", () => {
       expect(theme.actual).toEqual(theme.expected);
     };
     expect(await page.locator("#railVendor").textContent()).toContain("claude");
+    expect(await page.locator("#newToggle").getAttribute("data-vendor")).toBe("claude");
+    expect(await page.locator("#nbtn").getAttribute("data-vendor")).toBe("claude");
     expect(await page.locator("#railVendor").textContent()).not.toContain("vendor ·");
     expect(await page.locator("#railModel").textContent()).not.toContain("model ·");
     expect(await page.locator("#railModel").textContent()).not.toContain("CLI default");
@@ -3619,15 +5294,15 @@ describe("console browser behavior", () => {
     const forkTheme = await page.locator("#forkBtn").evaluate((button) => {
       const style = button.ownerDocument.defaultView?.getComputedStyle(button);
       const probe = button.ownerDocument.createElement("span");
-      button.ownerDocument.body.appendChild(probe);
-      probe.style.color = "var(--vendor-claude-border)";
-      const claudeBorder = button.ownerDocument.defaultView?.getComputedStyle(probe).color;
+      button.appendChild(probe);
+      probe.style.color = "var(--vendor-action-bg)";
+      const vendorAction = button.ownerDocument.defaultView?.getComputedStyle(probe).color;
       probe.remove();
-      return { border: style?.borderTopColor, claudeBorder };
+      return { color: style?.color, vendorAction };
     });
-    expect(await page.locator("#forkBtn").getAttribute("data-vendor")).toBeNull();
+    expect(await page.locator("#forkBtn").getAttribute("data-vendor")).toBe("claude");
     expect(await page.locator("#forkBtn").getAttribute("class")).not.toContain("fork-action");
-    expect(forkTheme.border).not.toBe(forkTheme.claudeBorder);
+    expect(forkTheme.color).toBe(forkTheme.vendorAction);
     await page.locator("#input").click();
     expect(
       await page.locator("#input").evaluate((input) => input.ownerDocument.activeElement === input),
@@ -3951,7 +5626,11 @@ describe("console browser behavior", () => {
     expect(await page.locator("#send").textContent()).toBe("fork with codex");
     expect(await page.locator("#send .splitbtn-ico circle").count()).toBe(3);
     expect(await page.locator("#forkBtn").isVisible()).toBe(false);
-    expect(await page.locator("#send").getAttribute("data-vendor")).toBeNull();
+    expect(await page.locator("#send").getAttribute("data-vendor")).toBe("codex");
+    await expectProductActionTheme("#send");
+    await expectProductActionTheme("#send", true);
+    await page.locator("#themeToggle").click();
+    expect(await page.locator("html").getAttribute("data-theme")).toBe("dark");
     await expectProductActionTheme("#send");
     await expectProductActionTheme("#send", true);
     const sessionCount = await page.locator("#list .item").count();
@@ -5204,7 +6883,7 @@ describe("console browser behavior", () => {
     expect(await user.locator(".inline-edit-save").getAttribute("class")).not.toContain(
       "fork-action",
     );
-    expect(await user.locator(".inline-edit-save").getAttribute("data-vendor")).toBeNull();
+    expect(await user.locator(".inline-edit-save").getAttribute("data-vendor")).toBe("claude");
     expect(await user.locator(".inline-edit-save .splitbtn-ico circle").count()).toBe(3);
     await user.locator(".inline-edit-save").focus();
     await page.keyboard.press("Escape");
@@ -5729,7 +7408,7 @@ describe("console browser behavior", () => {
           body: renderConsole(raceView),
         });
       } else if (url.pathname === "/chat/messages") {
-        const firstSession = url.searchParams.get("file") === "/tmp/session-1.jsonl";
+        const firstSession = url.searchParams.get("session") === "s1";
         await route.fulfill({
           json: firstSession
             ? [
@@ -5830,6 +7509,61 @@ describe("console browser behavior", () => {
     expect(placement).toEqual({ parent: "BODY", position: "fixed" });
     await page.locator(`#ndirSug .chooser-opt[data-value="${childDir}"]`).click();
     expect(await page.locator("#ndir").inputValue()).toBe(childDir);
+    await page.close();
+  });
+
+  it("loads additional project folders after the first suggestion page", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    const root = "/work/projects";
+    const folders = Array.from({ length: 55 }, (_, index) => ({
+      path: `${root}/folder-${String(index).padStart(2, "0")}`,
+      source: "folder",
+    }));
+    const offsets: number[] = [];
+    await page.route("**/*", (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        return route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({ ...view, scopeRoots: [root], defaultNewDir: root }),
+        });
+      }
+      if (url.pathname === "/dirs/suggest") {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const limit = Number(url.searchParams.get("limit") ?? 24);
+        offsets.push(offset);
+        return route.fulfill({
+          json: {
+            dirs: folders.slice(offset, offset + limit),
+            hasMore: offset + limit < folders.length,
+          },
+        });
+      }
+      return route.fulfill({ json: {} });
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    await page.locator("#newToggle").click();
+    await page.locator("#ndir").focus();
+    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(24);
+    expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe("Load more folders");
+    await page.locator("#ndirSug").evaluate((drop) => {
+      drop.scrollTop = drop.scrollHeight;
+      drop.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(48);
+    expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe("Load more folders");
+    await page.locator("#ndirSug .chooser-more").click();
+    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(55);
+    expect(await page.locator("#ndirSug .chooser-more").count()).toBe(0);
+    expect(offsets).toEqual([0, 24, 48]);
     await page.close();
   });
 
@@ -6292,6 +8026,278 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("loads only the recent comment page and prepends earlier history on demand", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(3_000);
+    const historyRequests: string[] = [];
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
+      } else if (url.pathname === "/comments/messages") {
+        historyRequests.push(url.search);
+        const before = url.searchParams.get("before");
+        if (before === "4") {
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-page-epoch",
+              generatedAt: 100,
+              historyVersion: "comment-history-v1",
+              thread: commentView.vaultState?.commentThreads?.["comment-1"],
+              messages: [
+                { role: "user", text: "old comment 0", tools: [], historyOrdinal: 0 },
+                { role: "assistant", text: "old reply 0", tools: [], historyOrdinal: 1 },
+                { role: "user", text: "old comment 1", tools: [], historyOrdinal: 2 },
+                { role: "assistant", text: "old reply 1", tools: [], historyOrdinal: 3 },
+              ],
+              page: {
+                before: 0,
+                hasMore: false,
+                total: 6,
+                version: "comment-history-v1",
+              },
+            },
+          });
+        } else {
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-page-epoch",
+              generatedAt: 100,
+              historyVersion: "comment-history-v1",
+              thread: commentView.vaultState?.commentThreads?.["comment-1"],
+              messages: [
+                { role: "user", text: "recent comment", tools: [], historyOrdinal: 4 },
+                { role: "assistant", text: "recent reply", tools: [], historyOrdinal: 5 },
+              ],
+              page: {
+                before: 4,
+                hasMore: true,
+                total: 6,
+                version: "comment-history-v1",
+              },
+            },
+          });
+        }
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: "An answer with an unread comment",
+              tools: [],
+            },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+    await expect.poll(() => page.locator("#commentMsgs").textContent()).toContain("recent reply");
+    expect(await page.locator("#commentMsgs").textContent()).not.toContain("old comment 0");
+    expect(historyRequests).toHaveLength(1);
+    expect(historyRequests[0]).toContain("paged=1");
+    expect(historyRequests[0]).toContain("limit=60");
+    expect(
+      await page
+        .locator("#commentMsgs .msg", { hasText: "recent comment" })
+        .getAttribute("data-msg-key"),
+    ).toBe("comment:4");
+
+    await page.locator(".comment-history-loader .history-loader-button").click();
+    await expect.poll(() => historyRequests.length).toBe(2);
+    expect(historyRequests[1]).toContain("before=4");
+    await expect.poll(() => page.locator("#commentMsgs").textContent()).toContain("old comment 0");
+    expect(await page.locator(".comment-history-loader").count()).toBe(0);
+    expect(
+      await page
+        .locator("#commentMsgs .msg", { hasText: "recent comment" })
+        .getAttribute("data-msg-key"),
+    ).toBe("comment:4");
+    await page.close();
+  });
+
+  it("loads one targeted window when a CommentPanel Pin is outside the recent page", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(3_000);
+    const historyRequests: string[] = [];
+    const commentPinView: ConsoleView = {
+      ...commentView,
+      vaultState: {
+        ...commentView.vaultState,
+        pins: {
+          "attend.pins.v1:comment:comment-1": [
+            {
+              key: "comment:1",
+              role: "claude",
+              text: "Pinned old comment reply",
+              pinnedAt: 1,
+              historyId: "m_comment_pin_target",
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentPinView),
+        });
+      } else if (url.pathname === "/comments/messages") {
+        historyRequests.push(url.search);
+        if (url.searchParams.get("around") === "m_comment_pin_target") {
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-pin-epoch",
+              generatedAt: 100,
+              historyVersion: "comment-history-v1",
+              thread: commentPinView.vaultState?.commentThreads?.["comment-1"],
+              messages: [
+                {
+                  role: "user",
+                  text: "nearby old comment",
+                  tools: [],
+                  historyId: "m_comment_pin_before",
+                  historyOrdinal: 0,
+                  historyIndex: 0,
+                },
+                {
+                  role: "assistant",
+                  text: "Pinned old comment reply",
+                  tools: [],
+                  historyId: "m_comment_pin_target",
+                  historyOrdinal: 1,
+                  historyIndex: 1,
+                },
+                {
+                  role: "user",
+                  text: "nearby old follow-up",
+                  tools: [],
+                  historyId: "m_comment_pin_after",
+                  historyOrdinal: 2,
+                  historyIndex: 2,
+                },
+              ],
+              page: {
+                before: 0,
+                hasMore: false,
+                total: 6,
+                version: "comment-history-v1",
+              },
+              window: {
+                historyId: "m_comment_pin_target",
+                center: 1,
+                start: 0,
+                end: 3,
+                hasEarlier: false,
+                hasLater: true,
+                total: 6,
+                version: "comment-history-v1",
+              },
+            },
+          });
+        } else {
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-pin-epoch",
+              generatedAt: 100,
+              historyVersion: "comment-history-v1",
+              thread: commentPinView.vaultState?.commentThreads?.["comment-1"],
+              messages: [
+                {
+                  role: "user",
+                  text: "recent comment",
+                  tools: [],
+                  historyId: "m_comment_recent",
+                  historyOrdinal: 4,
+                  historyIndex: 4,
+                },
+                {
+                  role: "assistant",
+                  text: "recent reply",
+                  tools: [],
+                  historyId: "m_comment_recent_reply",
+                  historyOrdinal: 5,
+                  historyIndex: 5,
+                },
+              ],
+              page: {
+                before: 4,
+                hasMore: true,
+                total: 6,
+                version: "comment-history-v1",
+              },
+            },
+          });
+        }
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: "An answer with an unread comment",
+              tools: [],
+            },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+    await expect.poll(() => page.locator("#commentMsgs").textContent()).toContain("recent reply");
+    expect(historyRequests).toHaveLength(1);
+
+    await page.locator("#commentPinTray .pinitem").click();
+    await expect.poll(() => historyRequests.length).toBe(2);
+    expect(historyRequests[1]).toContain("around=m_comment_pin_target");
+    expect(historyRequests[1]).toContain("radius=20");
+    expect(historyRequests[1]).not.toContain("before=");
+    await expect
+      .poll(() => page.locator("#commentMsgs").textContent())
+      .toContain("Pinned old comment reply");
+    expect(await page.locator("#commentMsgs").textContent()).toContain("recent reply");
+    expect(
+      await page
+        .locator('#commentMsgs [data-history-id="m_comment_pin_target"]')
+        .getAttribute("data-msg-key"),
+    ).toBe("comment:1");
+    await page.close();
+  });
+
   it("sends only context before an assistant comment anchor", async () => {
     const testCase = {
       role: "assistant",
@@ -6379,6 +8385,100 @@ describe("console browser behavior", () => {
     });
     expect(JSON.stringify(sentBody?.contextMessages)).not.toContain("LATER BAIT QUESTION");
     expect(JSON.stringify(sentBody?.contextMessages)).not.toContain("response after anchor");
+    await page.close();
+  });
+
+  it("uses the composer-selected vendor and run config for a new comment thread", async () => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(2_000);
+    let sentBody: Record<string, unknown> | undefined;
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [{ role: "assistant", text: "A response that needs a cross-vendor comment" }],
+        });
+      } else if (url.pathname === "/models/claude") {
+        await route.fulfill({
+          json: {
+            models: composerRailView.claudeModels,
+            defaults: composerRailView.modelDefaults?.claude,
+            warning: null,
+          },
+        });
+      } else if (url.pathname === "/models/codex") {
+        await route.fulfill({
+          json: {
+            models: composerRailView.codexModels,
+            defaults: composerRailView.modelDefaults?.codex,
+            warning: null,
+          },
+        });
+      } else if (url.pathname === "/comments/send") {
+        sentBody = request.postDataJSON() as Record<string, unknown>;
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: {
+              id: sentBody.threadId,
+              parentSessionId: sentBody.parentSessionId,
+              anchorKey: sentBody.anchorKey,
+              anchorText: sentBody.anchorText,
+              providerSessionId: "cross-vendor-comment-provider",
+              vendor: sentBody.vendor,
+              cwd: "/tmp/project",
+              createdAt: Date.now(),
+              status: "generating",
+              messageCount: 1,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await expect.poll(() => page.locator("#msgs .msg.assistant").count()).toBe(1);
+    await page.locator("#railVendor").click();
+    await page.locator('.rail-option[data-vendor="codex"]').click();
+    await expect.poll(() => page.locator("#railVendor").textContent()).toContain("codex");
+
+    const anchor = page.locator("#msgs .msg.assistant").first();
+    await anchor.evaluate((node) => {
+      node.querySelector(".bubble")?.dispatchEvent(new Event("pointermove", { bubbles: true }));
+      (
+        node.ownerDocument.querySelector("#msgFloatComment") as {
+          click(): void;
+        } | null
+      )?.click();
+    });
+    await expect.poll(() => page.locator("#commentDrawer").isVisible()).toBe(true);
+    await page.locator("#commentInput").fill("Review this with Codex");
+    await page.locator("#commentSend").click();
+
+    await expect.poll(() => sentBody).toBeTruthy();
+    expect(sentBody).toMatchObject({
+      vendor: "codex",
+      model: "gpt-5-codex",
+      effort: "medium",
+      speed: "default",
+      question: "Review this with Codex",
+    });
     await page.close();
   });
 
@@ -6501,6 +8601,174 @@ describe("console browser behavior", () => {
       .click();
     await expect.poll(() => liveTool.count()).toBe(1);
     expect(await liveTool.locator(".tool-out").textContent()).toBe("tests passed");
+    await page.close();
+  });
+
+  it("resyncs an open CommentPanel after reconnect and rejects stale history", async () => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(3_000);
+    const thread = commentView.vaultState?.commentThreads?.["comment-1"];
+    if (!thread) throw new Error("Missing comment fixture");
+    let historyCalls = 0;
+    let staleResponseDelivered = false;
+    let releaseStaleHistory = () => {};
+    const staleHistoryGate = new Promise<void>((resolve) => {
+      releaseStaleHistory = resolve;
+    });
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__commentIndexEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: "An answer with an unread comment",
+              tools: [],
+            },
+          ],
+        });
+      } else if (url.pathname === "/comments/messages") {
+        historyCalls++;
+        if (historyCalls === 1) {
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-server-a",
+              generatedAt: 100,
+              historyVersion: "v1",
+              thread,
+              messages: [
+                { role: "user", text: "initial question", tools: [] },
+                { role: "assistant", text: "initial answer", tools: [] },
+              ],
+            },
+          });
+        } else if (historyCalls === 2) {
+          await staleHistoryGate;
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-server-a",
+              generatedAt: 200,
+              historyVersion: "v2",
+              thread,
+              messages: [
+                { role: "user", text: "initial question", tools: [] },
+                {
+                  role: "assistant",
+                  text: "stale response from disconnected server",
+                  tools: [],
+                },
+              ],
+            },
+          });
+          staleResponseDelivered = true;
+        } else {
+          await route.fulfill({
+            json: {
+              ok: true,
+              epoch: "comment-server-b",
+              generatedAt: 300,
+              historyVersion: "v3",
+              thread,
+              messages: [
+                { role: "user", text: "initial question", tools: [] },
+                {
+                  role: "assistant",
+                  text: "authoritative after reconnect",
+                  tools: [],
+                },
+              ],
+            },
+          });
+        }
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    const emitCommentIndex = (epoch: string, generatedAt: number, historyVersion: string) =>
+      page.evaluate(
+        ({ nextEpoch, nextGeneratedAt, nextHistoryVersion, nextThread }) => {
+          const source = (globalThis as unknown as Record<string, unknown>)
+            .__commentIndexEventSource as {
+            onmessage: ((event: { data: string }) => void) | null;
+          };
+          source.onmessage?.({
+            data: JSON.stringify({
+              kind: "comment_index",
+              epoch: nextEpoch,
+              generatedAt: nextGeneratedAt,
+              comments: [{ thread: nextThread, historyVersion: nextHistoryVersion }],
+            }),
+          });
+        },
+        {
+          nextEpoch: epoch,
+          nextGeneratedAt: generatedAt,
+          nextHistoryVersion: historyVersion,
+          nextThread: thread,
+        },
+      );
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+    await expect.poll(() => historyCalls).toBe(1);
+    await expect.poll(() => page.locator("#commentMsgs").textContent()).toContain("initial answer");
+
+    await emitCommentIndex("comment-server-a", 200, "v2");
+    await expect.poll(() => historyCalls).toBe(2);
+
+    // A hard reconnect to a new server epoch must start a new authoritative
+    // load even though the old process's request is still in flight.
+    await emitCommentIndex("comment-server-b", 300, "v3");
+    await expect.poll(() => historyCalls).toBe(3);
+    await expect
+      .poll(() => page.locator("#commentMsgs").textContent())
+      .toContain("authoritative after reconnect");
+
+    releaseStaleHistory();
+    await expect.poll(() => staleResponseDelivered).toBe(true);
+    await page.waitForTimeout(50);
+    expect(await page.locator("#commentMsgs").textContent()).not.toContain(
+      "stale response from disconnected server",
+    );
+    expect(await page.locator("#commentMsgs").textContent()).toContain(
+      "authoritative after reconnect",
+    );
+
+    await page.locator("#commentClose").click();
+    await page
+      .locator("#list .item", { hasText: "Avoidance session" })
+      .locator(".it-comment")
+      .click();
+    await expect.poll(() => page.locator("#commentDrawer").isVisible()).toBe(true);
+    await page.waitForTimeout(50);
+    expect(historyCalls).toBe(3);
+    expect(await page.locator("#commentMsgs").textContent()).toContain(
+      "authoritative after reconnect",
+    );
     await page.close();
   });
 
@@ -7166,6 +9434,79 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("keeps transcript search pending visibly and scopes it to Today", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1000, height: 760 },
+    });
+    const now = Date.now();
+    const searchView: ConsoleView = {
+      ...raceView,
+      sessions: raceView.sessions.map((session) => ({
+        ...session,
+        lastTs: now,
+        sortTs: now,
+        ageDays: 0,
+      })),
+    };
+    let releaseSearch: () => void = () => {};
+    const searchPending = new Promise<void>((resolve) => {
+      releaseSearch = resolve;
+    });
+    let searchRequestUrl = "";
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(searchView),
+        });
+      } else if (url.pathname === "/search") {
+        searchRequestUrl = url.toString();
+        await searchPending;
+        await route.fulfill({
+          json: {
+            results: [
+              {
+                vendor: "claude",
+                sessionId: "s1",
+                file: "/tmp/session-1.jsonl",
+                count: 1,
+                hits: [{ role: "assistant", text: "PR #990 is ready" }],
+              },
+            ],
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    await page.locator("#search").fill("990");
+    await expect
+      .poll(() => page.locator("#list .empty").textContent())
+      .toBe("Searching session content…");
+    await expect.poll(() => searchRequestUrl).not.toBe("");
+    const scopedSearchUrl = new URL(searchRequestUrl);
+    expect(scopedSearchUrl.searchParams.get("start")).not.toBeNull();
+    expect(scopedSearchUrl.searchParams.get("end")).not.toBeNull();
+    expect(scopedSearchUrl.searchParams.get("inclusiveEnd")).toBeNull();
+
+    releaseSearch();
+    await expect.poll(() => page.locator('#list .item[data-session-id="s1"]').count()).toBe(1);
+    expect(await page.locator("#list .it-searchhit").textContent()).toContain("PR #990");
+    await page.close();
+  });
+
   it("opens a resizable middle chats panel driven by the sidebar filters", async () => {
     const page = await browser.newPage({
       viewport: { width: 1600, height: 900 },
@@ -7272,19 +9613,53 @@ describe("console browser behavior", () => {
     expect(await unreadCard.locator(".it-tag", { hasText: "urgent" }).count()).toBe(0);
     expect(await generatingCard.getAttribute("class")).toContain("session-status-generating");
     expect(await unreadCard.getAttribute("class")).toContain("session-status-unread");
-    const cardBorderMatchesStatus = (card: typeof generatingCard, variable: string) =>
-      card.evaluate((node, property) => {
-        const view = node.ownerDocument.defaultView;
-        if (!view) return false;
-        const probe = node.ownerDocument.createElement("span");
-        probe.style.color = `var(${property})`;
-        node.appendChild(probe);
-        const expected = view.getComputedStyle(probe).color;
-        probe.remove();
-        return view.getComputedStyle(node).borderTopColor === expected;
-      }, variable);
-    expect(await cardBorderMatchesStatus(generatingCard, "--status-generating")).toBe(true);
-    expect(await cardBorderMatchesStatus(unreadCard, "--status-unread")).toBe(true);
+    const cardBorderMatchesVariable = (
+      card: typeof generatingCard,
+      side: "top" | "left",
+      variable: string,
+    ) =>
+      card.evaluate(
+        (node, property) => {
+          const view = node.ownerDocument.defaultView;
+          if (!view) return false;
+          const probe = node.ownerDocument.createElement("span");
+          probe.style.color = `var(${property.variable})`;
+          node.appendChild(probe);
+          const expected = view.getComputedStyle(probe).color;
+          probe.remove();
+          const style = view.getComputedStyle(node);
+          return (
+            (property.side === "left" ? style.borderLeftColor : style.borderTopColor) === expected
+          );
+        },
+        { side, variable },
+      );
+    expect(await cardBorderMatchesVariable(generatingCard, "top", "--line")).toBe(true);
+    expect(await cardBorderMatchesVariable(unreadCard, "top", "--line")).toBe(true);
+    expect(await cardBorderMatchesVariable(generatingCard, "top", "--status-generating")).toBe(
+      false,
+    );
+    expect(await cardBorderMatchesVariable(unreadCard, "top", "--status-unread")).toBe(false);
+    const readAttentionRail = (card: typeof generatingCard) =>
+      card.evaluate((node) => {
+        const style = node.ownerDocument.defaultView?.getComputedStyle(node, "::after");
+        return {
+          opacity: style?.opacity ?? "",
+          height: style?.height ?? "",
+          backgroundImage: style?.backgroundImage ?? "",
+          backgroundColor: style?.backgroundColor ?? "",
+        };
+      });
+    const [generatingRail, unreadRail] = await Promise.all([
+      readAttentionRail(generatingCard),
+      readAttentionRail(unreadCard),
+    ]);
+    expect(generatingRail.opacity).toBe("1");
+    expect(generatingRail.height).toBe("2px");
+    expect(generatingRail.backgroundImage).not.toBe("none");
+    expect(unreadRail.opacity).toBe("1");
+    expect(unreadRail.height).toBe("2px");
+    expect(unreadRail.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
     await generatingCard.click();
     const lightActiveStyle = await generatingCard.evaluate((node) => {
       const style = node.ownerDocument.defaultView?.getComputedStyle(node);
@@ -7294,7 +9669,25 @@ describe("console browser behavior", () => {
       };
     });
     expect(lightActiveStyle.backgroundImage).not.toBe("none");
-    expect(lightActiveStyle.boxShadow).toContain("inset");
+    expect(
+      await generatingCard.evaluate((node) => {
+        const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+        const rail = node.ownerDocument.defaultView?.getComputedStyle(node, "::before");
+        return {
+          neutralPerimeter: style?.borderLeftColor === style?.borderTopColor,
+          borderWidth: style?.borderLeftWidth,
+          railWidth: rail?.width,
+          railColor: rail?.backgroundColor,
+          railRadius: rail?.borderRadius,
+        };
+      }),
+    ).toEqual({
+      neutralPerimeter: true,
+      borderWidth: "1px",
+      railWidth: "3px",
+      railColor: "rgb(99, 102, 241)",
+      railRadius: "8px 0px 0px 8px",
+    });
     await page.locator("html").evaluate((node) => node.setAttribute("data-theme", "dark"));
     expect(await generatingCard.getAttribute("class")).toContain("active");
     const darkActiveStyle = await generatingCard.evaluate((node) => {
@@ -7305,7 +9698,21 @@ describe("console browser behavior", () => {
       };
     });
     expect(darkActiveStyle.backgroundImage).not.toBe("none");
-    expect(darkActiveStyle.boxShadow).toContain("inset");
+    expect(
+      await generatingCard.evaluate((node) => {
+        const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+        const rail = node.ownerDocument.defaultView?.getComputedStyle(node, "::before");
+        return {
+          neutralPerimeter: style?.borderLeftColor === style?.borderTopColor,
+          railWidth: rail?.width,
+          railRadius: rail?.borderRadius,
+        };
+      }),
+    ).toEqual({
+      neutralPerimeter: true,
+      railWidth: "3px",
+      railRadius: "8px 0px 0px 8px",
+    });
     expect(await generatingCard.getAttribute("class")).toContain("session-status-generating");
     await unreadCard.locator(".it-status").click();
     expect(await unreadCard.getAttribute("class")).toContain("session-status-read");
@@ -7497,7 +9904,7 @@ describe("console browser behavior", () => {
       await page.locator('#tagFilters .gtag[data-tag-value="middle"]').getAttribute("class"),
     ).toContain("tag-hidden");
     expect(await page.locator('#tagFilters .gtag[data-tag-value="middle"] .gtagdel').count()).toBe(
-      0,
+      1,
     );
     expect(visibilityWrites).toEqual([]);
 
@@ -7845,6 +10252,61 @@ describe("console browser behavior", () => {
     await page.locator("#newToggle").click();
     await page.locator("#newTagAdd").click();
     await expect.poll(newOrder).toEqual(["old", "middle", "new"]);
+    await page.close();
+  });
+
+  it("opens the session tag picker when a live rerender replaces the button mid-click", async () => {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const add = page.locator('#list .item[data-session-id="s1"] .it-tagadd');
+    await add.dispatchEvent("pointerdown", {
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+      pointerId: 17,
+      pointerType: "mouse",
+    });
+    await add.evaluate((button) => {
+      const replacement = button.cloneNode(true);
+      button.replaceWith(replacement);
+      const pointerup = new Event("pointerup", { bubbles: true });
+      Object.defineProperties(pointerup, {
+        button: { value: 0 },
+        clientX: { value: 20 },
+        clientY: { value: 20 },
+        pointerId: { value: 17 },
+        pointerType: { value: "mouse" },
+      });
+      button.ownerDocument.defaultView?.dispatchEvent(pointerup);
+    });
+
+    expect(await page.locator("#sessionTagPopover").isVisible()).toBe(true);
+    expect(
+      await page
+        .locator('#list .item[data-session-id="s1"] .it-tagadd')
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
     await page.close();
   });
 
@@ -8222,7 +10684,7 @@ describe("console browser behavior", () => {
 
     await page.locator("#tagFilters .gtag:not(.auto) .gtagdel").click();
     expect(await page.locator("#tagAction").isVisible()).toBe(true);
-    await expect.poll(() => page.locator(":focus").getAttribute("id")).toBe("tagActionClear");
+    await expect.poll(() => page.locator(":focus").getAttribute("id")).toBe("tagActionDelete");
     expect(await page.locator("#tagActionTitle").textContent()).toBe("Manage tag “work”");
     expect(await page.locator("#tagActionVisibility").count()).toBe(0);
     expect(await page.locator("#tagActionClear").textContent()).toBe("Remove from 1 chat");
@@ -8607,6 +11069,103 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("defers transcript-scan activity until a generating session finishes", async () => {
+    const page = await browser.newPage();
+    const now = Date.now();
+    const liveSessions = raceView.sessions.map((session, index) => ({
+      ...session,
+      lastTs: now - (index === 0 ? 2 : 1) * 60 * 60_000,
+      sortTs: now - (index === 0 ? 2 : 1) * 60 * 60_000,
+      generating: index === 0,
+    }));
+    const liveView: ConsoleView = { ...raceView, sessions: liveSessions };
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__attendEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(liveView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: {} });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const order = () =>
+      page
+        .locator("#list > .item")
+        .evaluateAll((cards) => cards.map((card) => card.getAttribute("data-session-id")));
+    const firstAge = () =>
+      page.locator('#list > .item[data-session-id="s1"] .it-age').textContent();
+    const originalAge = await firstAge();
+    expect(await order()).toEqual(["s2", "s1"]);
+
+    await page.evaluate(
+      ({ sessions, timestamp }) => {
+        const source = (globalThis as unknown as Record<string, unknown>).__attendEventSource as {
+          onmessage(event: { data: string }): void;
+        };
+        source.onmessage({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "s1",
+            emittedAt: timestamp,
+            event: { kind: "assistant_text", text: "partial block" },
+          }),
+        });
+        source.onmessage({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "stream-freeze",
+            revision: 1,
+            pending: false,
+            sessions: sessions.map((session) =>
+              session.sessionId === "s1"
+                ? { ...session, lastTs: timestamp, sortTs: timestamp, generating: true }
+                : session,
+            ),
+            knownDirs: ["/tmp/project"],
+            defaultNewDir: "/tmp/project",
+            tags: [],
+          }),
+        });
+      },
+      { sessions: liveSessions, timestamp: now },
+    );
+
+    await expect.poll(order).toEqual(["s2", "s1"]);
+    expect(await firstAge()).toBe(originalAge);
+
+    await page.evaluate((timestamp) => {
+      const source = (globalThis as unknown as Record<string, unknown>).__attendEventSource as {
+        onmessage(event: { data: string }): void;
+      };
+      source.onmessage({
+        data: JSON.stringify({
+          kind: "session_event",
+          sessionId: "s1",
+          emittedAt: timestamp,
+          event: { kind: "result", ok: true },
+        }),
+      });
+    }, now + 1);
+
+    await expect.poll(order).toEqual(["s1", "s2"]);
+    await expect.poll(firstAge).not.toBe(originalAge);
+    await page.close();
+  });
+
   it("moves a read session to the top when its status light re-flags it", async () => {
     const page = await browser.newPage();
     await page.addInitScript(() => {
@@ -8929,6 +11488,20 @@ describe("console browser behavior", () => {
     expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
     expect(await page.locator("#todoHub").textContent()).toContain("Triage the release");
     expect(await page.locator("#todoHub").textContent()).toContain("Verify the migration");
+    expect(
+      await page.locator('[data-todo-id="session-1"] .todohub-text').getAttribute("data-hover-tip"),
+    ).toBe("Verify the migration");
+    expect(
+      await page.locator('[data-todo-id="session-1"] .todohub-text').getAttribute("title"),
+    ).toBeNull();
+    expect(
+      await page
+        .locator('[data-todo-id="session-1"] .todohub-scope')
+        .getAttribute("data-hover-tip"),
+    ).toContain("Avoidance session");
+    expect(
+      await page.locator('[data-todo-id="session-1"] .todohub-scope').getAttribute("title"),
+    ).toBeNull();
     expect(await page.locator("#todoHub .todohub-tools").count()).toBe(0);
     expect(await page.locator("#todoHub .todohub-filter").count()).toBe(0);
     expect(await page.locator("#todoHubSearch").count()).toBe(0);

@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import type { RawSession } from "../types.js";
 
 /** Read-only side of the transcript index consumed by vendor analyzers. */
@@ -17,8 +16,8 @@ export interface TranscriptPathWriter extends TranscriptPathLookup {
  *
  * Scanners already pay the cost of discovering transcript files, so analyzers
  * reuse that result instead of recursively walking the same vendor tree at the
- * end of every turn. A missing file invalidates its entry lazily; the analyzer
- * may then perform one compatibility lookup and put the repaired path back.
+ * end of every turn. File validation belongs to the scan/history workers; this
+ * hot lookup deliberately performs no main-thread filesystem calls.
  */
 export class TranscriptPathIndex implements TranscriptPathWriter {
   private readonly paths = new Map<string, Map<string, string>>();
@@ -26,11 +25,7 @@ export class TranscriptPathIndex implements TranscriptPathWriter {
   get(vendor: string, sessionId: string): string | null {
     const entries = this.paths.get(vendor);
     const file = entries?.get(sessionId);
-    if (!file) return null;
-    if (fs.existsSync(file)) return file;
-    entries?.delete(sessionId);
-    if (entries?.size === 0) this.paths.delete(vendor);
-    return null;
+    return file ?? null;
   }
 
   set(vendor: string, sessionId: string, file: string): void {

@@ -51,6 +51,27 @@ describe("Cursor CLI adapter", () => {
     ).toContain("gpt-5.3-codex[reasoning=high,fast=true]");
   });
 
+  it("runs analyzer daemons in Cursor's native read-only ask mode", () => {
+    expect(
+      buildCursorArgs({
+        cwd: "/work/repo",
+        prompt: "analyze",
+        sandbox: "read-only",
+      }),
+    ).toEqual([
+      "--print",
+      "--mode",
+      "ask",
+      "--sandbox",
+      "enabled",
+      "--trust",
+      "--output-format",
+      "stream-json",
+      "--stream-partial-output",
+      "analyze",
+    ]);
+  });
+
   it("parses Cursor's native IDE/CLI transcript shape", () => {
     const raw = [
       JSON.stringify({

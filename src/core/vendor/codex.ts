@@ -290,6 +290,32 @@ function codexSnapshot(state: CodexSessionState): RawSession {
 
 const codexJsonlParser: IncrementalJsonlParser<CodexSessionState> = {
   create: (file) => createCodexState(file, true),
+  restore: (file, checkpoint) => {
+    if (!checkpoint || typeof checkpoint !== "object") return null;
+    const saved = checkpoint as Partial<CodexSessionState>;
+    if (!saved.session || typeof saved.session !== "object") return null;
+    return {
+      session: { ...saved.session, path: file, vendor: "codex" },
+      previousTs:
+        saved.previousTs === null ||
+        (typeof saved.previousTs === "number" && Number.isFinite(saved.previousTs))
+          ? saved.previousTs
+          : null,
+      activeTurn:
+        saved.activeTurn &&
+        typeof saved.activeTurn === "object" &&
+        (saved.activeTurn.turnId === null || typeof saved.activeTurn.turnId === "string") &&
+        (saved.activeTurn.startedAt === null ||
+          (typeof saved.activeTurn.startedAt === "number" &&
+            Number.isFinite(saved.activeTurn.startedAt)))
+          ? saved.activeTurn
+          : null,
+      hasSessionMetaId: saved.hasSessionMetaId === true,
+      subagent: saved.subagent === true,
+      skipSubagentContent: true,
+    };
+  },
+  serialize: (state) => state,
   append: appendCodexLine,
   snapshot: (state) => (state.subagent ? null : codexSnapshot(state)),
 };

@@ -1,6 +1,7 @@
 export interface SearchClause {
   exclude: boolean;
   source: string;
+  kind: "literal" | "regex";
   regex: RegExp;
 }
 
@@ -76,6 +77,7 @@ export function parseSearchQuery(raw: string): SearchQuery {
     const clause = {
       exclude,
       source: value,
+      kind: delimiter === "%" ? ("regex" as const) : ("literal" as const),
       regex: delimiter === "%" ? safeRegex(value) : new RegExp(literalPattern(value), "i"),
     };
     clauses.push(clause);

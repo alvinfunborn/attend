@@ -6,11 +6,20 @@ import type { AppServerMessage, JsonRpcId } from "./types.js";
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+export interface AppServerRequestOptions {
+  timeoutMs?: number;
 }
 
 export interface AppServerClientLike {
   start(): Promise<void>;
-  request<T = unknown>(method: string, params?: unknown): Promise<T>;
+  request<T = unknown>(
+    method: string,
+    params?: unknown,
+    options?: AppServerRequestOptions,
+  ): Promise<T>;
   respond(id: JsonRpcId, result: unknown): void;
   respondError(id: JsonRpcId, message: string): void;
   onMessage(listener: (message: AppServerMessage) => void): () => void;
@@ -39,13 +48,19 @@ export class CodexAppServerClient implements AppServerClientLike {
     return this.starting;
   }
 
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
+  async request<T = unknown>(
+    method: string,
+    params?: unknown,
+    options: AppServerRequestOptions = {},
+  ): Promise<T> {
     await this.start();
     const id = this.nextId++;
-    const result = new Promise<unknown>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-    });
-    this.write({ method, id, ...(params === undefined ? {} : { params }) });
+    const result = this.pendingRequest(id, method, options.timeoutMs);
+    try {
+      this.write({ method, id, ...(params === undefined ? {} : { params }) });
+    } catch (error) {
+      this.rejectRequest(id, error instanceof Error ? error : new Error(String(error)));
+    }
     return (await result) as T;
   }
 
@@ -104,11 +119,36 @@ export class CodexAppServerClient implements AppServerClientLike {
 
   private requestDirect(method: string, params: unknown): Promise<unknown> {
     const id = this.nextId++;
-    const result = new Promise<unknown>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-    });
-    this.write({ method, id, params });
+    const result = this.pendingRequest(id, method);
+    try {
+      this.write({ method, id, params });
+    } catch (error) {
+      this.rejectRequest(id, error instanceof Error ? error : new Error(String(error)));
+    }
     return result;
+  }
+
+  private pendingRequest(id: JsonRpcId, method: string, timeoutMs?: number): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      const pending: PendingRequest = { resolve, reject };
+      if (timeoutMs && timeoutMs > 0) {
+        pending.timer = setTimeout(() => {
+          if (this.pending.get(id) !== pending) return;
+          this.pending.delete(id);
+          reject(new Error(`codex app-server ${method} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        pending.timer.unref?.();
+      }
+      this.pending.set(id, pending);
+    });
+  }
+
+  private rejectRequest(id: JsonRpcId, error: Error): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    this.pending.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.reject(error);
   }
 
   private receive(line: string): void {
@@ -122,6 +162,7 @@ export class CodexAppServerClient implements AppServerClientLike {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
+      if (pending.timer) clearTimeout(pending.timer);
       if (message.error) {
         pending.reject(new Error(message.error.message ?? "codex app-server request failed"));
       } else {
@@ -148,7 +189,10 @@ export class CodexAppServerClient implements AppServerClientLike {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.pending.clear();
   }
 }

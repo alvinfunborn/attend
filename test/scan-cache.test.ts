@@ -159,4 +159,134 @@ describe("ScanCache", () => {
     expect(cache.memoizeJsonl([file], parser)[0]?.title).toBe("replacement-that-is-longer");
     expect(created).toEqual([file, file, file]);
   });
+
+  it("rehydrates unchanged snapshots without reading the transcript again", () => {
+    const file = path.join(dir, "persisted.json");
+    fs.writeFileSync(file, "persisted");
+    const first = new ScanCache();
+    first.memoize([file], stub);
+
+    const restored = new ScanCache();
+    expect(restored.hydrate(first.toPersistable())).toBe(true);
+    const reads: string[] = [];
+    const sessions = restored.memoize([file], (candidate) => {
+      reads.push(candidate);
+      return stub(candidate);
+    });
+
+    expect(sessions.map((session) => session.path)).toEqual([file]);
+    expect(reads).toEqual([]);
+  });
+
+  it("fully re-parses a grown JSONL after restart, then resumes incremental parsing", () => {
+    const file = path.join(dir, "persisted-growing.jsonl");
+    fs.writeFileSync(file, JSON.stringify({ value: "one" }));
+    const initial = new ScanCache();
+    initial.memoizeJsonl([file], incrementalParser([], []));
+
+    const created: string[] = [];
+    const appended: string[] = [];
+    const restored = new ScanCache();
+    expect(restored.hydrate(initial.toPersistable())).toBe(true);
+    const parser = incrementalParser(created, appended);
+
+    expect(restored.memoizeJsonl([file], parser)[0]?.title).toBe("one");
+    expect(created).toEqual([]);
+    expect(appended).toEqual([]);
+
+    fs.appendFileSync(file, `\n${JSON.stringify({ value: "two" })}`);
+    expect(restored.memoizeJsonl([file], parser)[0]?.title).toBe("one,two");
+    expect(created).toEqual([file]);
+    expect(appended).toHaveLength(2);
+
+    fs.appendFileSync(file, `\n${JSON.stringify({ value: "three" })}`);
+    expect(restored.memoizeJsonl([file], parser)[0]?.title).toBe("one,two,three");
+    expect(created).toEqual([file]);
+    expect(appended).toHaveLength(3);
+  });
+
+  it("restores a serializable parser checkpoint and reads only appended rows after restart", () => {
+    const file = path.join(dir, "checkpoint-growing.jsonl");
+    fs.writeFileSync(
+      file,
+      [JSON.stringify({ value: "one" }), JSON.stringify({ value: "two" })].join("\n"),
+    );
+    const appended: string[] = [];
+    const parser: IncrementalJsonlParser<LineState> = {
+      ...incrementalParser([], appended),
+      serialize: (state) => state,
+      restore: (candidate, checkpoint) => {
+        if (!checkpoint || typeof checkpoint !== "object") return null;
+        const saved = checkpoint as Partial<LineState>;
+        return Array.isArray(saved.values)
+          ? { file: candidate, values: saved.values.map(String) }
+          : null;
+      },
+    };
+    const initial = new ScanCache();
+    expect(initial.memoizeJsonl([file], parser)[0]?.title).toBe("one,two");
+    const beforeRestartRows = appended.length;
+
+    const restored = new ScanCache();
+    expect(restored.hydrate(initial.toPersistable())).toBe(true);
+    fs.appendFileSync(file, `\n${JSON.stringify({ value: "three" })}`);
+    expect(restored.memoizeJsonl([file], parser)[0]?.title).toBe("one,two,three");
+    expect(appended.slice(beforeRestartRows)).toEqual([JSON.stringify({ value: "three" })]);
+  });
+
+  it("reads only the appended tail of a large transcript after a persisted restart", () => {
+    const file = path.join(dir, "large-checkpoint.jsonl");
+    const row = `${JSON.stringify({ value: "x".repeat(1_024) })}\n`;
+    const rows = Math.ceil((32 * 1024 * 1024) / Buffer.byteLength(row));
+    fs.writeFileSync(file, row.repeat(rows));
+    interface CountState {
+      count: number;
+    }
+    const parser: IncrementalJsonlParser<CountState> = {
+      create: () => ({ count: 0 }),
+      restore: (_file, checkpoint) => {
+        if (!checkpoint || typeof checkpoint !== "object") return null;
+        const count = Number((checkpoint as { count?: unknown }).count);
+        return Number.isSafeInteger(count) && count >= 0 ? { count } : null;
+      },
+      serialize: (state) => ({ count: state.count }),
+      append: (state, line) => {
+        JSON.parse(line);
+        state.count += 1;
+      },
+      snapshot: (state) => ({ ...stub(file), prompts: state.count }),
+    };
+
+    const initial = new ScanCache();
+    expect(initial.memoizeJsonl([file], parser)[0]?.prompts).toBe(rows);
+    expect(initial.metrics().parsedBytes).toBeGreaterThanOrEqual(32 * 1024 * 1024);
+
+    const restored = new ScanCache();
+    expect(restored.hydrate(initial.toPersistable())).toBe(true);
+    const appended = `${JSON.stringify({ value: "tail" })}\n`;
+    fs.appendFileSync(file, appended);
+    expect(restored.memoizeJsonl([file], parser)[0]?.prompts).toBe(rows + 1);
+    expect(restored.metrics().parsedBytes).toBe(Buffer.byteLength(appended));
+  }, 10_000);
+
+  it("rejects malformed persisted data without partially hydrating it", () => {
+    const file = path.join(dir, "malformed.json");
+    fs.writeFileSync(file, "fresh");
+    const cache = new ScanCache();
+
+    expect(
+      cache.hydrate({
+        v: 2,
+        entries: [[file, { mtimeMs: "not-a-number", size: 5, value: stub(file) }]],
+        jsonl: [],
+      }),
+    ).toBe(false);
+
+    const reads: string[] = [];
+    cache.memoize([file], (candidate) => {
+      reads.push(candidate);
+      return stub(candidate);
+    });
+    expect(reads).toEqual([file]);
+  });
 });

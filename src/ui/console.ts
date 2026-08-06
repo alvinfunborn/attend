@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AnalysisState } from "../core/daemon/cache.js";
 import type { ModelDefaults, ModelOption } from "../core/model-options.js";
 import type { ScheduledItem } from "../core/schedules.js";
@@ -21,6 +22,8 @@ export interface SessionView {
   /** latest user prompt — the second subtitle */
   lastPrompt: string | null;
   cwd: string | null;
+  /** server-vetted cwd basename used for document.title */
+  tabTitle?: string;
   project: string;
   file: string;
   ageDays: number | null;
@@ -101,6 +104,13 @@ export interface SessionView {
 
 export interface ConsoleView {
   sessions: SessionView[];
+  /** True until the first background session scan finishes. The client shows an
+   *  "indexing" hint until the unified live stream publishes the ready index. */
+  sessionsPending?: boolean;
+  /** Identifies the server process that owns sessionIndexRevision. */
+  sessionIndexEpoch?: string;
+  /** Monotonic revision of the authoritative session catalog within that epoch. */
+  sessionIndexRevision?: number;
   /** Active one-shot jobs projected into session cards and the existing queue surfaces. */
   schedules?: ScheduledItem[];
   knownDirs: string[];
@@ -125,11 +135,16 @@ export interface ConsoleView {
   codexModels: ModelOption[];
   /** Cursor Desktop-enabled models intersected with the Cursor CLI catalog. */
   cursorModels: ModelOption[];
+  /** Models advertised by the standalone Antigravity and Copilot CLIs. */
+  antigravityModels?: ModelOption[];
+  copilotModels?: ModelOption[];
   /** Compatibility warnings for vendor-owned internal model sources. */
   modelWarnings?: {
     claude?: string | null;
     codex?: string | null;
     cursor?: string | null;
+    antigravity?: string | null;
+    copilot?: string | null;
   };
   /** Effective model/effort/speed defaults read from each vendor's CLI. */
   modelDefaults?: Partial<Record<string, ModelDefaults>>;
@@ -159,6 +174,10 @@ const STYLE = `
     --newbox-gradient: linear-gradient(180deg, #f7f4ed 0%, var(--surface) 100%);
     --latest-gradient: linear-gradient(180deg, #f5f2eb 0%, var(--surface) 100%);
     --row-line: #f1f2f4; --item-hover: #f1f5f9;
+    --pin-row-start: rgba(79,70,229,0.085); --pin-row-end: rgba(99,102,241,0.025);
+    --pin-row-hover-start: rgba(79,70,229,0.13); --pin-row-hover-end: rgba(99,102,241,0.055);
+    --pin-card-start: #f0f1ff; --pin-card-end: #faf8f4; --pin-card-edge: rgba(79,70,229,0.2);
+    --pin-drop-bg: rgba(99,102,241,0.08);
     --item-selected-row-start: #e0e7ff; --item-selected-row-end: rgba(238,242,255,0.48);
     --item-selected-card-start: rgba(99,102,241,0.18); --item-selected-card-mid: #eef2ff; --item-selected-card-end: #f8faff;
     --item-selected-marker: #6366f1; --item-selected-row-ring: rgba(79,70,229,0.2);
@@ -181,11 +200,21 @@ const STYLE = `
     --tool-border-strong: #aaa292; --tool-divider: #e5e0d6; --tool-fg: #5d5a52; --tool-icon: #9b9488;
     --vendor-claude-fg: #c2410c; --vendor-claude-bg: #fff7ed; --vendor-claude-border: #fdba74;
     --vendor-claude-hover-bg: #ffedd5; --vendor-claude-hover-border: #fb923c;
+    --vendor-claude-action-bg: #c2410c; --vendor-claude-action-hover: #9a3412; --vendor-claude-action-fg: #ffffff; --vendor-claude-action-ring: rgba(194,65,12,0.32);
     --vendor-codex-fg: #3730a3; --vendor-codex-bg: #eef2ff; --vendor-codex-border: #a5b4fc;
     --vendor-codex-hover-bg: #e0e7ff; --vendor-codex-hover-border: #818cf8;
+    --vendor-codex-action-bg: #4f46e5; --vendor-codex-action-hover: #4338ca; --vendor-codex-action-fg: #ffffff; --vendor-codex-action-ring: rgba(79,70,229,0.32);
     /* Cursor's brand is monochrome. Keep its vendor identity neutral. */
     --vendor-cursor-fg: #18181b; --vendor-cursor-bg: #f4f4f5; --vendor-cursor-border: #a1a1aa;
     --vendor-cursor-hover-bg: #e4e4e7; --vendor-cursor-hover-border: #71717a;
+    --vendor-cursor-action-bg: #18181b; --vendor-cursor-action-hover: #3f3f46; --vendor-cursor-action-fg: #ffffff; --vendor-cursor-action-ring: rgba(24,24,27,0.28);
+    --vendor-antigravity-fg: #7c3aed; --vendor-antigravity-bg: #f3e8ff; --vendor-antigravity-border: #c4b5fd;
+    --vendor-antigravity-hover-bg: #ede9fe; --vendor-antigravity-hover-border: #a78bfa;
+    --vendor-antigravity-action-bg: #6d28d9; --vendor-antigravity-action-hover: #5b21b6; --vendor-antigravity-action-fg: #ffffff; --vendor-antigravity-action-ring: rgba(109,40,217,0.3);
+    --vendor-copilot-fg: #6e40c9; --vendor-copilot-bg: #f5f0ff; --vendor-copilot-border: #b392f0;
+    --vendor-copilot-hover-bg: #eee5ff; --vendor-copilot-hover-border: #986ee2;
+    --vendor-copilot-action-bg: #6e40c9; --vendor-copilot-action-hover: #5936a2; --vendor-copilot-action-fg: #ffffff; --vendor-copilot-action-ring: rgba(110,64,201,0.3);
+    --vendor-action-bg: var(--primary-bg); --vendor-action-hover: var(--primary-hover); --vendor-action-fg: var(--primary-fg); --vendor-action-ring: var(--accent-ring);
     --todo-fg: #b45309; --todo-bg: #fffbeb; --todo-border: #fde68a;
     --radius: 8px; --radius-sm: 6px; --radius-pill: 999px;
     --shadow-sm: 0 1px 2px rgba(15,23,42,0.06);
@@ -209,6 +238,10 @@ const STYLE = `
     --newbox-gradient: linear-gradient(180deg, #151f31 0%, var(--surface) 100%);
     --latest-gradient: linear-gradient(180deg, #1e1b4b 0%, #141b2b 100%);
     --row-line: #1f2937; --item-hover: #172033;
+    --pin-row-start: rgba(99,102,241,0.18); --pin-row-end: rgba(79,70,229,0.055);
+    --pin-row-hover-start: rgba(129,140,248,0.24); --pin-row-hover-end: rgba(79,70,229,0.09);
+    --pin-card-start: #1b2140; --pin-card-end: #121a2c; --pin-card-edge: rgba(165,180,252,0.26);
+    --pin-drop-bg: rgba(129,140,248,0.12);
     --item-selected-row-start: rgba(129,140,248,0.24); --item-selected-row-end: rgba(79,70,229,0.1);
     --item-selected-card-start: rgba(99,102,241,0.28); --item-selected-card-mid: rgba(30,27,75,0.72); --item-selected-card-end: rgba(15,23,42,0.92);
     --item-selected-marker: #a5b4fc; --item-selected-row-ring: rgba(165,180,252,0.2);
@@ -231,9 +264,18 @@ const STYLE = `
     --tool-border-strong: #64748b; --tool-divider: #263241; --tool-fg: #a7b4c4; --tool-icon: #64748b;
     --vendor-claude-fg: #f0ab8a; --vendor-claude-bg: rgba(194,65,12,0.16); --vendor-claude-border: #9a3412;
     --vendor-claude-hover-bg: rgba(194,65,12,0.26); --vendor-claude-hover-border: #c2410c;
+    --vendor-claude-action-bg: #f0ab8a; --vendor-claude-action-hover: #f7bea5; --vendor-claude-action-fg: #431407; --vendor-claude-action-ring: rgba(240,171,138,0.34);
     --vendor-codex-fg: #c4b5fd; --vendor-codex-bg: rgba(79,70,229,0.18); --vendor-codex-border: #6366f1;
     --vendor-codex-hover-bg: rgba(79,70,229,0.3); --vendor-codex-hover-border: #818cf8;
+    --vendor-codex-action-bg: #c4b5fd; --vendor-codex-action-hover: #ddd6fe; --vendor-codex-action-fg: #1e1b4b; --vendor-codex-action-ring: rgba(196,181,253,0.34);
     --vendor-cursor-fg: #f4f4f5; --vendor-cursor-bg: #27272a; --vendor-cursor-border: #71717a;
+    --vendor-cursor-action-bg: #f4f4f5; --vendor-cursor-action-hover: #ffffff; --vendor-cursor-action-fg: #18181b; --vendor-cursor-action-ring: rgba(244,244,245,0.3);
+    --vendor-antigravity-fg: #c4b5fd; --vendor-antigravity-bg: rgba(124,58,237,0.18); --vendor-antigravity-border: #8b5cf6;
+    --vendor-antigravity-hover-bg: rgba(124,58,237,0.3); --vendor-antigravity-hover-border: #a78bfa;
+    --vendor-antigravity-action-bg: #c4b5fd; --vendor-antigravity-action-hover: #ddd6fe; --vendor-antigravity-action-fg: #2e1065; --vendor-antigravity-action-ring: rgba(196,181,253,0.34);
+    --vendor-copilot-fg: #d2a8ff; --vendor-copilot-bg: rgba(110,64,201,0.2); --vendor-copilot-border: #8957e5;
+    --vendor-copilot-hover-bg: rgba(110,64,201,0.32); --vendor-copilot-hover-border: #b392f0;
+    --vendor-copilot-action-bg: #d2a8ff; --vendor-copilot-action-hover: #e2c5ff; --vendor-copilot-action-fg: #21103f; --vendor-copilot-action-ring: rgba(210,168,255,0.34);
     --vendor-cursor-hover-bg: #3f3f46; --vendor-cursor-hover-border: #a1a1aa;
     --todo-fg: #fbbf24; --todo-bg: rgba(245,158,11,0.14); --todo-border: rgba(245,158,11,0.48);
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.28);
@@ -252,6 +294,12 @@ const STYLE = `
   button:active { transform: translateY(0.5px); }
   button:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
   button:disabled { cursor: default; box-shadow: none; opacity: 0.6; }
+  [data-vendor="claude"] { --vendor-action-bg: var(--vendor-claude-action-bg); --vendor-action-hover: var(--vendor-claude-action-hover); --vendor-action-fg: var(--vendor-claude-action-fg); --vendor-action-ring: var(--vendor-claude-action-ring); }
+  [data-vendor="codex"] { --vendor-action-bg: var(--vendor-codex-action-bg); --vendor-action-hover: var(--vendor-codex-action-hover); --vendor-action-fg: var(--vendor-codex-action-fg); --vendor-action-ring: var(--vendor-codex-action-ring); }
+  [data-vendor="cursor"] { --vendor-action-bg: var(--vendor-cursor-action-bg); --vendor-action-hover: var(--vendor-cursor-action-hover); --vendor-action-fg: var(--vendor-cursor-action-fg); --vendor-action-ring: var(--vendor-cursor-action-ring); }
+  [data-vendor="antigravity"] { --vendor-action-bg: var(--vendor-antigravity-action-bg); --vendor-action-hover: var(--vendor-antigravity-action-hover); --vendor-action-fg: var(--vendor-antigravity-action-fg); --vendor-action-ring: var(--vendor-antigravity-action-ring); }
+  [data-vendor="copilot"] { --vendor-action-bg: var(--vendor-copilot-action-bg); --vendor-action-hover: var(--vendor-copilot-action-hover); --vendor-action-fg: var(--vendor-copilot-action-fg); --vendor-action-ring: var(--vendor-copilot-action-ring); }
+  button[data-vendor]:focus-visible { outline-color: var(--vendor-action-ring); }
   input, textarea, select { font-family: inherit; }
   input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -319,8 +367,8 @@ const STYLE = `
   .search-range-custom-apply:hover { border-color: var(--primary-hover); background: var(--primary-hover); box-shadow: none; }
   .search-error { position: absolute; z-index: 65; left: 0; top: calc(100% + 0.3rem); max-width: 22rem; padding: 0.3rem 0.45rem; border: 1px solid #fecaca; border-radius: var(--radius-sm); background: #fef2f2; color: #991b1b; box-shadow: var(--shadow-md); font-size: 0.66rem; line-height: 1.3; }
   .search-error[hidden] { display: none; }
-  #newToggle { flex-shrink: 0; font-weight: 700; color: var(--primary-fg); border-color: var(--primary-bg); background: var(--primary-bg); box-shadow: var(--shadow-sm); padding: 0.4rem 0.85rem; }
-  #newToggle:hover { background: var(--primary-hover); border-color: var(--primary-hover); box-shadow: 0 4px 14px var(--accent-ring); }
+  #newToggle { flex-shrink: 0; font-weight: 700; color: var(--vendor-action-fg); border-color: var(--vendor-action-bg); background: var(--vendor-action-bg); box-shadow: var(--shadow-sm); padding: 0.4rem 0.85rem; }
+  #newToggle:hover { background: var(--vendor-action-hover); border-color: var(--vendor-action-hover); box-shadow: 0 4px 14px var(--vendor-action-ring); }
   .todohub-toggle { position: relative; width: 2.05rem; height: 2.05rem; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: transparent; background: transparent; color: var(--ink-3); box-shadow: none; }
   .todohub-toggle:hover, .todohub-toggle[aria-expanded="true"] { border-color: transparent; background: var(--button-hover); color: var(--ink); box-shadow: none; }
   .todohub-toggle[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
@@ -555,6 +603,8 @@ const STYLE = `
   .selectopt[aria-selected="true"]:hover, .selectopt[aria-selected="true"].on { background: var(--accent-soft); }
   .chooser-opt:hover .chooser-opt-label, .chooser-opt.on .chooser-opt-label { color: inherit; }
   .chooser-opt:hover .chooser-opt-meta, .chooser-opt.on .chooser-opt-meta { color: inherit; opacity: 0.76; }
+  .chooser-more { display: block; width: 100%; margin-top: 0.2rem; padding: 0.48rem 0.5rem; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; color: var(--accent); font-size: 0.72rem; font-weight: 650; text-align: center; }
+  .chooser-more:hover:not(:disabled) { background: var(--accent-soft); box-shadow: none; }
   .chooser-opt.unavailable { cursor: not-allowed; opacity: 0.68; }
   .chooser-opt.unavailable:hover, .chooser-opt.unavailable.on { background: var(--warning-soft); }
   .chooser-opt.unavailable .chooser-opt-meta { white-space: normal; line-height: 1.35; }
@@ -605,35 +655,76 @@ const STYLE = `
   .newbox .nmsg .provider-error-card { max-width: none; padding: 0.7rem 0.75rem; border: 1px solid #fecaca; border-radius: var(--radius); background: #fef2f2; color: #991b1b; }
   .modelwarn { padding: 0.42rem 0.55rem; border: 1px solid var(--warning); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: 0.7rem; line-height: 1.4; }
   .modelwarn[hidden] { display: none; }
-  .nbtn-primary { flex: 0 0 auto; width: auto; min-width: 7.75rem; color: var(--primary-fg); background: var(--primary-bg); border-color: var(--primary-bg); box-shadow: var(--shadow-sm); }
-  .nbtn-primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); box-shadow: 0 4px 14px var(--accent-ring); }
+  .nbtn-primary { flex: 0 0 auto; width: auto; min-width: 7.75rem; color: var(--vendor-action-fg); background: var(--vendor-action-bg); border-color: var(--vendor-action-bg); box-shadow: var(--shadow-sm); }
+  .nbtn-primary:hover:not(:disabled) { background: var(--vendor-action-hover); border-color: var(--vendor-action-hover); box-shadow: 0 4px 14px var(--vendor-action-ring); }
   #list { overflow-y: auto; flex: 1; padding: 0.3rem 0; }
   #list.virtualized { overflow-anchor: none; contain: strict; }
-  #list > .session-pin-divider { position: relative; height: 13px; pointer-events: none; }
-  #list > .session-pin-divider::after { content: ""; position: absolute; top: 6px; left: 0.95rem; right: 0.95rem; height: 1px; background: var(--line-2); }
+  #list > .session-pin-divider { position: relative; height: 8px; pointer-events: none; background: transparent; }
   .sidebar-spacer { width: 1px; height: 0; pointer-events: none; }
   #list .empty { padding: 1.2rem 0.9rem; color: var(--ink-4); font-size: 0.8rem; text-align: center; }
-  .session-panel { width: 660px; flex: 0 0 auto; overflow-y: auto; background: var(--surface-2); border-right: 1px solid var(--line); }
+  .session-panel { --session-panel-selection-rail-size: 3px; --session-panel-status-rail-size: 2px; --session-panel-turn-rail-size: 3px; width: 660px; flex: 0 0 auto; overflow-y: auto; background: var(--surface-2); border-right: 1px solid var(--line); }
   .session-panel[hidden], .session-panel-resizer[hidden] { display: none; }
   .session-panel-list { min-height: 100%; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); align-content: start; align-items: start; gap: 0.55rem; padding: 0.55rem; }
   .session-panel-list.virtualized { display: block; min-height: 0; padding: 0; overflow-anchor: none; contain: layout style; }
   .session-panel-virtual-spacer { width: 100%; height: 0; pointer-events: none; }
   .session-panel-virtual-row { width: 100%; display: grid; grid-template-columns: repeat(var(--session-panel-columns, 1), minmax(0, 1fr)); align-items: start; gap: 0.55rem; padding: 0.55rem 0.55rem 0; box-sizing: border-box; }
-  .session-panel-virtual-divider { position: relative; width: 100%; height: 13px; pointer-events: none; }
-  .session-panel-virtual-divider::after { content: ""; position: absolute; top: 6px; left: 0.55rem; right: 0.55rem; height: 1px; background: var(--line-2); }
+  .session-panel-virtual-divider { position: relative; width: 100%; height: 8px; pointer-events: none; background: transparent; }
   .session-panel-list .empty { grid-column: 1 / -1; padding: 1.2rem 0.9rem; color: var(--ink-4); font-size: 0.8rem; text-align: center; }
-  .session-panel-list > .session-pin-divider { grid-column: 1 / -1; width: 100%; height: 1px; background: var(--line-2); pointer-events: none; }
+  .session-panel-list > .session-pin-divider { grid-column: 1 / -1; width: 100%; height: 1px; margin: -0.25rem 0; background: transparent; pointer-events: none; }
   .session-panel .item { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); content-visibility: auto; contain-intrinsic-size: auto 9rem; }
   .session-panel .item.tag-editing { z-index: 45; content-visibility: visible; }
   .session-panel .item.tag-editing .tagsug { z-index: 80; }
-  .session-panel .item.avoidance { border-left: 3px solid #f59e0b; }
+  .session-panel .item.avoidance { border-left-color: var(--line); }
   .session-panel .item:hover { background: var(--item-hover); }
-  .session-panel .item.active {
-    background: linear-gradient(135deg, var(--item-selected-card-start), var(--item-selected-card-mid) 58%, var(--item-selected-card-end));
-    box-shadow: inset 0 0 0 2px var(--item-selected-card-ring), 0 8px 18px -13px var(--item-selected-shadow);
+  /* Card state uses separate visual channels:
+     selection owns the left rail + a quiet wash; attention owns the top rail
+     and the fixed status light. The neutral perimeter never changes. */
+  .session-panel .item::before {
+    content: "";
+    position: absolute;
+    z-index: 2;
+    top: -1px;
+    bottom: -1px;
+    left: -1px;
+    width: var(--session-panel-selection-rail-size);
+    border-radius: var(--radius) 0 0 var(--radius);
+    background: transparent;
+    pointer-events: none;
   }
-  .session-panel .item.session-status-generating { border-color: var(--status-generating); }
-  .session-panel .item.session-status-unread { border-color: var(--status-unread); }
+  .session-panel .item.avoidance::before { background: #f59e0b; }
+  .session-panel .item.active::before { background: var(--item-selected-marker); }
+  .session-panel .item::after {
+    content: "";
+    position: absolute;
+    z-index: 3;
+    top: -1px;
+    left: 0.58rem;
+    right: 0.58rem;
+    height: var(--session-panel-status-rail-size);
+    border-radius: 0 0 3px 3px;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .session-panel .item.session-status-unread::after {
+    opacity: 1;
+    background: var(--status-unread);
+    box-shadow: 0 2px 9px var(--status-unread-soft);
+  }
+  .session-panel .item.session-status-generating::after {
+    opacity: 1;
+    background: linear-gradient(90deg, var(--status-generating-soft) 0%, var(--status-generating-soft) 15%, var(--status-generating) 22%, #e9d5ff 25%, var(--status-generating) 28%, var(--status-generating-soft) 35%, var(--status-generating-soft) 50%, var(--status-generating-soft) 65%, var(--status-generating) 72%, #e9d5ff 75%, var(--status-generating) 78%, var(--status-generating-soft) 85%, var(--status-generating-soft) 100%);
+    background-size: 200% 100%;
+    box-shadow: 0 2px 9px var(--status-generating-soft);
+    animation: sessionAttentionRail 1.45s linear infinite;
+    animation-delay: var(--session-attention-delay, 0ms);
+  }
+  @keyframes sessionAttentionRail { from { background-position: 100% 0; } to { background-position: 0% 0; } }
+  @media (prefers-reduced-motion: reduce) { .session-panel .item.session-status-generating::after { animation: none; background-position: 0 0; } }
+  .session-panel .item.active {
+    border-color: var(--line);
+    background: linear-gradient(90deg, var(--item-selected-card-start), var(--item-selected-card-end) 52%);
+    box-shadow: none;
+  }
   .session-panel-resizer { width: 6px; flex-shrink: 0; cursor: col-resize; background: transparent; transition: background 0.15s; }
   .session-panel-resizer:hover, .session-panel-resizer.dragging { background: var(--resizer-hover); }
   .item { position: relative; padding: 0.6rem 0.95rem; border-bottom: 1px solid var(--row-line); cursor: pointer; border-left: 3px solid transparent; transition: background 0.12s, border-color 0.12s; }
@@ -643,7 +734,28 @@ const STYLE = `
     box-shadow: inset 3px 0 0 var(--item-selected-marker), inset 0 0 0 1px var(--item-selected-row-ring);
   }
   .item.avoidance { border-left-color: #f59e0b; }
+  .item.session-pinned { cursor: grab; }
+  .item.session-pinned:active { cursor: grabbing; }
+  #list .item.session-pinned { background: linear-gradient(90deg, var(--pin-row-start), var(--pin-row-end)); border-bottom-color: color-mix(in srgb, var(--pin-card-edge) 42%, var(--row-line)); }
+  #list .item.session-pinned:hover { background: linear-gradient(90deg, var(--pin-row-hover-start), var(--pin-row-hover-end)); }
+  #list .item.session-pinned.active { background: linear-gradient(90deg, var(--item-selected-row-start), var(--item-selected-row-end)); box-shadow: inset 3px 0 0 var(--item-selected-marker), inset 0 0 0 1px var(--item-selected-row-ring), inset 0 -1px 0 var(--pin-card-edge); }
+  .session-panel .item.session-pinned { background: linear-gradient(145deg, var(--pin-card-start), var(--pin-card-end)); box-shadow: inset 0 1px 0 var(--pin-card-edge), 0 7px 18px -17px var(--accent); }
+  .session-panel .item.session-pinned:hover { background: linear-gradient(145deg, var(--pin-row-hover-start), var(--pin-card-end)); box-shadow: inset 0 1px 0 var(--pin-card-edge), 0 9px 20px -16px var(--accent); }
+  .session-panel .item.session-pinned.active { border-color: var(--line); background: linear-gradient(90deg, var(--item-selected-card-start), var(--item-selected-card-end) 52%); box-shadow: inset 0 1px 0 var(--pin-card-edge); }
+  .session-pinned .it-pin.on { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .item.session-card-dragging { opacity: 0.32; filter: saturate(0.72); transform: scale(0.988); }
+  .item.session-pin-drag-peer { opacity: 0.3; filter: saturate(0.72); }
+  .item.session-pin-drag-layout-source { position: absolute !important; visibility: hidden !important; pointer-events: none !important; }
+  .session-pin-drop-placeholder { min-width: 0; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--accent); border-radius: var(--radius); background: var(--pin-drop-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); pointer-events: none; animation: sessionPinDropIn 0.14s cubic-bezier(0.2,0.8,0.2,1); }
+  #list > .session-pin-drop-placeholder { width: calc(100% - 1rem); margin: 3px 0.5rem; border-radius: 7px; }
+  .session-panel-list > .session-pin-drop-placeholder, .session-panel-virtual-row > .session-pin-drop-placeholder { width: 100%; }
+  .session-pin-drop-label { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.25rem 0.48rem; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--surface) 72%, transparent); font-size: 0.65rem; font-weight: 700; letter-spacing: 0.01em; opacity: 0.82; }
+  .session-pin-drop-label svg { width: 0.68rem; height: 0.68rem; stroke: currentColor; stroke-width: 1.7; fill: currentColor; }
+  @keyframes sessionPinDropIn { from { opacity: 0; transform: scale(0.985); } to { opacity: 1; transform: scale(1); } }
   .session-read-progress { position: absolute; z-index: 2; right: 0; bottom: 0; width: 3px; min-height: 2px; border-radius: 3px 0 0 3px; background: var(--status-unread); opacity: 0.82; pointer-events: none; }
+  /* The right-side turn rail grows out of the bottom-right corner and reaches
+     the top-right corner at 100%; unlike the inset top rail, it owns its edge. */
+  .session-panel .session-read-progress { right: -1px; bottom: -1px; width: var(--session-panel-turn-rail-size); max-height: calc(100% + 2px); border-radius: 0 var(--radius) var(--radius) 0; }
   .session-read-progress[hidden] { display: none; }
   .it-titlerow { display: flex; align-items: center; gap: 0.45rem; }
   .it-title { font-size: 0.84rem; font-weight: 600; color: var(--ink); letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
@@ -738,6 +850,8 @@ const STYLE = `
   .it-context .vtag.claude { color: var(--vendor-claude-fg); background: transparent; border-color: transparent; }
   .it-context .vtag.codex { color: var(--vendor-codex-fg); background: transparent; border-color: transparent; }
   .it-context .vtag.cursor { color: var(--vendor-cursor-fg); background: transparent; border-color: transparent; }
+  .it-context .vtag.antigravity { color: var(--vendor-antigravity-fg); background: transparent; border-color: transparent; }
+  .it-context .vtag.copilot { color: var(--vendor-copilot-fg); background: transparent; border-color: transparent; }
   .it-context .ptag { color: var(--project-fg, #64748b); font-weight: 700; }
   /* per-tab tag editor + custom suggestion dropdown (replaces the native datalist) */
   .tagedit { position: relative; margin-top: 0.4rem; }
@@ -785,6 +899,8 @@ const STYLE = `
   .vtag.claude { color: var(--vendor-claude-fg); background: var(--vendor-claude-bg); border-color: var(--vendor-claude-border); }
   .vtag.codex { color: var(--vendor-codex-fg); background: var(--vendor-codex-bg); border-color: var(--vendor-codex-border); }
   .vtag.cursor { color: var(--vendor-cursor-fg); background: var(--vendor-cursor-bg); border-color: var(--vendor-cursor-border); }
+  .vtag.antigravity { color: var(--vendor-antigravity-fg); background: var(--vendor-antigravity-bg); border-color: var(--vendor-antigravity-border); }
+  .vtag.copilot { color: var(--vendor-copilot-fg); background: var(--vendor-copilot-bg); border-color: var(--vendor-copilot-border); }
   .ptag { font-weight: 600; }
   #h-sig .score, #h-sig .eta { cursor: pointer; }
   /* a manually-pinned priority/ETA: dashed underline marks it as user-set */
@@ -821,7 +937,6 @@ const STYLE = `
   .main { --composer-overlay-height: 6.5rem; --queue-overlay-height: 0px; --avoid-overlay-height: 0px; --chat-scrollbar-width: 0px; position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--surface); }
   .main.session-drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
   .main.session-drop-target::after { content: '↳  Drop to add as chat tab'; position: absolute; z-index: 45; top: 0.72rem; left: 50%; transform: translateX(-50%); pointer-events: none; color: var(--accent); font-size: 0.68rem; font-weight: 650; letter-spacing: 0.015em; white-space: nowrap; }
-  .item.session-card-dragging { opacity: 0.52; }
   .chat-tabs { flex: 0 0 auto; min-width: 0; display: flex; align-items: flex-end; gap: 0.2rem; padding: 0.35rem 0.55rem 0; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--row-line); background: var(--surface-2); scrollbar-width: thin; }
   .chat-tabs[hidden] { display: none; }
   .chat-tab { flex: 0 0 auto; min-width: 7rem; max-width: 14rem; height: 2rem; display: flex; align-items: center; gap: 0.15rem; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; color: var(--ink-3); background: transparent; }
@@ -855,6 +970,7 @@ const STYLE = `
   .headbtn .forktree-mini { width: 1.5rem; height: 1rem; stroke: none; }
   .headbtn.busy svg { animation: spin 0.85s linear infinite; }
   .headbtn.head-pin.on { color: var(--accent); }
+  .headbtn.head-pin svg { width: 0.7rem; height: 0.7rem; stroke-width: 1.75; }
   .headbtn.head-pin.on svg { fill: currentColor; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @keyframes statusSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -922,7 +1038,12 @@ const STYLE = `
   .pinx { flex-shrink: 0; border: 0; background: transparent; color: var(--ink-4); box-shadow: none; padding: 0.08rem 0.22rem; line-height: 1; font-size: 1.1rem; }
   .pinx:hover { color: #b91c1c; background: transparent; }
   #msgs { --msg-float-actions-space: 7rem; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 1rem 1rem 1.5rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .msgs-pane[hidden] { display: none !important; }
   #msgs.transcript-virtualized { gap: 0; overflow-anchor: none; contain: layout style; }
+  .history-loader { flex: 0 0 auto; display: flex; justify-content: center; padding: 0 0 0.7rem; }
+  .history-loader-button { min-height: 1.8rem; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface); color: var(--ink-3); padding: 0.25rem 0.75rem; font-size: 0.72rem; box-shadow: none; }
+  .history-loader-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .history-loader-button:disabled { opacity: 0.58; cursor: default; }
   .transcript-turn { flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.6rem; padding-bottom: 0.6rem; }
   .transcript-virtual-spacer { flex: 0 0 auto; width: 1px; height: 0; pointer-events: none; }
   .transcript-live-tail { flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.6rem; }
@@ -993,8 +1114,8 @@ const STYLE = `
   .commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center; gap: 0.65rem; padding: 0 0.65rem 0 0.9rem; border-bottom: 1px solid var(--line-2); }
   .commenttitle { flex: 1; min-width: 0; color: var(--ink); font-size: 0.84rem; line-height: 1; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .commentactions { flex-shrink: 0; display: flex; align-items: center; gap: 0.14rem; }
-  .commentpromote { height: 1.75rem; min-height: 1.75rem; padding: 0 0.5rem; border-color: transparent; background: transparent; color: var(--accent); box-shadow: none; font-size: 0.68rem; line-height: 1; font-weight: 700; }
-  .commentpromote:hover:not(:disabled) { border-color: transparent; background: var(--accent-soft); color: var(--accent); box-shadow: none; }
+  .commentpromote { height: 1.75rem; min-height: 1.75rem; padding: 0 0.5rem; border-color: color-mix(in srgb, var(--vendor-action-bg) 38%, transparent); background: color-mix(in srgb, var(--vendor-action-bg) 10%, transparent); color: var(--vendor-action-bg); box-shadow: none; font-size: 0.68rem; line-height: 1; font-weight: 700; }
+  .commentpromote:hover:not(:disabled) { border-color: color-mix(in srgb, var(--vendor-action-bg) 56%, transparent); background: color-mix(in srgb, var(--vendor-action-bg) 18%, transparent); color: var(--vendor-action-bg); box-shadow: none; }
   .commentpromote:disabled { border-color: transparent; background: transparent; }
   .commentclose { width: 1.75rem; height: 1.75rem; min-height: 1.75rem; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: transparent; background: transparent; color: var(--ink-3); box-shadow: none; font-size: 1.05rem; line-height: 1; }
   .commentclose:hover { border-color: transparent; background: var(--button-hover); color: var(--ink); box-shadow: none; }
@@ -1028,11 +1149,17 @@ const STYLE = `
   .inline-edit-bar { position: absolute; right: 0.45rem; top: 50%; transform: translateY(-50%); display: flex; gap: 0.35rem; align-items: center; justify-content: flex-end; max-width: calc(100% - 0.9rem); }
   .inline-edit .inline-edit-save { height: 1.62rem; min-height: 1.62rem; padding: 0 0.58rem; font-size: 0.78rem; line-height: 1; white-space: nowrap; box-shadow: var(--shadow-sm); }
   .inline-edit .schedulebtn { width: 1.62rem; height: 1.62rem; min-height: 1.62rem; flex-basis: 1.62rem; }
-  .inline-edit .inline-edit-save { color: var(--primary-fg); background: var(--primary-bg); border-color: var(--primary-bg); font-weight: 600; }
-  .inline-edit .inline-edit-save:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); box-shadow: 0 4px 14px var(--accent-ring); }
+  .inline-edit .inline-edit-save { color: var(--vendor-action-fg); background: var(--vendor-action-bg); border-color: var(--vendor-action-bg); font-weight: 600; }
+  .inline-edit .inline-edit-save:hover:not(:disabled) { background: var(--vendor-action-hover); border-color: var(--vendor-action-hover); box-shadow: 0 4px 14px var(--vendor-action-ring); }
   .msg .bubble { min-width: 0; max-width: 76%; padding: 0.55rem 0.8rem; border-radius: 12px; font-size: 0.88rem; line-height: 1.55; white-space: normal; word-break: break-word; overflow-wrap: anywhere; box-shadow: var(--shadow-sm); }
   .msg.user .bubble { background: var(--user-msg-bg); color: var(--user-msg-fg); border: 1px solid var(--user-msg-border); border-bottom-right-radius: 4px; }
   .msg.assistant .bubble { max-width: calc(100% - var(--msg-float-actions-space)); background: var(--assistant-bg); color: var(--ink); border: 1px solid var(--assistant-border); border-bottom-left-radius: 4px; }
+  .streaming-tail { white-space: pre-wrap; }
+  .msg.anchor-arrived .bubble, .toolrow.anchor-arrived > .toolc { animation: anchorArrive 0.9s ease-out; }
+  @keyframes anchorArrive {
+    0% { box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow-sm); }
+    100% { box-shadow: var(--shadow-sm); }
+  }
   .msg .bubble > :first-child { margin-top: 0; }
   .msg .bubble > :last-child { margin-bottom: 0; }
   .msg .bubble p { margin: 0; }
@@ -1224,6 +1351,8 @@ const STYLE = `
   #railVendor[data-vendor="claude"] { color: var(--vendor-claude-fg); }
   #railVendor[data-vendor="codex"] { color: var(--vendor-codex-fg); }
   #railVendor[data-vendor="cursor"] { color: var(--vendor-cursor-fg); }
+  #railVendor[data-vendor="antigravity"] { color: var(--vendor-antigravity-fg); }
+  #railVendor[data-vendor="copilot"] { color: var(--vendor-copilot-fg); }
   #railModel { flex: 0 1 auto; min-width: 0; }
   #railModel .railbtn-value { max-width: 8rem; }
   /* only when open todos exist: label + count carry the sidebar todo marker's amber (.it-todo); 0 stays neutral */
@@ -1261,6 +1390,8 @@ const STYLE = `
   .rail-option[data-vendor="claude"] .rail-option-label, .rail-option[data-vendor="claude"] .rail-option-vendor-mark { color: var(--vendor-claude-fg); }
   .rail-option[data-vendor="codex"] .rail-option-label, .rail-option[data-vendor="codex"] .rail-option-vendor-mark { color: var(--vendor-codex-fg); }
   .rail-option[data-vendor="cursor"] .rail-option-label, .rail-option[data-vendor="cursor"] .rail-option-vendor-mark { color: var(--vendor-cursor-fg); }
+  .rail-option[data-vendor="antigravity"] .rail-option-label, .rail-option[data-vendor="antigravity"] .rail-option-vendor-mark { color: var(--vendor-antigravity-fg); }
+  .rail-option[data-vendor="copilot"] .rail-option-label, .rail-option[data-vendor="copilot"] .rail-option-vendor-mark { color: var(--vendor-copilot-fg); }
   .rail-option-note { flex-shrink: 0; color: var(--ink-4); font-size: 0.62rem; }
   .rail-empty { padding: 0.85rem 0.65rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink-4); box-shadow: var(--shadow-sm); font-size: 0.74rem; text-align: center; }
   .rail-items { display: flex; flex-direction: column; gap: 0.05rem; }
@@ -1327,8 +1458,8 @@ const STYLE = `
   .scheduleactions { flex: 0 0 auto; display: flex; justify-content: flex-end; align-items: center; gap: 0.32rem; }
   .scheduleactions:empty { display: none; }
   .scheduleaction { flex: 0 0 auto; min-height: 1.9rem; padding: 0 0.7rem; font-size: 0.72rem; }
-  .scheduleaction.primary { color: var(--primary-fg); border-color: var(--primary-bg); background: var(--primary-bg); font-weight: 650; }
-  .scheduleaction.primary:hover:not(:disabled) { border-color: var(--primary-hover); background: var(--primary-hover); }
+  .scheduleaction.primary { color: var(--vendor-action-fg); border-color: var(--vendor-action-bg); background: var(--vendor-action-bg); font-weight: 650; }
+  .scheduleaction.primary:hover:not(:disabled) { border-color: var(--vendor-action-hover); background: var(--vendor-action-hover); }
   .schedulerow { display: flex; align-items: center; gap: 0.38rem; }
   .scheduledatetime { flex: 1 1 auto; min-width: 8.6rem; height: 2rem; display: inline-flex; align-items: center; gap: 0.34rem; padding-left: 0.52rem; overflow: hidden; border: 1px solid var(--line-2); border-radius: 8px; background: var(--input-bg); color: var(--ink-3); }
   .scheduledatetime:hover, .scheduledatetime:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); color: var(--ink); }
@@ -1377,6 +1508,7 @@ const STYLE = `
      breathes with gpulse (the same "generating" language as thinking bubbles and pending tools);
      with no goal the toggle waits — dimmed but legible, never invisible. */
   .goal-toggle .goal-ico { width: 0.72rem; height: 0.72rem; flex-shrink: 0; }
+  .goal-toggle[hidden] { display: none; }
   .goal-toggle .goal-ring { fill: none; stroke: currentColor; stroke-width: 1.5; }
   .goal-toggle .goal-dot { fill: currentColor; opacity: 0; transition: opacity 0.15s; }
   .goal-toggle[data-vendor="claude"] { --goal-fg: var(--vendor-claude-fg); --goal-bg: var(--vendor-claude-bg); --goal-border: var(--vendor-claude-border); --goal-hover-bg: var(--vendor-claude-hover-bg); --goal-hover-border: var(--vendor-claude-hover-border); }
@@ -1413,7 +1545,7 @@ const STYLE = `
   .msg .attcard:hover { border-color: rgba(99,102,241,0.62); }
   .msg .attcard .kind { flex-shrink: 0; font-size: 0.62rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: #4338ca; background: #eef2ff; border-radius: 999px; padding: 0.08rem 0.32rem; }
   .msg .attcard .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.76rem; }
-  .msg .attcard.image { flex-direction: column; align-items: flex-start; gap: 0.32rem; width: 10.5rem; padding: 0.38rem; }
+  .msg .attcard.image { flex-direction: column; align-items: flex-start; gap: 0.32rem; width: 10.5rem; padding: 0.38rem; cursor: zoom-in; }
   .msg .attcard.image img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; background: rgba(15,23,42,0.12); }
   .msg .attcard.image .attmeta { display: flex; align-items: center; gap: 0.35rem; width: 100%; min-width: 0; }
   .imgpreview { position: fixed; inset: 0; z-index: 120; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.65rem; padding: 1.25rem; background: rgba(2,6,23,0.82); }
@@ -1421,10 +1553,12 @@ const STYLE = `
   .imgpreview-viewport { width: min(96vw, 1280px); height: min(82vh, calc(100vh - 5.5rem)); overflow: hidden; display: flex; align-items: center; justify-content: center; cursor: grab; touch-action: none; }
   .imgpreview-viewport.dragging { cursor: grabbing; }
   .imgpreview-stage { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-width: 100%; max-height: 100%; transform-origin: center center; will-change: transform; }
-  .imgpreview-html { display: flex; align-items: center; justify-content: center; max-width: 100%; max-height: 100%; }
+  .imgpreview-html { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; max-width: 100%; max-height: 100%; }
   .imgpreview img, .imgpreview-html > svg { display: block; max-width: min(96vw, 1280px); max-height: min(82vh, calc(100vh - 5.5rem)); width: auto; height: auto; object-fit: contain; border-radius: 8px; background: rgba(255,255,255,0.04); box-shadow: 0 22px 60px rgba(0,0,0,0.46); -webkit-user-drag: none; user-select: none; }
+  .imgpreview img { width: 100%; height: 100%; max-width: 100%; max-height: 100%; }
+  .imgpreview img[hidden], .imgpreview-html[hidden] { display: none; }
   .imgpreview-html:empty { display: none; }
-  .imgpreview-html > svg { background: #fff; padding: 0.5rem; box-sizing: border-box; }
+  .imgpreview-html > svg { width: 100% !important; height: 100% !important; max-width: 100% !important; max-height: 100% !important; background: #fff; padding: 0.5rem; box-sizing: border-box; }
   .imgpreview-bar { width: min(96vw, 1280px); display: flex; align-items: center; gap: 0.75rem; color: #e5e7eb; }
   .imgpreview-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.82rem; }
   .workstats { position: fixed; inset: 0; z-index: 130; display: grid; place-items: center; padding: 1rem; background: rgba(2,6,23,0.58); }
@@ -1546,8 +1680,8 @@ const STYLE = `
     .work-table th, .work-table td { padding-top: 0.32rem; padding-bottom: 0.32rem; }
     .work-readout { margin-top: 0.4rem; line-height: 1.35; }
   }
-  .foot button.send, .commentfoot button.send { height: 1.8rem; min-height: 1.8rem; background: var(--primary-bg); color: var(--primary-fg); border-color: var(--primary-bg); padding: 0 0.78rem; font-weight: 600; box-shadow: var(--shadow-sm); }
-  .foot button.send:hover:not(:disabled), .commentfoot button.send:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); box-shadow: 0 4px 14px var(--accent-ring); }
+  .foot button.send, .commentfoot button.send { height: 1.8rem; min-height: 1.8rem; background: var(--vendor-action-bg); color: var(--vendor-action-fg); border-color: var(--vendor-action-bg); padding: 0 0.78rem; font-weight: 600; box-shadow: var(--shadow-sm); }
+  .foot button.send:hover:not(:disabled), .commentfoot button.send:hover:not(:disabled) { background: var(--vendor-action-hover); border-color: var(--vendor-action-hover); box-shadow: 0 4px 14px var(--vendor-action-ring); }
   .foot button.send.stopping, .commentfoot button.send.stopping { background: #b91c1c; border-color: #b91c1c; }
   .foot button.send.stopping:hover, .commentfoot button.send.stopping:hover { background: #991b1b; }
   .foot button.runbtn { width: 100%; height: 1.8rem; min-height: 1.8rem; max-width: 13rem; color: #334155; border-color: #cbd5e1; background: var(--surface); padding: 0 0.58rem; font-size: 0.72rem; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1568,8 +1702,8 @@ const STYLE = `
   .qitem.scheduled { background: color-mix(in srgb, var(--surface) 78%, #eef2ff); }
   .qitem.blocked { border-color: var(--warning); background: var(--warning-soft); }
   .qitem .qtime { flex-shrink: 0; color: var(--ink-4); font-size: 0.68rem; font-variant-numeric: tabular-nums; }
-  .qitem button.qsend { padding: 0.1rem 0.45rem; color: var(--primary-fg); background: var(--primary-bg); border-color: var(--primary-bg); font-weight: 600; }
-  .qitem button.qsend:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+  .qitem button.qsend { padding: 0.1rem 0.45rem; color: var(--vendor-action-fg); background: var(--vendor-action-bg); border-color: var(--vendor-action-bg); font-weight: 600; }
+  .qitem button.qsend:hover:not(:disabled) { background: var(--vendor-action-hover); border-color: var(--vendor-action-hover); }
   .qaction { width: 1.7rem; height: 1.7rem; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: #6366f1; }
   .qaction:hover { color: #4338ca; border-color: transparent; background: rgba(99,102,241,0.12); box-shadow: none; }
   .qaction svg { width: 0.82rem; height: 0.82rem; stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
@@ -1578,6 +1712,10 @@ const STYLE = `
   .qitem.editing .qeditbox { width: 100%; min-width: 0; display: flex; align-items: center; gap: 0.45rem; }
   .qitem.editing .qeditta { flex: 1; min-width: 0; height: 1.7rem; box-sizing: border-box; font: inherit; font-size: 0.82rem; line-height: 1.2; padding: 0.22rem 0.45rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink); box-shadow: 0 0 0 2px var(--accent-ring); }
   .foot button.splitbtn { height: 1.8rem; min-height: 1.8rem; padding: 0 0.68rem; }
+  .foot button.splitbtn[data-vendor] { color: var(--vendor-action-bg); border-color: color-mix(in srgb, var(--vendor-action-bg) 46%, var(--line)); background: color-mix(in srgb, var(--vendor-action-bg) 9%, var(--surface)); }
+  .foot button.splitbtn[data-vendor]:hover:not(:disabled) { color: var(--vendor-action-bg); border-color: var(--vendor-action-bg); background: color-mix(in srgb, var(--vendor-action-bg) 16%, var(--surface)); box-shadow: 0 0 0 2px var(--vendor-action-ring); }
+  .qitem button.qfork[data-vendor] { color: var(--vendor-action-bg); }
+  .qitem button.qfork[data-vendor]:hover:not(:disabled) { color: var(--vendor-action-hover); background: color-mix(in srgb, var(--vendor-action-bg) 14%, transparent); }
   .splitbtn-ico { width: 0.82rem; height: 0.82rem; margin-left: 0.22rem; stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; vertical-align: -0.15em; }
   .forkpop { position: absolute; right: 1.1rem; bottom: calc(100% + 0.55rem); z-index: 55; width: min(390px, calc(100vw - 2rem)); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-pop); padding: 0.75rem; display: flex; flex-direction: column; gap: 0.55rem; }
   .forkpop[hidden] { display: none; }
@@ -1624,6 +1762,8 @@ const STYLE = `
   html[data-theme="dark"] .it-context .vtag.claude { color: var(--vendor-claude-fg); }
   html[data-theme="dark"] .it-context .vtag.codex { color: var(--vendor-codex-fg); }
   html[data-theme="dark"] .it-context .vtag.cursor { color: var(--vendor-cursor-fg); }
+  html[data-theme="dark"] .it-context .vtag.antigravity { color: var(--vendor-antigravity-fg); }
+  html[data-theme="dark"] .it-context .vtag.copilot { color: var(--vendor-copilot-fg); }
   html[data-theme="dark"] .it-context .ptag { color: var(--project-fg-dark, #cbd5e1); }
   html[data-theme="dark"] .it-live-total { color: var(--status-generating); }
   html[data-theme="dark"] .it-live.generated .it-live-total { color: var(--status-unread); }
@@ -1638,6 +1778,8 @@ const STYLE = `
   html[data-theme="dark"] .tipmeta .vtag.claude { color: var(--vendor-claude-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .vtag.codex { color: var(--vendor-codex-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .vtag.cursor { color: var(--vendor-cursor-fg); background: transparent; border-color: transparent; }
+  html[data-theme="dark"] .tipmeta .vtag.antigravity { color: var(--vendor-antigravity-fg); background: transparent; border-color: transparent; }
+  html[data-theme="dark"] .tipmeta .vtag.copilot { color: var(--vendor-copilot-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .ptag { color: var(--project-fg-dark, #cbd5e1); }
   html[data-theme="dark"] .msg.error .bubble,
   html[data-theme="dark"] .newbox .nmsg .provider-error-card,
@@ -1754,6 +1896,9 @@ function compactThroughput(value: number): string {
 
 export function renderConsole(v: ConsoleView): string {
   const sessJson = JSON.stringify(v.sessions).replace(/</g, "\\u003c");
+  const sessionsPendingJson = JSON.stringify(v.sessionsPending === true);
+  const sessionIndexEpochJson = JSON.stringify(v.sessionIndexEpoch ?? "").replace(/</g, "\\u003c");
+  const sessionIndexRevisionJson = JSON.stringify(v.sessionIndexRevision ?? 0);
   const schedulesJson = JSON.stringify(v.schedules ?? []).replace(/</g, "\\u003c");
   const dirsJson = JSON.stringify(v.knownDirs).replace(/</g, "\\u003c");
   const rootsJson = JSON.stringify(v.scopeRoots).replace(/</g, "\\u003c");
@@ -1765,6 +1910,8 @@ export function renderConsole(v: ConsoleView): string {
   const claudeModelsJson = JSON.stringify(v.claudeModels).replace(/</g, "\\u003c");
   const codexModelsJson = JSON.stringify(v.codexModels).replace(/</g, "\\u003c");
   const cursorModelsJson = JSON.stringify(v.cursorModels).replace(/</g, "\\u003c");
+  const antigravityModelsJson = JSON.stringify(v.antigravityModels ?? []).replace(/</g, "\\u003c");
+  const copilotModelsJson = JSON.stringify(v.copilotModels ?? []).replace(/</g, "\\u003c");
   const modelWarningsJson = JSON.stringify(v.modelWarnings ?? {}).replace(/</g, "\\u003c");
   const modelDefaultsJson = JSON.stringify(v.modelDefaults ?? {}).replace(/</g, "\\u003c");
   const tagsJson = JSON.stringify(v.tags).replace(/</g, "\\u003c");
@@ -1981,14 +2128,14 @@ export function renderConsole(v: ConsoleView): string {
         <button class="forktree-trigger it-forktree" id="forkTreeBtn" title="view fork tree" aria-label="view fork tree" hidden></button>
         <span class="it-age" id="h-age"></span>
         <div class="head-actions">
+          <button class="headbtn head-pin" id="headerPinBtn" title="select a session to pin" disabled aria-label="select a session to pin" aria-pressed="false">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 4 2 2v1H8.7L8 14l-.7-4.5H4v-1l2-2-1-4Z"></path></svg>
+          </button>
           <button class="headbtn" id="refreshBtn" title="refresh this chat from transcript" disabled aria-label="refresh this chat">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M13 3.5v3h-3"></path>
               <path d="M12.2 6.2A5 5 0 1 0 13 8.9"></path>
             </svg>
-          </button>
-          <button class="headbtn head-pin" id="headerPinBtn" title="select a session to pin" disabled aria-label="select a session to pin" aria-pressed="false">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 4 2 2v1H8.7L8 14l-.7-4.5H4v-1l2-2-1-4Z"></path></svg>
           </button>
         </div>
       </div>
@@ -2001,7 +2148,7 @@ export function renderConsole(v: ConsoleView): string {
       <div class="latestpin-body" id="latestPinBody"></div>
     </div>
   </div>
-  <div id="msgs">
+  <div class="msgs-pane" id="msgs">
     <section class="changelog" id="ph" aria-label="Changelog">
       <div class="changelog-kicker">What's new</div>
       <div class="changelog-content" id="changelogContent"></div>
@@ -2238,6 +2385,9 @@ export function renderConsole(v: ConsoleView): string {
 </div>
 <script>
 window.__SESSIONS__ = ${sessJson};
+window.__SESSIONS_PENDING__ = ${sessionsPendingJson};
+window.__SESSION_INDEX_EPOCH__ = ${sessionIndexEpochJson};
+window.__SESSION_INDEX_REVISION__ = ${sessionIndexRevisionJson};
 window.__SCHEDULES__ = ${schedulesJson};
 window.__DIRS__ = ${dirsJson};
 window.__ROOTS__ = ${rootsJson};
@@ -2247,6 +2397,8 @@ window.__VENDORS__ = ${vendorsJson};
 window.__CLAUDE_MODELS__ = ${claudeModelsJson};
 window.__CODEX_MODELS__ = ${codexModelsJson};
 window.__CURSOR_MODELS__ = ${cursorModelsJson};
+window.__ANTIGRAVITY_MODELS__ = ${antigravityModelsJson};
+window.__COPILOT_MODELS__ = ${copilotModelsJson};
 window.__MODEL_WARNINGS__ = ${modelWarningsJson};
 window.__MODEL_DEFAULTS__ = ${modelDefaultsJson};
 window.__TAGS__ = ${tagsJson};
@@ -2257,6 +2409,12 @@ window.__CHANGELOG__ = ${changelogJson};
 <script>
 (function(){
   var SESS = window.__SESSIONS__ || [];
+  // The server ships the page shell before its first session scan finishes on a
+  // cold cache, so the sidebar starts empty and fills from the unified live bus.
+  var SESSIONS_PENDING = window.__SESSIONS_PENDING__ === true;
+  var SESSION_INDEX_EPOCH = String(window.__SESSION_INDEX_EPOCH__ || '');
+  var SESSION_INDEX_REVISION = Math.max(0,Number(window.__SESSION_INDEX_REVISION__)||0);
+  var sessionIndexSnapshotRequest = '';
   var SCHEDULES = window.__SCHEDULES__ || [];
   var DIRS = window.__DIRS__ || [];
   var ROOTS = window.__ROOTS__ || [];
@@ -2268,6 +2426,8 @@ window.__CHANGELOG__ = ${changelogJson};
   var CLAUDE_MODELS = window.__CLAUDE_MODELS__ || [];
   var CODEX_MODELS = window.__CODEX_MODELS__ || [];
   var CURSOR_MODELS = window.__CURSOR_MODELS__ || [];
+  var ANTIGRAVITY_MODELS = window.__ANTIGRAVITY_MODELS__ || [];
+  var COPILOT_MODELS = window.__COPILOT_MODELS__ || [];
   var MODEL_WARNINGS = window.__MODEL_WARNINGS__ || {};
   var MODEL_DEFAULTS = window.__MODEL_DEFAULTS__ || {};
   var CHANGELOG_MARKDOWN = window.__CHANGELOG__ || '';
@@ -2331,15 +2491,21 @@ window.__CHANGELOG__ = ${changelogJson};
       var method = String(init.method || (input && input.method) || 'GET').toUpperCase();
       var body = init.body == null ? null : String(init.body);
       var contentType = '';
+      var prefer = '';
+      var clientSessionId = '';
       try{
         var h = new Headers(init.headers || (input && input.headers) || {});
         contentType = h.get('content-type') || '';
+        prefer = h.get('prefer') || '';
+        clientSessionId = h.get('x-attend-client-session-id') || '';
       }catch(e){}
       return e2eeEncrypt({
         method: method,
         path: parsed.pathname + parsed.search,
         body: body,
-        contentType: contentType
+        contentType: contentType,
+        prefer: prefer,
+        clientSessionId: clientSessionId
       }).then(function(payload){
         return E2EE.rawFetch('/e2ee/fetch', {
           method:'POST',
@@ -2359,6 +2525,10 @@ window.__CHANGELOG__ = ${changelogJson};
   function applyBootstrap(view){
     view = view || {};
     SESS = view.sessions || [];
+    SESSIONS_PENDING = view.sessionsPending === true;
+    SESSION_INDEX_EPOCH = String(view.sessionIndexEpoch || '');
+    SESSION_INDEX_REVISION = Math.max(0,Number(view.sessionIndexRevision)||0);
+    sessionIndexSnapshotRequest = '';
     SCHEDULES = view.schedules || [];
     DIRS = view.knownDirs || [];
     ROOTS = view.scopeRoots || [];
@@ -2368,10 +2538,21 @@ window.__CHANGELOG__ = ${changelogJson};
     CLAUDE_MODELS = view.claudeModels || [];
     CODEX_MODELS = view.codexModels || [];
     CURSOR_MODELS = view.cursorModels || [];
+    ANTIGRAVITY_MODELS = view.antigravityModels || [];
+    COPILOT_MODELS = view.copilotModels || [];
     MODEL_WARNINGS = view.modelWarnings || {};
     MODEL_DEFAULTS = view.modelDefaults || {};
     TAGS = view.tags || [];
     VAULT_STATE = view.vaultState || {};
+    COMMENT_INDEX_EPOCH = '';
+    COMMENT_INDEX_AT = 0;
+    commentIndexSnapshotRequest = '';
+    commentHistoryVersions = {};
+    commentHistoryLoadedVersions = {};
+    commentHistoryPages = {};
+    commentIndexKnownThreads = {};
+    commentHistoryRequest = null;
+    commentHistoryRequestClock++;
     pinnedTags = loadPinnedTags();
     hiddenTags = loadHiddenTags();
     commentThreads = VAULT_STATE.commentThreads && typeof VAULT_STATE.commentThreads==='object' ? VAULT_STATE.commentThreads : {};
@@ -2384,6 +2565,164 @@ window.__CHANGELOG__ = ${changelogJson};
     renderTodoHubSummary();
     if(todoHubOpen()) renderTodoHub();
     document.title = PAGE_TITLE;
+  }
+  // Apply an authoritative session-index revision from the global live bus.
+  // Replays the SESS-derived boot steps so a cold shell matches a warm boot.
+  function hydrateSessionIndex(res){
+    var listed = res && Array.isArray(res.sessions) ? res.sessions : [];
+    var hiddenSessionIds={};
+    (res&&Array.isArray(res.hiddenSessionIds)?res.hiddenSessionIds:[]).forEach(function(id){
+      id=String(id||''); if(id) hiddenSessionIds[id]=true;
+    });
+    // The cold shell starts with no scanned sessions, but the user can create
+    // optimistic/scheduled cards before indexing finishes. Preserve those
+    // local objects (and their current selection identity) while merging the
+    // authoritative scan result.
+    var prior = SESS.slice();
+    listed = listed.slice();
+    prior.forEach(function(existing){
+      var matched=-1;
+      for(var i=0;i<listed.length;i++){
+        if(sameChatSession(existing,listed[i])){ matched=i; break; }
+      }
+      if(matched<0){
+        var existingProviderId=providerSessionId(existing)||String(existing&&existing.sessionId||'');
+        if(existingProviderId&&hiddenSessionIds[existingProviderId]) return;
+        // A newer authoritative revision may legitimately remove old scanned
+        // sessions. Retain only UI-owned cards (plus the open selection) that
+        // cannot exist in the provider scan yet.
+        if(existing===cur || existing.pendingNew || existing.pendingFork || existing.pendingScheduled || (existing.clientBranchId && !existing.providerSessionId)) listed.push(existing);
+        return;
+      }
+      // Provider transcripts are rewritten throughout a live turn. Their
+      // scan-derived lastTs/sortTs therefore advance for every assistant/tool
+      // block, but those partial writes must not make the card jump or reset its
+      // visible age. Keep the live projection stable and commit the newest
+      // scanned activity once the terminal event (or inactive live snapshot)
+      // confirms that generation finished.
+      var preserveGenerating=!!existing.generating;
+      var preserveLiveActivity=preserveGenerating || listed[matched].generating===true;
+      var indexedSession=listed[matched];
+      var stableIdentity=existing.clientBranchId ? {
+        sessionId:existing.sessionId,
+        clientBranchId:existing.clientBranchId,
+        providerSessionId:existing.providerSessionId||providerSessionId(indexedSession)||indexedSession.sessionId||null
+      } : null;
+      var optimisticFields=(existing.pendingNew||existing.pendingFork||existing.pendingScheduled||existing.clientBranchId) ? {
+        title:existing.title,
+        lastPrompt:existing.lastPrompt,
+        prompts:existing.prompts
+      } : null;
+      var liveActivity=preserveLiveActivity ? {
+        lastTs:existing.lastTs,
+        sortTs:existing.sortTs,
+        ageDays:existing.ageDays,
+        generating:existing.generating,
+        generatingStartedAt:existing.generatingStartedAt,
+        lastAssistantOutputAt:existing.lastAssistantOutputAt
+      } : null;
+      if(preserveLiveActivity) deferSessionActivity(existing,indexedSession);
+      Object.assign(existing,indexedSession);
+      // A client id is the permanent UI/cache identity. Provider discovery only
+      // binds an alias; it must never re-key the optimistic transcript object.
+      if(stableIdentity){
+        existing.sessionId=stableIdentity.sessionId;
+        existing.clientBranchId=stableIdentity.clientBranchId;
+        existing.providerSessionId=stableIdentity.providerSessionId;
+      }
+      // Provider files can exist before their opening prompt is flushed. Do not
+      // let that partial authoritative record erase content already accepted and
+      // rendered locally.
+      if(optimisticFields){
+        if(!String(indexedSession.title||'').trim() && String(optimisticFields.title||'').trim()) existing.title=optimisticFields.title;
+        if(!String(indexedSession.lastPrompt||'').trim() && String(optimisticFields.lastPrompt||'').trim()) existing.lastPrompt=optimisticFields.lastPrompt;
+        if((Number(indexedSession.prompts)||0)<=0 && (Number(optimisticFields.prompts)||0)>0) existing.prompts=optimisticFields.prompts;
+      }
+      if(liveActivity){
+        existing.lastTs=liveActivity.lastTs;
+        existing.sortTs=liveActivity.sortTs;
+        existing.ageDays=liveActivity.ageDays;
+        if(preserveGenerating){
+          existing.generating=liveActivity.generating;
+          existing.generatingStartedAt=liveActivity.generatingStartedAt;
+          existing.lastAssistantOutputAt=liveActivity.lastAssistantOutputAt;
+        }
+      }
+      listed[matched]=existing;
+    });
+    var hiddenCurrent=cur&&(hiddenSessionIds[providerSessionId(cur)]||hiddenSessionIds[String(cur.sessionId||'')]) ? cur : null;
+    SESS = listed;
+    if(hiddenCurrent){
+      if(SESS.length) select(SESS[0]);
+      else { cur=null; resetOpenHeader(); }
+    }
+    if(Array.isArray(res.knownDirs)) DIRS = res.knownDirs;
+    if(typeof res.defaultNewDir==='string') DEFAULT_NEW_DIR = res.defaultNewDir;
+    if(Array.isArray(res.tags)) TAGS = res.tags;
+    applyVaultSessionTitles();
+    syncSchedules(SCHEDULES,true);
+    restoreChatGroups();
+    seedForkChatGroups();
+    // Rebuilding the session catalog also rebuilds the chat-group objects.
+    // Keep the open chat attached to its replacement group; otherwise the
+    // next index revision makes a visible fork tab group disappear until the
+    // user selects one of its sessions again.
+    activeChatGroup=cur?chatGroupForSession(cur):null;
+    sortSessions();
+    renderTagFilters();
+    renderSidebar();
+    if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);
+    // The connection handshake's live snapshot can predate the cold scan.
+    // Let the newer authoritative index win for scan-derived throughput.
+    applyStats(res);
+    SESS.forEach(function(s){
+      syncSessionQueueBadge(s);
+      drainOrphanBusEvents(s);
+      drainOrphanAnalysis(s);
+    });
+  }
+  function applySessionIndex(message){
+    if(!message || message.kind!=='session_index') return;
+    var epoch=String(message.epoch||'');
+    var revision=Math.max(0,Math.floor(Number(message.revision)||0));
+    var pending=message.pending===true;
+    if(!epoch) return;
+    if(!pending && !Array.isArray(message.sessions)){
+      var snapshotUrl=String(message.snapshotUrl||'');
+      if(!snapshotUrl) return;
+      if(epoch===SESSION_INDEX_EPOCH&&revision<SESSION_INDEX_REVISION) return;
+      var requestKey=epoch+':'+revision;
+      if(sessionIndexSnapshotRequest===requestKey) return;
+      sessionIndexSnapshotRequest=requestKey;
+      fetch(snapshotUrl).then(function(response){
+        if(!response.ok) throw new Error('session index snapshot failed');
+        return response.json();
+      }).then(function(snapshot){
+        if(sessionIndexSnapshotRequest!==requestKey) return;
+        sessionIndexSnapshotRequest='';
+        applySessionIndex(snapshot);
+      }).catch(function(){
+        if(sessionIndexSnapshotRequest===requestKey) sessionIndexSnapshotRequest='';
+      });
+      return;
+    }
+    if(epoch===SESSION_INDEX_EPOCH){
+      if(revision<SESSION_INDEX_REVISION) return;
+      if(revision===SESSION_INDEX_REVISION && pending===SESSIONS_PENDING) return;
+    } else {
+      // A server restart resets the numeric revision. The epoch makes its first
+      // authoritative handshake newer than every snapshot from the old process.
+      SESSION_INDEX_EPOCH=epoch;
+      SESSION_INDEX_REVISION=0;
+    }
+    SESSION_INDEX_REVISION=revision;
+    SESSIONS_PENDING=pending;
+    sessionIndexSnapshotRequest='';
+    if(pending){
+      renderSidebar();
+      return;
+    }
+    hydrateSessionIndex(message);
   }
   function unlockE2ee(passphrase){
     return deriveE2eeKey(passphrase).then(function(key){
@@ -2606,7 +2945,23 @@ window.__CHANGELOG__ = ${changelogJson};
   var activeChatGroup = null;
   var chatGroupClock = 0;
   var draggedChatSession = null;
+  var draggedPinnedSessionId = '';
+  var sessionCardDragToken = 0;
+  var sessionPinDragSource = null;
+  var sessionPinDragSurface = '';
+  var sessionPinDropPlaceholder = null;
+  var sessionPinDropKey = '';
+  var sessionPinDropGeometries = {sidebar:null,panel:null};
   var sessionRowClickSuppressUntil = 0;
+  // While the pointer is aiming at a session list (sidebar or the middle panel),
+  // an unsolicited live re-sort that bumps a background session to the top would
+  // slide the target row up 1–2 slots between the eye/finger commit and the press,
+  // opening the wrong (higher) session. Hold live reorders/structural renders while
+  // the pointer is over a list and flush them the moment it leaves or goes still.
+  var sessionListPointerInside = false;
+  var sessionListIdleFlushTimer = 0;
+  var sessionReorderDeferred = false;
+  var sidebarRenderDeferred = false;
   var headerTagSessionMenu = '';
   var WORK_STATS_RANGES = ['1h','3h','6h','12h','today','24h','3d','7d','15d'];
   var workStatsRange = loadWorkStatsRange();
@@ -2640,6 +2995,15 @@ window.__CHANGELOG__ = ${changelogJson};
   var orphanAnalysisMessages = {};
   var commentThreads = VAULT_STATE.commentThreads && typeof VAULT_STATE.commentThreads==='object' ? VAULT_STATE.commentThreads : {};
   var commentMessageCache = {};
+  var COMMENT_INDEX_EPOCH = '';
+  var COMMENT_INDEX_AT = 0;
+  var commentIndexSnapshotRequest = '';
+  var commentHistoryVersions = {};
+  var commentHistoryLoadedVersions = {};
+  var commentHistoryPages = {};
+  var commentIndexKnownThreads = {};
+  var commentHistoryRequestClock = 0;
+  var commentHistoryRequest = null;
   var commentGenTimer = null;
   var commentDrawerEpoch = 0;
   var commentGenStart = 0;
@@ -2687,7 +3051,40 @@ window.__CHANGELOG__ = ${changelogJson};
   var queueParked = false;
   var queueSteerable = false;
   var transcriptCache = {};
+  var transcriptCacheCosts = {};
+  var transcriptCacheBytes = 0;
+  var TRANSCRIPT_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  var TRANSCRIPT_CACHE_MAX_KEYS = 80;
+  var transcriptPages = {};
   var transcriptVersions = {};
+  function transcriptCacheCost(messages){
+    return (messages||[]).reduce(function(total,message){
+      var chars=String(message&&message.text||'').length;
+      (message&&message.tools||[]).forEach(function(tool){
+        chars+=String(tool&&tool.result||'').length;
+        try{ chars+=String(JSON.stringify(tool&&tool.input)||'').length; }catch(_err){ chars+=1024; }
+      });
+      return total+chars*2+256;
+    },1024);
+  }
+  function setTranscriptCacheEntry(key,value){
+    if(!key) return value;
+    if(Object.prototype.hasOwnProperty.call(transcriptCache,key)){
+      transcriptCacheBytes-=Number(transcriptCacheCosts[key])||0;
+      delete transcriptCache[key];
+    }
+    transcriptCache[key]=value;
+    transcriptCacheCosts[key]=transcriptCacheCost(value);
+    transcriptCacheBytes+=transcriptCacheCosts[key];
+    var keys=Object.keys(transcriptCache);
+    while(keys.length>TRANSCRIPT_CACHE_MAX_KEYS||transcriptCacheBytes>TRANSCRIPT_CACHE_MAX_BYTES){
+      var oldest=keys.shift(); if(!oldest) break;
+      transcriptCacheBytes-=Number(transcriptCacheCosts[oldest])||0;
+      delete transcriptCache[oldest]; delete transcriptCacheCosts[oldest];
+      delete transcriptBaselines[oldest]; delete transcriptVersions[oldest];
+    }
+    return value;
+  }
   function transcriptVersionKey(s){
     if(!s) return '';
     return s.sessionId ? 'sid:'+s.sessionId : transcriptCacheKey(s.file,s.vendor);
@@ -2699,6 +3096,36 @@ window.__CHANGELOG__ = ${changelogJson};
   function bumpTranscriptVersion(s){
     var key=transcriptVersionKey(s);
     if(key) transcriptVersions[key]=(Number(transcriptVersions[key])||0)+1;
+  }
+  function patchTranscriptVirtualAssistantText(s,text){
+    var state=transcriptVirtualState;
+    if(!state||cur!==s||state.version!==transcriptVersion(s)||!text) return;
+    for(var i=state.turns.length-1;i>=0;i--){
+      var entries=state.turns[i].entries||[];
+      for(var j=entries.length-1;j>=0;j--){
+        var entry=entries[j];
+        if(entry.kind==='msg'&&entry.role==='assistant'){
+          entry.text=String(entry.text||'')+String(text);
+          state.turns[i].estimate=Math.max(52,entries.reduce(function(total,value){ return total+transcriptVirtualEntryEstimate(value); },0));
+          return;
+        }
+        if(entry.kind==='msg'&&entry.role==='user') return;
+      }
+    }
+  }
+  function patchTranscriptVirtualToolResult(s,id,text,isError){
+    var state=transcriptVirtualState;
+    if(!state||cur!==s||state.version!==transcriptVersion(s)) return;
+    for(var i=state.turns.length-1;i>=0;i--){
+      var entries=state.turns[i].entries||[];
+      for(var j=entries.length-1;j>=0;j--){
+        var entry=entries[j];
+        if(entry.kind!=='tool'||String(entry.tool&&entry.tool.id||'')!==String(id||'')) continue;
+        entry.tool.result=text; entry.tool.isError=!!isError;
+        state.turns[i].estimate=Math.max(52,entries.reduce(function(total,value){ return total+transcriptVirtualEntryEstimate(value); },0));
+        return;
+      }
+    }
   }
   function objectCacheSet(store,key,value,maxEntries){
     if(!key) return value;
@@ -2713,6 +3140,8 @@ window.__CHANGELOG__ = ${changelogJson};
   // can distinguish a complete transcript from a useful-but-partial live cache.
   var transcriptBaselines = {};
   var transcriptLoads = {};
+  var transcriptForkHistoryLoads = {};
+  var pinHistoryLoads = {};
   var transcriptSelectionGeneration = 0;
   var draftAttachments = [];
   var draftPinReferences = [];
@@ -2739,6 +3168,17 @@ window.__CHANGELOG__ = ${changelogJson};
   var transcriptVirtualMeasureRaf = 0;
   var transcriptVirtualResizeObserver = null;
   var transcriptTurnHeightCaches = {};
+  var transcriptVirtualModelCaches = {};
+  // A tab switch should exchange viewport ownership, not rebuild an unchanged
+  // transcript. Keep a small, weighted LRU of connected-but-hidden panes. Each
+  // pane owns the DOM window and the virtual layout state that produced it; the
+  // canonical transcript cache remains the source of truth and invalidates a
+  // pane whenever its version changes.
+  var TRANSCRIPT_PANE_CACHE_MAX_ENTRIES = 4;
+  var TRANSCRIPT_PANE_CACHE_MAX_COST = 16 * 1024 * 1024;
+  var transcriptPaneCache = new Map();
+  var transcriptPaneCacheCost = 0;
+  var bindTranscriptFloatingActions = function(){};
   // Catch-up dedup: when you (re)open a session whose turn is still live, the
   // server replays the run's buffered events on top of the JSONL/rollout history
   // we just rendered — re-adding assistant blocks that are already on screen
@@ -3264,6 +3704,7 @@ window.__CHANGELOG__ = ${changelogJson};
     host.innerHTML='';
     actions.forEach(function(action){
       var button=el('button','scheduleaction'+(action.primary?' primary':'')+(action.id==='fork'?' splitbtn':''),action.label||action.id); button.type='button'; button.disabled=!!(state&&state.busy);
+      setActionVendor(button,(state&&state.button&&state.button.getAttribute('data-vendor'))||'');
       if(action.id==='fork') setForkButtonLabel(button,action.label||'Fork');
       button.onclick=function(){ submitScheduleAction(action); };
       host.appendChild(button);
@@ -3279,6 +3720,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var selected=actions.some(function(action){ return action.id===defaultActionId; }) ? defaultActionId : actions[0].id;
     var at=Number(initialAt)||defaultScheduleAt(), initialDate=new Date(at);
     schedulePopoverState={button:button,actions:actions,defaultActionId:selected,busy:false,selectedAt:at,calendarMonth:new Date(initialDate.getFullYear(),initialDate.getMonth(),1).getTime()};
+    setActionVendor(pop,button.getAttribute('data-vendor'));
     button.setAttribute('aria-expanded','true');
     toggle.setAttribute('aria-expanded','false'); if(picker) picker.hidden=true; syncScheduleDateTime();
     if(msg) msg.textContent='';
@@ -3444,7 +3886,6 @@ window.__CHANGELOG__ = ${changelogJson};
       flushPendingSessionTags(target); syncSchedules(res.schedules||[]); drainOrphanBusEvents(target);
       if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);
       syncOpenHeader(); refreshForkButton(); refreshRunConfigButton(); renderSidebar(); renderQueue();
-      warmTranscriptCache(target);
     }).catch(function(error){
       var res=error&&error.response;
       target.materializingScheduled=false; target._awaitingLiveStart=false; target._awaitingLiveStartAt=null;
@@ -3464,8 +3905,8 @@ window.__CHANGELOG__ = ${changelogJson};
     var input=byId('commentInput'), text=String(input&&input.value||'').trim();
     if(!text) throw new Error('Write a comment first.');
     ensureCommentAnchorPinned();
-    var target=cur, context=commentContextBeforeAnchor(target);
-    var payload={threadId:commentDrawerState.threadId||'',parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,text:text,contextMessages:context,createdWhileGenerating:!!(turnActive&&commentDrawerState.anchorMsg&&(commentDrawerState.anchorMsg===assistantEl||commentDrawerState.anchorMsg.hasAttribute('data-tool-pending'))),model:target.model||undefined,effort:target.effort||undefined,speed:target.speed||undefined};
+    var target=cur, thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId], config=commentRunConfig(thread,target), context=commentContextBeforeAnchor(target);
+    var payload={threadId:commentDrawerState.threadId||'',parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,text:text,contextMessages:context,createdWhileGenerating:!!(turnActive&&commentDrawerState.anchorMsg&&(commentDrawerState.anchorMsg===assistantEl||commentDrawerState.anchorMsg.hasAttribute('data-tool-pending'))),vendor:config.vendor,model:config.model||undefined,effort:config.effort||undefined,speed:config.speed||undefined};
     return createSchedule('comment',runAt,payload).then(function(res){
       var item=res.item, p=item&&item.payload;
       if(p&&p.threadId){
@@ -3497,6 +3938,8 @@ window.__CHANGELOG__ = ${changelogJson};
         var remains=scheduledCommentsForThread(item.payload.threadId).length>0;
         if(thread&&!thread.providerSessionId&&!remains){
           delete commentThreads[thread.id]; VAULT_STATE.commentThreads=commentThreads;
+          delete commentMessageCache[thread.id];
+          delete commentHistoryPages[thread.id];
           if(commentDrawerState.threadId===thread.id){ commentDrawerState.threadId=''; syncCommentPromoteButton(); }
           syncAllMessageCommentStates(); syncAllSessionCommentBadges(); renderPinTray();
         }
@@ -3516,9 +3959,10 @@ window.__CHANGELOG__ = ${changelogJson};
     var tx=el('div','qtext',text||'(scheduled session)'); tx.title=text; row.appendChild(tx);
     var tm=el('span','qtime',scheduleDateLabel(item.runAt));
     tm.title=new Date(item.runAt).toLocaleString(); row.appendChild(tm);
-    var run=el('button','qdispatch qsend','run now'); run.type='button'; run.disabled=item.status==='claimed'; run.title='Run this scheduled action now'; run.onclick=function(){ runScheduledNow(item); }; row.appendChild(run);
+    var actionVendor=String((item.payload&&item.payload.vendor)||(cur&&currentForkDefaults().vendor)||(cur&&cur.vendor)||'');
+    var run=el('button','qdispatch qsend','run now'); run.type='button'; setActionVendor(run,actionVendor); run.disabled=item.status==='claimed'; run.title='Run this scheduled action now'; run.onclick=function(){ runScheduledNow(item); }; row.appendChild(run);
     var contentEdit=el('button','qaction qedit'); setIconButton(contentEdit,'edit','Edit scheduled content'); contentEdit.disabled=item.status==='claimed'; contentEdit.onclick=function(){ editingScheduleId=item.id; renderQueue(); renderCommentQueue(); }; row.appendChild(contentEdit);
-    var reschedule=el('button','qaction qschedule'); setIconButton(reschedule,'clock','Reschedule'); reschedule.disabled=item.status==='claimed'; reschedule.onclick=function(){ editScheduled(item,reschedule); }; row.appendChild(reschedule);
+    var reschedule=el('button','qaction qschedule'); setActionVendor(reschedule,actionVendor); setIconButton(reschedule,'clock','Reschedule'); reschedule.disabled=item.status==='claimed'; reschedule.onclick=function(){ editScheduled(item,reschedule); }; row.appendChild(reschedule);
     var del=el('button','qaction qdel'); setIconButton(del,'delete','Cancel scheduled action'); del.disabled=item.status==='claimed'; del.onclick=function(){ deleteScheduled(item); }; row.appendChild(del);
     if(item.error) row.setAttribute('data-hover-tip',item.error);
     return row;
@@ -3533,7 +3977,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(references.length) box.appendChild(el('span','qtag',references.length+' pin'+(references.length>1?'s':'')));
     var input=el('input','qeditta'); input.type='text'; input.value=current; box.appendChild(input);
     var time=el('span','qtime',scheduleDateLabel(item.runAt)); time.title=new Date(item.runAt).toLocaleString(); box.appendChild(time);
-    var save=el('button','qdispatch qsend','save'); save.title='Save this scheduled content'; box.appendChild(save);
+    var save=el('button','qdispatch qsend','save'); setActionVendor(save,payload.vendor||(cur&&currentForkDefaults().vendor)||(cur&&cur.vendor)); save.title='Save this scheduled content'; box.appendChild(save);
     var cancel=editCancelButton('Cancel edit (Esc)'); box.appendChild(cancel);
     var del=el('button','qaction qdel'); setIconButton(del,'delete','Cancel scheduled action'); box.appendChild(del);
     function closeEditor(){ editingScheduleId=''; renderQueue(); renderCommentQueue(); }
@@ -3558,7 +4002,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var p=item.payload||{}, client=String(p.clientSessionId||'');
     if(!client) return null;
     var isFork=p.mode==='fork', parent=isFork?String(p.parentSessionId||''):'';
-    var session={vendor:p.vendor||'claude',model:p.model||'',effort:p.effort||'',speed:p.speed||'',sessionId:client,clientBranchId:client,providerSessionId:null,forkParentId:parent||null,pendingNew:true,pendingScheduled:true,scheduleRunId:item.id,scheduledAt:item.runAt,title:isFork?forkTitleFromSession(findSessionById(parent),p.text):p.text||'(scheduled session)',lastPrompt:p.text||null,cwd:p.cwd||'',project:basename(p.cwd||''),file:'',ageDays:0,lastTs:item.createdAt||Date.now(),prompts:1,brief:null,state:null,seen:true,tags:Array.isArray(p.tags)?p.tags.slice():[],_pendingSessionTags:Array.isArray(p.tags)?p.tags.slice():[],generating:false,generatingStartedAt:null};
+    var session={vendor:p.vendor||'claude',model:p.model||'',effort:p.effort||'',speed:p.speed||'',sessionId:client,clientBranchId:client,providerSessionId:null,forkParentId:parent||null,pendingNew:true,pendingScheduled:true,scheduleRunId:item.id,scheduledAt:item.runAt,title:isFork?forkTitleFromSession(findSessionById(parent),p.text):p.text||'(scheduled session)',lastPrompt:p.text||null,cwd:p.cwd||'',tabTitle:String(p.tabTitle||''),project:basename(p.cwd||''),file:'',ageDays:0,lastTs:item.createdAt||Date.now(),prompts:1,brief:null,state:null,seen:true,tags:Array.isArray(p.tags)?p.tags.slice():[],_pendingSessionTags:Array.isArray(p.tags)?p.tags.slice():[],generating:false,generatingStartedAt:null};
     projectScheduledSessionTranscript(session,item);
     return session;
   }
@@ -3587,7 +4031,6 @@ window.__CHANGELOG__ = ${changelogJson};
           if(item.payload.mode==='fork'&&item.payload.parentSessionId){ synthetic.forkParentId=String(item.payload.parentSessionId); rememberForkRelation(dispatched,synthetic.forkParentId); }
           synthetic.pendingNew=false; synthetic.pendingScheduled=false; synthetic.scheduleRunId=null;
           synthetic.generating=true; synthetic.generatingStartedAt=synthetic.generatingStartedAt||Date.now();
-          warmTranscriptCache(synthetic);
         }
         return;
       }
@@ -3814,10 +4257,10 @@ window.__CHANGELOG__ = ${changelogJson};
       var isImage=att.kind==='image';
       var card=document.createElement(isImage ? 'a' : 'div');
       card.className='attcard '+(att.kind==='image' ? 'image' : att.kind);
-      card.title='Open '+(att.name||'attachment');
       if(isImage){
         card.href=href;
         card.setAttribute('role', 'button');
+        card.setAttribute('aria-label', 'Open '+(att.name||'image'));
         card.onclick=function(ev){ ev.preventDefault(); openImagePreview(href, att.name||'image'); };
         var img=document.createElement('img');
         img.src=href;
@@ -3827,7 +4270,6 @@ window.__CHANGELOG__ = ${changelogJson};
         var meta=el('div','attmeta');
         meta.appendChild(el('span','kind','img'));
         var name=el('span','name',att.name||'image');
-        name.title=att.name||'image';
         meta.appendChild(name);
         card.appendChild(meta);
       } else {
@@ -4909,18 +5351,20 @@ window.__CHANGELOG__ = ${changelogJson};
   function newGoalVendor(){ return String((byId('nvendor')||{}).value||'').trim().toLowerCase(); }
   function newGoalSupported(){
     var vendor=newGoalVendor(),info=vendorInfo(vendor);
-    return !!(info&&info.available&&info.chat!==false&&(vendor==='codex'||vendor==='claude'));
+    return !!(info&&info.available&&info.chat!==false&&nativeVendorCapability(vendor,'goal'));
   }
   function refreshNewGoalToggle(){
     var button=byId('newGoalToggle'); if(!button) return;
     var vendor=newGoalVendor(),supported=newGoalSupported();
-    if(vendor==='codex'||vendor==='claude') button.setAttribute('data-vendor',vendor);
+    syncNewActionVendors();
+    if(nativeVendorCapability(vendor,'goal')) button.setAttribute('data-vendor',vendor);
     else button.removeAttribute('data-vendor');
     if(!supported) newGoalArmed=false;
+    button.hidden=!supported;
     button.disabled=newSessionPending||!supported;
     button.classList.toggle('armed',newGoalArmed);
     button.setAttribute('aria-pressed',newGoalArmed?'true':'false');
-    button.title=!supported ? (vendor==='cursor'?'Cursor does not support Goal':'Select an available Codex or Claude vendor')
+    button.title=!supported ? (vendorCapabilityFallback(vendor,'goal')||'Select a vendor with native Goal support')
       : newGoalArmed ? 'Goal armed — the first message becomes the objective'
       : 'Use the first message as a Goal';
     var input=byId('np');
@@ -4940,20 +5384,21 @@ window.__CHANGELOG__ = ${changelogJson};
   function goalVendor(){ return String((currentForkDefaults()).vendor||'').toLowerCase(); }
   function goalSupported(){
     var vendor=goalVendor();
-    return !!(cur && providerSessionId(cur) && !cur.pendingFork && !composerVendorChanged() && (vendor==='codex'||vendor==='claude'));
+    return !!(cur && providerSessionId(cur) && !cur.pendingFork && !composerVendorChanged() && nativeVendorCapability(vendor,'goal'));
   }
   function refreshGoalToggle(){
     var button=byId('goalToggle'); if(!button) return;
     var vendor=goalVendor(),goal=cur&&goalForSession(cur),active=goalIsActive(goal),supported=goalSupported();
-    if(vendor==='codex'||vendor==='claude') button.setAttribute('data-vendor',vendor);
+    if(nativeVendorCapability(vendor,'goal')) button.setAttribute('data-vendor',vendor);
     else button.removeAttribute('data-vendor');
     if(!supported) goalArmed=false;
+    button.hidden=!supported;
     button.disabled=!supported;
     button.classList.toggle('armed',!!goalArmed&&!active);
     button.classList.toggle('active',active);
     button.classList.toggle('pursuing',turnActive&&(active||goalArmed));
     button.setAttribute('aria-pressed',(goalArmed||active)?'true':'false');
-    button.title=!supported ? (vendor==='cursor'?'Cursor does not support Goal':'Select a settled Codex or Claude session')
+    button.title=!supported ? (vendorCapabilityFallback(vendor,'goal')||'Select a settled session with native Goal support')
       : active ? (turnActive?'Goal in pursuit — click to clear':'Clear the active Goal')
       : goalArmed ? (turnActive?'Goal armed — the next queued message becomes the objective':'Goal armed — the next message becomes the objective')
       : 'Use the next message as a Goal';
@@ -4962,7 +5407,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function syncGoalFromServer(s){
     var id=providerSessionId(s),vendor=String((s&&s.vendor)||'').toLowerCase(),generation=++goalSyncGeneration;
-    if(!id || (vendor!=='codex'&&vendor!=='claude')){ if(cur===s) refreshGoalToggle(); return; }
+    if(!id || !nativeVendorCapability(vendor,'goal')){ if(cur===s) refreshGoalToggle(); return; }
     fetch('/chat/goal?session='+encodeURIComponent(id)+'&vendor='+encodeURIComponent(vendor))
       .then(function(r){ return r.json(); })
       .then(function(res){
@@ -5085,6 +5530,32 @@ window.__CHANGELOG__ = ${changelogJson};
       s.ageDays = Math.floor(Math.max(0, Date.now()-n)/86400000);
     }
   }
+  function deferSessionActivity(s, next){
+    if(!s || !next) return false;
+    var changed=false;
+    var nextLast=Number(next.lastTs);
+    var nextSort=Number(next.sortTs!=null ? next.sortTs : next.lastTs);
+    if(isFinite(nextLast) && nextLast>Math.max(Number(s.lastTs)||0,Number(s._deferredActivityLastTs)||0)){
+      s._deferredActivityLastTs=nextLast;
+      changed=true;
+    }
+    if(isFinite(nextSort) && nextSort>Math.max(Number(s.sortTs!=null?s.sortTs:s.lastTs)||0,Number(s._deferredActivitySortTs)||0)){
+      s._deferredActivitySortTs=nextSort;
+      changed=true;
+    }
+    return changed;
+  }
+  function commitDeferredSessionActivity(s){
+    if(!s) return false;
+    var last=Number(s._deferredActivityLastTs)||0;
+    var sort=Number(s._deferredActivitySortTs)||0;
+    delete s._deferredActivityLastTs;
+    delete s._deferredActivitySortTs;
+    if(!last && !sort) return false;
+    if(last) syncActivityLastTs(s,last);
+    if(sort||last) syncActivitySortTs(s,sort||last);
+    return true;
+  }
   function patchSessionView(next, options){
     if(!next || !next.sessionId) return;
     options=options||{};
@@ -5115,9 +5586,11 @@ window.__CHANGELOG__ = ${changelogJson};
       // Latest age jumps back even though the session activity correctly says now.
       if(incomingLatest>=currentLatest) s.userPromptTs=incomingPromptTs;
     }
-    if(next.lastTs!==undefined) syncActivityLastTs(s, next.lastTs);
+    var deferLiveActivity=!!s.generating && (next.lastTs!==undefined || next.sortTs!==undefined);
+    if(deferLiveActivity) deferSessionActivity(s,next);
+    else if(next.lastTs!==undefined) syncActivityLastTs(s, next.lastTs);
     else if(next.ageDays!==undefined && s.lastTs==null) s.ageDays=next.ageDays;
-    if(!preserveRecentOrder){
+    if(!preserveRecentOrder && !deferLiveActivity){
       syncActivitySortTs(s, next.sortTs!=null ? next.sortTs : next.lastTs);
       sortSessions();
     }
@@ -5382,6 +5855,9 @@ window.__CHANGELOG__ = ${changelogJson};
         attachments: cloneAttachments(m && m.attachments),
         references: clonePinReferences(m && m.references),
         tools: Array.isArray(m && m.tools) ? m.tools.map(function(t){ return Object.assign({}, t); }) : [],
+        historyId: String(m&&m.historyId||'')||undefined,
+        historyOrdinal: Number.isFinite(Number(m&&m.historyOrdinal)) ? Number(m.historyOrdinal) : undefined,
+        historyIndex: Number.isFinite(Number(m&&m.historyIndex)) ? Number(m.historyIndex) : undefined,
         ts: ts || undefined
       };
     }) : [];
@@ -5411,6 +5887,10 @@ window.__CHANGELOG__ = ${changelogJson};
       name:String(meta.name||block.getAttribute('data-tool-name')||'tool'),
       input:Object.prototype.hasOwnProperty.call(meta,'input') ? meta.input : null
     };
+    var historyId=String(block.getAttribute('data-history-id')||'');
+    var historyIndexRaw=block.getAttribute('data-history-index'),historyIndex=historyIndexRaw==null?NaN:Number(historyIndexRaw);
+    if(historyId) tool.historyId=historyId;
+    if(Number.isFinite(historyIndex)) tool.historyIndex=historyIndex;
     // Completion is presence-based: an exec with an empty output is still
     // finished. Omitting result here makes addTool() render the copied call as
     // pending forever in a message-level fork.
@@ -5447,16 +5927,94 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!msgEl) return null;
     var domHistory=domHistoryBeforeMsg(msgEl);
     if(domHistory) return cloneTranscriptMsgs(domHistory);
-    var idx=msgIndexFromKey(msgEl.getAttribute('data-msg-key'));
-    if(idx<0) return null;
     var history=cur ? (cachedTranscriptFor(cur) || []) : [];
-    if(history.length>=idx) return cloneTranscriptMsgs(history.slice(0, idx));
+    var historyId=String(msgEl.getAttribute('data-history-id')||''),idx=-1;
+    if(historyId) idx=history.findIndex(function(message){ return String(message&&message.historyId||'')===historyId; });
+    if(idx<0){
+      var rawHistoryIndex=msgEl.getAttribute('data-history-index'),historyIndex=rawHistoryIndex==null?NaN:Number(rawHistoryIndex);
+      if(Number.isFinite(historyIndex)) idx=history.findIndex(function(message){ return Number(message&&message.historyIndex)===historyIndex; });
+    }
+    if(idx<0){
+      var key=msgEl.getAttribute('data-msg-key'),ordinal=msgIndexFromKey(key),role=String(key||'').split(':')[0];
+      idx=history.findIndex(function(message){ return Number(message&&message.historyOrdinal)===ordinal && (!role || String(message&&message.role||'')===role); });
+      // Older transcript responses did not carry stable history metadata. Their
+      // message ordinals were contiguous, so retain that legacy fallback only
+      // when the ordinal is actually present in the cache.
+      if(idx<0 && ordinal>=0 && ordinal<history.length) idx=ordinal;
+    }
+    if(idx<0){
+      // Live-streamed and just-sent rows are appended via addMsg without the
+      // server's stable history metadata (historyId/index/ordinal), and their
+      // running-counter key never lines up with the absolute ordinals in a
+      // paged/virtualized cache. Locate the row by its rendered content instead
+      // — the same content-identity the server hashes into historyId — and
+      // disambiguate repeats by how many identical rows precede it in the DOM.
+      var wantRole=msgEl.classList&&msgEl.classList.contains('user')?'user':(msgEl.classList&&msgEl.classList.contains('assistant')?'assistant':String(msgEl.getAttribute('data-msg-key')||'').split(':')[0]);
+      var wantText=previewTextFromMsg(msgEl);
+      if(wantText){
+        var skip=0,contentHost=byId('msgs');
+        if(contentHost){
+          var contentRows=contentHost.querySelectorAll('.msg.user,.msg.assistant');
+          for(var r=0;r<contentRows.length && contentRows[r]!==msgEl;r++){
+            var rowRole=contentRows[r].classList.contains('user')?'user':'assistant';
+            if(rowRole===wantRole && previewTextFromMsg(contentRows[r])===wantText) skip++;
+          }
+        }
+        for(var h=0;h<history.length;h++){
+          if(String(history[h]&&history[h].role||'')!==wantRole) continue;
+          if(String(history[h]&&history[h].text||'').replace(/\\s+/g,' ').trim()!==wantText) continue;
+          if(skip>0){ skip--; continue; }
+          idx=h; break;
+        }
+      }
+    }
+    if(idx>=0) return cloneTranscriptMsgs(history.slice(0, idx));
     return null;
+  }
+  function transcriptHasEarlierHistory(s){
+    var page=transcriptPageFor(s);
+    return !!(page && page.hasMore);
+  }
+  // A virtualized transcript renders only a small window, while the initial
+  // history request is paged. Editing a message needs every preceding message
+  // as the fork context, so fill the older pages before deciding it is missing.
+  function loadCompleteTranscriptForFork(s){
+    if(!s) return Promise.resolve(null);
+    var loadKey=transcriptLoadKey(s)+'\\ncomplete-fork-history';
+    if(transcriptForkHistoryLoads[loadKey]) return transcriptForkHistoryLoads[loadKey];
+    function collect(){
+      var page=transcriptPageFor(s),history=cachedTranscriptFor(s)||[];
+      if(!page||!page.hasMore) return Promise.resolve(history);
+      var expectedVersion=String(page.version||''),seenBefore={};
+      function next(before,merged){
+        var cursor=String(before==null?'':before);
+        if(!cursor || seenBefore[cursor]) return Promise.resolve(null);
+        seenBefore[cursor]=true;
+        return fetch(transcriptHistoryUrl(s,before)).then(function(r){ return r.json(); }).then(function(response){
+          var parsed=parseTranscriptHistoryResponse(response),nextPage=parsed.page||{};
+          if(expectedVersion&&nextPage.version&&String(nextPage.version)!==expectedVersion) return null;
+          var combined=mergeTranscriptHistoryMessages(merged,parsed.messages);
+          if(nextPage.hasMore) return next(nextPage.before,combined);
+          return combined;
+        });
+      }
+      return next(page.before,history).then(function(complete){
+        // Do not replace a live SSE cache with a potentially older snapshot.
+        if(complete && !s.generating) cacheTranscript(s,complete);
+        return complete;
+      });
+    }
+    var baselineLoad=transcriptLoads[transcriptLoadKey(s)];
+    var task=(baselineLoad||Promise.resolve()).then(collect).catch(function(){ return null; }).finally(function(){
+      if(transcriptForkHistoryLoads[loadKey]===task) delete transcriptForkHistoryLoads[loadKey];
+    });
+    transcriptForkHistoryLoads[loadKey]=task;
+    return task;
   }
   function cacheTranscript(s, msgs){
     var copy=cloneTranscriptMsgs(msgs);
-    if(s && s.sessionId) objectCacheSet(transcriptCache,'sid:'+s.sessionId,copy,160);
-    if(s && s.file) objectCacheSet(transcriptCache,transcriptCacheKey(s.file, s.vendor),copy,160);
+    if(s && s.sessionId) setTranscriptCacheEntry('sid:'+s.sessionId,copy);
+    if(s && s.file) setTranscriptCacheEntry(transcriptCacheKey(s.file, s.vendor),copy);
     bumpTranscriptVersion(s);
     markTranscriptBaseline(s);
     return copy;
@@ -5468,11 +6026,11 @@ window.__CHANGELOG__ = ${changelogJson};
     var state=transcriptCache[sidKey] || (fileKey && transcriptCache[fileKey]);
     if(!state){
       state = [];
-      objectCacheSet(transcriptCache,sidKey,state,160);
+      setTranscriptCacheEntry(sidKey,state);
     } else {
-      objectCacheSet(transcriptCache,sidKey,state,160);
+      setTranscriptCacheEntry(sidKey,state);
     }
-    if(fileKey) objectCacheSet(transcriptCache,fileKey,state,160);
+    if(fileKey) setTranscriptCacheEntry(fileKey,state);
     return state;
   }
   function ensureAssistantTranscriptMsg(s, forceNew){
@@ -5499,8 +6057,13 @@ window.__CHANGELOG__ = ${changelogJson};
     // renders cached "final text + tools", placing shell/exec blocks at the bottom
     // until the slower transcript fetch corrects it.
     var afterTool = !!(last && last.role==='assistant' && Array.isArray(last.tools) && last.tools.length);
+    var createsMessage=!!(!last||last.role!=='assistant'||afterTool);
     var msg=ensureAssistantTranscriptMsg(s, afterTool);
-    if(msg){ msg.text = String(msg.text||'') + String(text); bumpTranscriptVersion(s); }
+    if(msg){
+      msg.text = String(msg.text||'') + String(text);
+      if(createsMessage) bumpTranscriptVersion(s);
+      else patchTranscriptVirtualAssistantText(s,text);
+    }
   }
   function cacheTranscriptToolUse(s, tc){
     if(!tc) return;
@@ -5525,7 +6088,7 @@ window.__CHANGELOG__ = ${changelogJson};
         if((tools[j].id||null)===(id||null)){
           tools[j].result = text;
           tools[j].isError = !!isError;
-          bumpTranscriptVersion(s);
+          patchTranscriptVirtualToolResult(s,id,text,isError);
           return;
         }
       }
@@ -5537,6 +6100,12 @@ window.__CHANGELOG__ = ${changelogJson};
     var key=transcriptCacheKey(s.file, s.vendor);
     if(key && transcriptCache[key]) return cloneTranscriptMsgs(transcriptCache[key]);
     return null;
+  }
+  function transcriptStateRef(s){
+    if(!s) return null;
+    if(s.sessionId&&transcriptCache['sid:'+s.sessionId]) return transcriptCache['sid:'+s.sessionId];
+    var key=transcriptCacheKey(s.file,s.vendor);
+    return key&&transcriptCache[key]||null;
   }
   function sameTranscript(a, b){
     return JSON.stringify(a||[])===JSON.stringify(b||[]);
@@ -5694,7 +6263,7 @@ window.__CHANGELOG__ = ${changelogJson};
         afterMsgs:Math.min(entry.afterMsgs,msgs.length)
       };
     });
-    var turns=[],current=null,msgIndex=0,toolIndex=0,blockCount=0,blockOrder=0,keyToTurn={},keyOrder={},firstUserKey='',lastUserKey='';
+    var turns=[],current=null,msgIndex=0,toolIndex=0,blockCount=0,blockOrder=0,keyToTurn={},keyOrder={},historyIdToKey={},keyToHistoryId={},firstUserKey='',lastUserKey='';
     function finishTurn(){
       if(!current||!current.entries.length) return;
       current.estimate=Math.max(52,current.entries.reduce(function(total,entry){ return total+transcriptVirtualEntryEstimate(entry); },0));
@@ -5721,49 +6290,75 @@ window.__CHANGELOG__ = ${changelogJson};
       if(i>=msgs.length) continue;
       var message=msgs[i]||{};
       if(message.text){
-        var key=String(message.role||'assistant')+':'+msgIndex;
-        addEntry({kind:'msg',key:key,ordinal:msgIndex++,role:message.role||'assistant',text:message.text,attachments:message.attachments,references:message.references});
+        var historyMessageOrdinal=Number(message.historyOrdinal);
+        var messageOrdinal=Number.isFinite(historyMessageOrdinal)?historyMessageOrdinal:msgIndex;
+        var key=String(message.role||'assistant')+':'+messageOrdinal;
+        addEntry({kind:'msg',key:key,ordinal:messageOrdinal,role:message.role||'assistant',text:message.text,attachments:message.attachments,references:message.references,historyId:message.historyId,historyIndex:message.historyIndex});
+        msgIndex=Math.max(msgIndex,messageOrdinal+1);
       }
       (message.tools||[]).forEach(function(tool){
-        var ordinal=toolIndex++,key=transcriptVirtualToolKey(tool,ordinal);
-        addEntry({kind:'tool',key:key,ordinal:ordinal,tool:tool});
+        var historyToolOrdinal=Number(tool&&tool.historyOrdinal);
+        var ordinal=Number.isFinite(historyToolOrdinal)?historyToolOrdinal:toolIndex;
+        toolIndex=Math.max(toolIndex,ordinal+1);
+        var key=transcriptVirtualToolKey(tool,ordinal);
+        addEntry({kind:'tool',key:key,ordinal:ordinal,tool:tool,historyId:tool&&tool.historyId,historyIndex:tool&&tool.historyIndex});
       });
     }
     finishTurn();
     turns.forEach(function(turn,index){
       turn.index=index;
-      turn.entries.forEach(function(entry){ keyToTurn[entry.key]=index; keyOrder[entry.key]=blockOrder++; });
+      turn.entries.forEach(function(entry){
+        keyToTurn[entry.key]=index; keyOrder[entry.key]=blockOrder++;
+        if(entry.historyId){ historyIdToKey[entry.historyId]=entry.key; keyToHistoryId[entry.key]=entry.historyId; }
+      });
     });
-    return {turns:turns,blockCount:blockCount,msgCount:msgIndex,toolCount:toolIndex,keyToTurn:keyToTurn,keyOrder:keyOrder,firstUserKey:firstUserKey,lastUserKey:lastUserKey};
+    return {turns:turns,blockCount:blockCount,msgCount:msgIndex,toolCount:toolIndex,keyToTurn:keyToTurn,keyOrder:keyOrder,historyIdToKey:historyIdToKey,keyToHistoryId:keyToHistoryId,firstUserKey:firstUserKey,lastUserKey:lastUserKey};
+  }
+  function transcriptVirtualModelFor(msgs,sessionId){
+    var s=sessionId&&findSessionById(sessionId)||cur;
+    var pending=sessionId&&localPendingMsgs[sessionId];
+    if(!s||pending&&pending.length) return buildTranscriptVirtualModel(msgs,sessionId);
+    var key=transcriptVirtualKey(sessionId),stamp=transcriptPaneStamp(s),cached=key&&transcriptVirtualModelCaches[key];
+    if(cached&&cached.stamp===stamp) return cached.model;
+    var model=buildTranscriptVirtualModel(msgs,sessionId);
+    if(key) objectCacheSet(transcriptVirtualModelCaches,key,{stamp:stamp,model:model},80);
+    return model;
   }
   function transcriptTurnHeightCache(key){
     var cache=transcriptTurnHeightCaches[key];
     if(!cache) cache=objectCacheSet(transcriptTurnHeightCaches,key,{},80);
     return cache;
   }
-  function recalculateTranscriptOffsets(state){
-    var offsets=[0],total=0,folded=cur?loadFoldedTurns(cur):[];
-    for(var i=0;i<state.turns.length;i++){
+  function recalculateTranscriptOffsetsFrom(state,start){
+    start=Math.max(0,Math.min(Number(start)||0,state.turns.length));
+    var offsets=state.offsets&&state.offsets.length===state.turns.length+1?state.offsets:[0];
+    if(start&&offsets.length<=start) start=0;
+    var total=start?(offsets[start]||0):0,folded=cur?loadFoldedTurns(cur):[];
+    if(!start) offsets=[0];
+    for(var i=start;i<state.turns.length;i++){
       var turn=state.turns[i],height=state.heights[turn.key];
       if(folded.indexOf(turn.key)>=0) height=52;
       if(!(height>0)) height=turn.estimate||180;
       total+=height;
-      offsets.push(total);
+      offsets[i+1]=total;
     }
+    offsets.length=state.turns.length+1;
     state.offsets=offsets; state.totalHeight=total;
   }
+  function recalculateTranscriptOffsets(state){ recalculateTranscriptOffsetsFrom(state,0); }
   function transcriptOffsetIndex(offsets,pixel){
     if(offsets.length<2) return 0;
     var low=0,high=offsets.length-2;
     while(low<high){ var mid=Math.floor((low+high)/2); if(offsets[mid+1]<pixel) low=mid+1; else high=mid; }
     return low;
   }
-  function transcriptVirtualRange(state,top,height,forceIndex){
+  function transcriptVirtualRange(state,top,height,forceIndex,compact){
     var count=state.turns.length;
     if(!count) return {start:0,end:0};
     var start,end;
     if(forceIndex!=null){
-      start=Math.max(0,forceIndex-3); end=Math.min(count,forceIndex+4);
+      start=Math.max(0,forceIndex-(compact?1:3)); end=Math.min(count,forceIndex+(compact?2:4));
+      if(compact) return {start:start,end:end};
     } else {
       start=transcriptOffsetIndex(state.offsets,Math.max(0,top-TRANSCRIPT_VIRTUAL_OVERSCAN_PX));
       end=Math.min(count,transcriptOffsetIndex(state.offsets,top+Math.max(height,600)+TRANSCRIPT_VIRTUAL_OVERSCAN_PX)+1);
@@ -5778,13 +6373,46 @@ window.__CHANGELOG__ = ${changelogJson};
     if(entry.kind==='tool'){
       toolOrdinal=entry.ordinal;
       var tool=addTool(entry.tool);
-      if(tool) tool.setAttribute('data-msg-key',entry.key);
+      if(tool){
+        tool.setAttribute('data-msg-key',entry.key);
+        if(entry.historyId) tool.setAttribute('data-history-id',entry.historyId);
+        if(Number.isFinite(Number(entry.historyIndex))) tool.setAttribute('data-history-index',String(entry.historyIndex));
+      }
       return tool;
     }
     msgOrdinal=entry.ordinal;
     var message=addMsg(entry.role,entry.text,true,entry.attachments,entry.references);
-    if(message) message.setAttribute('data-msg-key',entry.key);
+    if(message){
+      message.setAttribute('data-msg-key',entry.key);
+      if(entry.historyId) message.setAttribute('data-history-id',entry.historyId);
+      if(Number.isFinite(Number(entry.historyIndex))) message.setAttribute('data-history-index',String(entry.historyIndex));
+    }
     return message;
+  }
+  function transcriptTurnRenderSignature(turn){
+    return (turn.entries||[]).map(function(entry){
+      if(entry.kind==='tool'){
+        var tool=entry.tool||{},payload=String(tool.name||'')+'\\n'+fmt(tool.input)+'\\n'+String(tool.result||'')+'\\n'+String(!!tool.isError);
+        return entry.key+':'+String(entry.historyId||'')+':'+payload.length+':'+hashText(payload);
+      }
+      var text=String(entry.text||''),attachments=entry.attachments||[],references=entry.references||[];
+      return entry.key+':'+String(entry.historyId||'')+':'+text.length+':'+hashText(text)+':'+attachments.length+':'+references.length;
+    }).join('|');
+  }
+  function renderTranscriptVirtualTurn(turn,index,reusable){
+    var signature=transcriptTurnRenderSignature(turn),wrapper=reusable&&reusable[turn.key];
+    if(wrapper&&wrapper.getAttribute('data-turn-signature')===signature){
+      wrapper.setAttribute('data-turn-index',String(index));
+      return wrapper;
+    }
+    wrapper=el('div','transcript-turn');
+    wrapper.setAttribute('data-turn-index',String(index));
+    wrapper.setAttribute('data-turn-key',turn.key);
+    wrapper.setAttribute('data-turn-signature',signature);
+    var previousTarget=renderTarget; renderTarget=wrapper;
+    turn.entries.forEach(renderTranscriptVirtualEntry);
+    renderTarget=previousTarget;
+    return wrapper;
   }
   function transcriptLiveTail(host){
     if(!host) return null;
@@ -5812,36 +6440,43 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function restoreVirtualStreamingTargets(state){
     var host=byId('msgs');
-    latestUserMsgEl=null; assistantEl=null;
+    // A pending virtual-list measurement can run after the first live delta.
+    // The transcript model intentionally trails the live DOM until its next
+    // structural refresh, so retain the connected bubble that is still receiving
+    // text instead of making the following delta create a new bubble.
+    var liveAssistant=assistantEl&&assistantEl.isConnected&&host&&host.contains(assistantEl)?assistantEl:null;
+    latestUserMsgEl=null; assistantEl=liveAssistant;
     if(!host||state!==transcriptVirtualState) return;
     var users=host.querySelectorAll('.msg.user');
     if(state.end===state.turns.length&&users.length) latestUserMsgEl=users[users.length-1];
-    if(turnActive&&state.end===state.turns.length){
+    // A model from before the latest structural delta may end in an older
+    // assistant block. Never revive that stale node after a tool or new turn.
+    if(!assistantEl&&turnActive&&state.version===transcriptVersion(cur)&&state.end===state.turns.length){
       var lastTurn=state.turns[state.turns.length-1],lastEntry=lastTurn&&lastTurn.entries[lastTurn.entries.length-1];
       if(lastEntry&&lastEntry.kind==='msg'&&lastEntry.role==='assistant') assistantEl=findMsgByKey(lastEntry.key);
     }
   }
   function measureTranscriptVirtualTurns(state,pinBottom){
     var host=byId('msgs'); if(!host||state!==transcriptVirtualState) return;
-    var previousOffsets=state.offsets.slice(),changed=false;
+    var previousStartOffset=state.offsets[state.start]||0,changed=false,firstChanged=state.turns.length;
     Array.prototype.forEach.call(host.querySelectorAll('.transcript-turn[data-turn-index]'),function(node){
       var index=Number(node.getAttribute('data-turn-index')),turn=state.turns[index],height=node.offsetHeight;
       if(!turn||!(height>0)) return;
-      if(Math.abs((state.heights[turn.key]||0)-height)>1){ state.heights[turn.key]=height; changed=true; }
+      if(Math.abs((state.heights[turn.key]||0)-height)>1){
+        state.heights[turn.key]=height; changed=true; firstChanged=Math.min(firstChanged,index);
+      }
     });
     if(changed){
-      recalculateTranscriptOffsets(state);
+      recalculateTranscriptOffsetsFrom(state,firstChanged);
       syncTranscriptVirtualSpacers(state);
       if(pinBottom) host.scrollTop=host.scrollHeight;
       else {
-        var delta=(state.offsets[state.start]||0)-(previousOffsets[state.start]||0);
+        var delta=(state.offsets[state.start]||0)-previousStartOffset;
         if(delta) host.scrollTop=Math.max(0,host.scrollTop+delta);
       }
     }
     host.style.visibility='';
     restoreVirtualStreamingTargets(state);
-    syncAllMessageCommentStates();
-    renderPinTray();
     scheduleLatestPin();
   }
   function scheduleTranscriptVirtualMeasure(state,pinBottom){
@@ -5861,7 +6496,12 @@ window.__CHANGELOG__ = ${changelogJson};
   function renderTranscriptVirtualRange(state,range,options){
     options=options||{};
     var host=byId('msgs'); if(!host||state!==transcriptVirtualState) return;
-    var previousTop=host.scrollTop,fragment=document.createDocumentFragment();
+    var previousTop=host.scrollTop,fragment=document.createDocumentFragment(),reusable={};
+    Array.prototype.forEach.call(host.querySelectorAll('.transcript-turn[data-turn-key]'),function(node){
+      reusable[node.getAttribute('data-turn-key')]=node;
+    });
+    var historyLoader=transcriptHistoryLoader(state.sessionId);
+    if(historyLoader) fragment.appendChild(historyLoader);
     var topSpacer=el('div','transcript-virtual-spacer top');
     topSpacer.style.height=(state.offsets[range.start]||0)+'px';
     fragment.appendChild(topSpacer);
@@ -5869,11 +6509,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var previousTarget=renderTarget,previousSuppress=suppressScroll;
     suppressScroll=true;
     for(var i=range.start;i<range.end;i++){
-      var turn=state.turns[i],wrapper=el('div','transcript-turn');
-      wrapper.setAttribute('data-turn-index',String(i)); wrapper.setAttribute('data-turn-key',turn.key);
-      renderTarget=wrapper;
-      turn.entries.forEach(renderTranscriptVirtualEntry);
-      fragment.appendChild(wrapper);
+      fragment.appendChild(renderTranscriptVirtualTurn(state.turns[i],i,reusable));
     }
     renderTarget=previousTarget; suppressScroll=previousSuppress;
     msgOrdinal=state.msgCount; toolOrdinal=state.toolCount;
@@ -5887,8 +6523,13 @@ window.__CHANGELOG__ = ${changelogJson};
     host.setAttribute('data-transcript-total-blocks',String(state.blockCount));
     host.replaceChildren(fragment);
     messageReplaceGeneration++;
+    Array.prototype.forEach.call(host.querySelectorAll('.toolc[data-tool-id]'),function(tool){
+      var id=tool.getAttribute('data-tool-id'); if(id) toolEls[id]=tool;
+    });
     applyCollapsedTurns();
     keepGenLast();
+    syncAllMessageCommentStates();
+    syncAllMessagePinStates();
     observeTranscriptVirtualTurns(state);
     var pinBottom=options.scrollMode!=='top'&&!(options.scrollMode&&typeof options.scrollMode==='object')&&options.keepScroll!==true&&stick;
     if(options.scrollMode==='top') host.scrollTop=0;
@@ -5909,7 +6550,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!state||state!==transcriptVirtualState||!cur) return;
     var version=transcriptVersion(cur);
     if(state.version===version) return;
-    var latest=cachedTranscriptFor(cur);
+    var latest=transcriptStateRef(cur);
     if(!latest) return;
     var model=buildTranscriptVirtualModel(latest,cur.sessionId);
     state.turns=model.turns;
@@ -5924,38 +6565,203 @@ window.__CHANGELOG__ = ${changelogJson};
     recalculateTranscriptOffsets(state);
   }
   function scheduleTranscriptVirtualWindow(){
+    if(chatAnchorJump) return;
     if(transcriptVirtualRaf) return;
     transcriptVirtualRaf=window.requestAnimationFrame(function(){
       transcriptVirtualRaf=0;
       var state=transcriptVirtualState,host=byId('msgs');
-      if(!state||!host||transcriptSelectionIsActive(host)) return;
+      if(chatAnchorJump||!state||!host||transcriptSelectionIsActive(host)) return;
       refreshTranscriptVirtualModel(state);
       var range=transcriptVirtualRange(state,host.scrollTop,host.clientHeight);
       if(range.start===state.start&&range.end===state.end) return;
       renderTranscriptVirtualRange(state,range,{keepScroll:true});
     });
   }
-  function ensureTranscriptKeyVisible(key){
+  function ensureTranscriptKeyVisible(key,compact){
     var host=byId('msgs'),state=transcriptVirtualState;
     if(!host||!state||!host.classList.contains('transcript-virtualized')) return false;
     if(findMsgByKey(key)) return true;
     refreshTranscriptVirtualModel(state);
     var index=state.keyToTurn[String(key||'')];
     if(index==null) return false;
-    var range=transcriptVirtualRange(state,state.offsets[index]||0,host.clientHeight,index);
+    var range=transcriptVirtualRange(state,state.offsets[index]||0,host.clientHeight,index,compact===true);
     renderTranscriptVirtualRange(state,range,{targetIndex:index,keepScroll:true});
     return !!findMsgByKey(key);
   }
-  function clearTranscriptVirtualState(host){
-    transcriptVirtualState=null;
+  function suspendTranscriptVirtualRuntime(){
     if(transcriptVirtualRaf){ window.cancelAnimationFrame(transcriptVirtualRaf); transcriptVirtualRaf=0; }
     if(transcriptVirtualMeasureRaf){ window.cancelAnimationFrame(transcriptVirtualMeasureRaf); transcriptVirtualMeasureRaf=0; }
     if(transcriptVirtualResizeObserver){ transcriptVirtualResizeObserver.disconnect(); transcriptVirtualResizeObserver=null; }
+  }
+  function clearTranscriptVirtualState(host){
+    transcriptVirtualState=null;
+    suspendTranscriptVirtualRuntime();
     if(host){
       host.classList.remove('transcript-virtualized');
       host.removeAttribute('data-transcript-total-blocks');
       host.style.visibility='';
     }
+  }
+  function transcriptPaneKey(s){ return sessionScrollKey(s); }
+  function transcriptPaneStamp(s){
+    if(!s) return '';
+    var state=transcriptStateRef(s)||[],last=state[state.length-1]||{},tools=last.tools||[],lastTool=tools[tools.length-1]||{};
+    var pending=localPendingMsgs[String(s.sessionId||'')]||[],pendingLast=pending[pending.length-1]||{};
+    return [
+      transcriptVersion(s),
+      Number(s._busVersion)||0,
+      state.length,
+      String(last.role||''),
+      String(last.text||'').length,
+      tools.length,
+      String(lastTool.result||'').length,
+      pending.length,
+      Number(pendingLast.sentAt)||0,
+      s.generating?'generating':'idle',
+      Number(s.generatingStartedAt)||0,
+      s.pendingFork?'fork':'',
+      s.pendingNew?'new':''
+    ].join(':');
+  }
+  function transcriptPaneCost(host){
+    if(!host) return 0;
+    var elements=host.querySelectorAll('*'),cost=elements.length*320+String(host.textContent||'').length*2;
+    Array.prototype.forEach.call(host.querySelectorAll('img'),function(image){
+      cost+=String(image.getAttribute('src')||'').length*2;
+      var pixels=(Number(image.naturalWidth)||0)*(Number(image.naturalHeight)||0);
+      cost+=Math.min(32*1024*1024,pixels*4);
+    });
+    return Math.max(1024,cost);
+  }
+  function removeTranscriptPaneRecord(record){
+    if(!record) return;
+    transcriptPaneCacheCost=Math.max(0,transcriptPaneCacheCost-(Number(record.cost)||0));
+    if(record.host&&record.host.parentNode) record.host.parentNode.removeChild(record.host);
+  }
+  function evictTranscriptPanes(){
+    while(transcriptPaneCache.size>TRANSCRIPT_PANE_CACHE_MAX_ENTRIES||transcriptPaneCacheCost>TRANSCRIPT_PANE_CACHE_MAX_COST){
+      var oldest=transcriptPaneCache.entries().next().value;
+      if(!oldest) break;
+      transcriptPaneCache.delete(oldest[0]);
+      removeTranscriptPaneRecord(oldest[1]);
+    }
+  }
+  function discardTranscriptPane(s){
+    var key=transcriptPaneKey(s),record=key&&transcriptPaneCache.get(key);
+    if(!record) return;
+    transcriptPaneCache.delete(key);
+    removeTranscriptPaneRecord(record);
+  }
+  function resetActiveTranscriptRuntime(){
+    transcriptVirtualState=null;
+    suspendTranscriptVirtualRuntime();
+    assistantEl=null;
+    latestUserMsgEl=null;
+    toolEls={};
+    msgOrdinal=0;
+    toolOrdinal=0;
+  }
+  function parkTranscriptPane(s){
+    var host=byId('msgs');
+    if(!host) return;
+    messageReplaceGeneration++;
+    var key=transcriptPaneKey(s);
+    if(!key){
+      resetActiveTranscriptRuntime();
+      host.remove();
+      return;
+    }
+    // A loading placeholder has no useful view state to preserve. Removing it also
+    // prevents multiple parked panes from exposing the same global #ph id while
+    // their in-flight history requests populate the canonical transcript cache.
+    if(host.querySelector('#ph')){
+      resetActiveTranscriptRuntime();
+      host.remove();
+      return;
+    }
+    var prior=transcriptPaneCache.get(key);
+    if(prior){
+      transcriptPaneCache.delete(key);
+      removeTranscriptPaneRecord(prior);
+    }
+    var record={
+      key:key,
+      stamp:transcriptPaneStamp(s),
+      host:host,
+      virtualState:transcriptVirtualState,
+      scrollTop:Math.max(0,host.scrollTop),
+      anchor:transcriptViewportAnchor(),
+      stick:stick,
+      msgOrdinal:msgOrdinal,
+      toolOrdinal:toolOrdinal,
+      width:host.clientWidth,
+      cost:transcriptPaneCost(host)
+    };
+    suspendTranscriptVirtualRuntime();
+    host.style.visibility='';
+    host.removeAttribute('id');
+    host.hidden=true;
+    transcriptPaneCache.set(key,record);
+    transcriptPaneCacheCost+=record.cost;
+    resetActiveTranscriptRuntime();
+    evictTranscriptPanes();
+  }
+  function createTranscriptPaneHost(){
+    var host=el('div','msgs-pane');
+    host.id='msgs';
+    var marker=byId('msgFloatActions'),main=marker&&marker.parentNode;
+    if(main) main.insertBefore(host,marker);
+    else document.body.appendChild(host);
+    bindTranscriptPaneHost(host);
+    bindTranscriptFloatingActions(host);
+    return host;
+  }
+  function restoreTranscriptPane(s){
+    var key=transcriptPaneKey(s),record=key&&transcriptPaneCache.get(key);
+    if(record){
+      transcriptPaneCache.delete(key);
+      transcriptPaneCacheCost=Math.max(0,transcriptPaneCacheCost-(Number(record.cost)||0));
+      if(record.stamp!==transcriptPaneStamp(s)){
+        if(record.host&&record.host.parentNode) record.host.parentNode.removeChild(record.host);
+        record=null;
+      }
+    }
+    if(!record){
+      createTranscriptPaneHost();
+      resetActiveTranscriptRuntime();
+      return null;
+    }
+    var host=record.host;
+    host.id='msgs';
+    host.hidden=false;
+    bindTranscriptPaneHost(host);
+    bindTranscriptFloatingActions(host);
+    transcriptVirtualState=record.virtualState||null;
+    msgOrdinal=Number(record.msgOrdinal)||0;
+    toolOrdinal=Number(record.toolOrdinal)||0;
+    stick=!!record.stick;
+    toolEls={};
+    Array.prototype.forEach.call(host.querySelectorAll('.toolc[data-tool-id]'),function(tool){
+      var id=tool.getAttribute('data-tool-id'); if(id) toolEls[id]=tool;
+    });
+    latestUserMsgEl=null;
+    var users=host.querySelectorAll('.msg.user');
+    if(users.length) latestUserMsgEl=users[users.length-1];
+    assistantEl=null;
+    host.scrollTop=Math.max(0,Number(record.scrollTop)||0);
+    if(stick) host.scrollTop=host.scrollHeight;
+    else alignTranscriptViewportAnchorNow(record.anchor);
+    syncAllMessageCommentStates();
+    syncAllMessagePinStates();
+    if(transcriptVirtualState){
+      observeTranscriptVirtualTurns(transcriptVirtualState);
+      if(record.width&&Math.abs(host.clientWidth-record.width)>1) measureTranscriptVirtualTurns(transcriptVirtualState,stick);
+      else scheduleTranscriptVirtualMeasure(transcriptVirtualState,stick);
+    }
+    host.style.visibility='';
+    syncScrollBottomButton(host,byId('chatScrollBottom'));
+    scheduleLatestPin();
+    return record;
   }
   function replaceMessages(node, scrollMode){
     var m=byId('msgs'); if(!m) return;
@@ -5996,11 +6802,12 @@ window.__CHANGELOG__ = ${changelogJson};
     scheduleLatestPin();
   }
   function renderPersistedAndPending(msgs, sessionId, scrollMode){
-    var model=buildTranscriptVirtualModel(msgs,sessionId);
+    var model=transcriptVirtualModelFor(msgs,sessionId);
     if(model.blockCount>TRANSCRIPT_VIRTUAL_THRESHOLD){
       var host=byId('msgs'),key=transcriptVirtualKey(sessionId);
       var state={
         key:key,
+        sessionId:sessionId,
         turns:model.turns,
         blockCount:model.blockCount,
         msgCount:model.msgCount,
@@ -6021,16 +6828,22 @@ window.__CHANGELOG__ = ${changelogJson};
       var targetTop=scrollMode==='top'?0:(scrollMode&&typeof scrollMode==='object'&&isFinite(scrollMode.top)?Math.max(0,Number(scrollMode.top)):(stick?Math.max(0,state.totalHeight-(host&&host.clientHeight||600)):Math.max(0,host&&host.scrollTop||0)));
       var range=transcriptVirtualRange(state,targetTop,host&&host.clientHeight||600);
       renderTranscriptVirtualRange(state,range,{scrollMode:scrollMode,keepScroll:!stick&&!scrollMode});
+      if(scrollMode&&scrollMode.anchor) restoreTranscriptViewportAnchor(scrollMode.anchor);
+      resumePendingChatAnchor();
       return;
     }
     var frag=document.createDocumentFragment();
     var prevTarget=renderTarget, prevSuppress=suppressScroll;
     renderTarget=frag; suppressScroll=true; msgOrdinal=0; toolOrdinal=0;
     toolEls={};
+    var historyLoader=transcriptHistoryLoader(sessionId);
+    if(historyLoader) frag.appendChild(historyLoader);
     if(!model.blockCount) addMsg('assistant','(no history yet)');
     else model.turns.forEach(function(turn){ turn.entries.forEach(renderTranscriptVirtualEntry); });
     renderTarget=prevTarget; suppressScroll=prevSuppress;
     replaceMessages(frag,scrollMode);
+    if(scrollMode&&scrollMode.anchor) restoreTranscriptViewportAnchor(scrollMode.anchor);
+    resumePendingChatAnchor();
   }
   function renderSessionHistory(s, msgs, scrollMode){
     renderPersistedAndPending(msgs, s && s.sessionId, scrollMode);
@@ -6071,7 +6884,14 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function isPinnedKey(key,block){
     if(!key) return false;
-    return loadPins(pinScopeForBlock(block)).some(function(p){ return p.key===key; });
+    var historyId=String(block&&block.getAttribute&&block.getAttribute('data-history-id')||'');
+    var selectionAt=String(key).lastIndexOf(':selection:'),selectionSuffix=selectionAt>=0?String(key).slice(selectionAt):'';
+    return loadPins(pinScopeForBlock(block)).some(function(p){
+      if(p.key===key) return true;
+      if(!historyId||p.historyId!==historyId) return false;
+      if(!selectionSuffix) return p.kind!=='selection';
+      return p.kind==='selection'&&String(p.key||'').slice(String(p.key||'').lastIndexOf(':selection:'))===selectionSuffix;
+    });
   }
   function chatBlockControlsHost(block){
     return block&&block.classList&&block.classList.contains('toolc')&&block.parentElement&&block.parentElement.classList.contains('toolrow') ? block.parentElement : block;
@@ -6294,29 +7114,125 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     return null;
   }
-  function alignMsgKey(key){
-    var m=byId('msgs'), target=findMsgByKey(key);
-    if(!target&&ensureTranscriptKeyVisible(key)) target=findMsgByKey(key);
-    if(!m || !target) return false;
-    var foldTarget=target.classList.contains('toolc')&&target.parentElement&&target.parentElement.classList.contains('toolrow') ? target.parentElement : target;
-    if(foldTarget.classList.contains('folded-away')){
-      target=findFoldSummaryByKey(foldTarget.getAttribute('data-folded-by')||key) || target;
+  function transcriptKeyForHistoryId(historyId){
+    historyId=String(historyId||''); if(!historyId) return '';
+    var host=byId('msgs'),nodes=host&&host.querySelectorAll('[data-history-id]');
+    for(var i=0;nodes&&i<nodes.length;i++){
+      if(nodes[i].getAttribute('data-history-id')===historyId) return String(nodes[i].getAttribute('data-msg-key')||'');
     }
-    var delta=target.getBoundingClientRect().top - m.getBoundingClientRect().top;
-    m.scrollTop=Math.max(0, m.scrollTop + delta - 18);
+    return String(transcriptVirtualState&&transcriptVirtualState.historyIdToKey&&transcriptVirtualState.historyIdToKey[historyId]||'');
+  }
+  function pinMatchesRenderedBlock(pin,target){
+    if(!pin||!target) return false;
+    var saved=String(pin.text||'').replace(/\\s+/g,' ').trim();
+    var rendered=previewTextFromMsg(target).replace(/\\s+/g,' ').trim();
+    if(!saved||!rendered) return false;
+    return pin.kind==='selection'?rendered.indexOf(saved)>=0:rendered.indexOf(saved)===0;
+  }
+  function transcriptHistoryIdForKey(key,pin){
+    key=String(key||''); if(!key) return '';
+    var target=findMsgByKey(key);
+    if(target&&target.getAttribute('data-history-id')&&(!pin||pinMatchesRenderedBlock(pin,target))) return String(target.getAttribute('data-history-id'));
+    if(pin) return '';
+    return String(transcriptVirtualState&&transcriptVirtualState.keyToHistoryId&&transcriptVirtualState.keyToHistoryId[key]||'');
+  }
+  var chatAnchorJump=null,pendingChatAnchor=null,chatAnchorSeq=0;
+  function resolvedChatAnchorKey(anchor){
+    if(anchor&&anchor.key) return String(anchor.key);
+    var host=byId('msgs'),which=anchor&&anchor.which;
+    if(!host||!which) return '';
+    if(transcriptVirtualState&&host.classList.contains('transcript-virtualized')){
+      return which==='first'?transcriptVirtualState.firstUserKey:transcriptVirtualState.lastUserKey;
+    }
+    var users=host.querySelectorAll('.msg.user');
+    var target=which==='first'?users[0]:users[users.length-1];
+    return target&&target.getAttribute('data-msg-key')||'';
+  }
+  function stopChatAnchorJump(jump){
+    if(!jump||chatAnchorJump!==jump) return;
+    if(jump.observer) jump.observer.disconnect();
+    if(jump.timer) clearTimeout(jump.timer);
+    chatAnchorJump=null;
+    scheduleLatestPin();
+    // expandChatAnchorWindow already leaves a viewport-sized window around the
+    // destination. Recomputing it immediately from the corrected scrollTop can
+    // prepend a second batch of estimated-height turns and move the anchor again.
+    if(!jump.expanded) scheduleTranscriptVirtualWindow();
+  }
+  function alignChatAnchor(jump){
+    if(!jump||chatAnchorJump!==jump) return false;
+    var host=byId('msgs'),key=resolvedChatAnchorKey(jump.anchor),target=findMsgByKey(key);
+    if(!target&&key&&ensureTranscriptKeyVisible(key,true)) target=findMsgByKey(key);
+    if(!host||!key||!target) return false;
+    var foldTarget=target.classList.contains('toolc')&&target.parentElement&&target.parentElement.classList.contains('toolrow')?target.parentElement:target;
+    if(foldTarget.classList.contains('folded-away')){
+      if(jump.anchor.pin&&jump.anchor.pin.kind==='selection'){
+        var foldKey=foldTarget.getAttribute('data-folded-by');
+        if(foldKey){ setTurnFolded(foldKey,false); applyCollapsedTurns(); target=findMsgByKey(key)||target; foldTarget=target; }
+      } else target=findFoldSummaryByKey(foldTarget.getAttribute('data-folded-by')||key)||target;
+    }
+    scrollHostToTarget(host,target,jump.anchor.pin);
+    var highlight=target.classList.contains('toolc')&&target.parentElement&&target.parentElement.classList.contains('toolrow')?target.parentElement:target;
+    if(jump.highlight!==highlight){
+      if(jump.highlight) jump.highlight.classList.remove('anchor-arrived');
+      jump.highlight=highlight; highlight.classList.add('anchor-arrived');
+    }
+    if(!jump.observer&&window.ResizeObserver){
+      jump.observer=new ResizeObserver(function(){ requestAnimationFrame(function(){ alignChatAnchor(jump); }); });
+      jump.observer.observe(target.closest('.transcript-turn')||target);
+    }
     return true;
   }
-  function scrollToMsgKey(key){
-    if(!alignMsgKey(key)) return;
-    scheduleLatestPin();
-    // Message markdown, the composer, and queue rows can finish laying out just
-    // after a jump. Re-align on the next two frames so the anchored block stays
-    // inside the real #msgs viewport instead of being pushed beneath Composer.
-    requestAnimationFrame(function(){
-      if(!alignMsgKey(key)) return;
-      requestAnimationFrame(function(){ if(alignMsgKey(key)) scheduleLatestPin(); });
-    });
+  function expandChatAnchorWindow(jump){
+    if(!jump||chatAnchorJump!==jump) return;
+    var host=byId('msgs'),state=transcriptVirtualState;
+    if(!host||!state||!host.classList.contains('transcript-virtualized')) return;
+    refreshTranscriptVirtualModel(state);
+    var range=transcriptVirtualRange(state,host.scrollTop,host.clientHeight);
+    if(range.start!==state.start||range.end!==state.end){
+      renderTranscriptVirtualRange(state,range,{keepScroll:true});
+    }
+    jump.expanded=true;
+    // The compact seek window deliberately renders only the target's immediate
+    // neighbours. Expand it while the observer is still active so newly measured
+    // turns cannot move the target after the jump appears to have finished.
+    alignChatAnchor(jump);
   }
+  function jumpToChatAnchor(anchor){
+    anchor=anchor||{};
+    if(chatAnchorJump) stopChatAnchorJump(chatAnchorJump);
+    var jump={id:++chatAnchorSeq,anchor:anchor,observer:null,timer:null,highlight:null};
+    chatAnchorJump=jump;
+    if(!alignChatAnchor(jump)){
+      chatAnchorJump=null;
+      if(activeTranscriptPlaceholder()||!hasTranscriptBaseline(cur)){ pendingChatAnchor=anchor; return false; }
+      showToast('Could not find that message in the transcript.','warn');
+      return false;
+    }
+    pendingChatAnchor=null;
+    requestAnimationFrame(function(){
+      if(!alignChatAnchor(jump)) return;
+      requestAnimationFrame(function(){ alignChatAnchor(jump); });
+    });
+    jump.timer=setTimeout(function(){
+      expandChatAnchorWindow(jump);
+      requestAnimationFrame(function(){
+        if(!alignChatAnchor(jump)) return;
+        requestAnimationFrame(function(){
+          if(!alignChatAnchor(jump)) return;
+          if(jump.highlight) setTimeout(function(){ jump.highlight.classList.remove('anchor-arrived'); },180);
+          stopChatAnchorJump(jump);
+        });
+      });
+    },800);
+    return true;
+  }
+  function resumePendingChatAnchor(){
+    if(!pendingChatAnchor) return;
+    var anchor=pendingChatAnchor; pendingChatAnchor=null;
+    requestAnimationFrame(function(){ jumpToChatAnchor(anchor); });
+  }
+  function scrollToMsgKey(key){ jumpToChatAnchor({key:key}); }
   function textOffsetPoint(root,offset,preferNext){
     if(!root) return null;
     var walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
@@ -6364,29 +7280,17 @@ window.__CHANGELOG__ = ${changelogJson};
     return !!precise;
   }
   function scrollToPin(pin){
-    var key=pinTargetKey(pin),target=findMsgByKey(key),host=byId('msgs');
-    if(!target&&ensureTranscriptKeyVisible(key)) target=findMsgByKey(key);
-    if(!host||!target) return;
-    var foldTarget=target.classList.contains('toolc')&&target.parentElement&&target.parentElement.classList.contains('toolrow') ? target.parentElement : target;
-    if(pin&&pin.kind==='selection'&&foldTarget.classList.contains('folded-away')){
-      var foldKey=foldTarget.getAttribute('data-folded-by');
-      if(foldKey){ setTurnFolded(foldKey,false); applyCollapsedTurns(); target=findMsgByKey(key)||target; }
-    }
-    if(pin&&pin.kind==='selection'&&scrollHostToTarget(host,target,pin)){
-      scheduleLatestPin();
+    var historyId=String(pin&&pin.historyId||'');
+    if(historyId){
+      var historyKey=transcriptKeyForHistoryId(historyId);
+      if(historyKey) jumpToChatAnchor({key:historyKey,pin:pin});
+      else loadPinnedTranscriptWindow(cur,pin);
       return;
     }
-    scrollToMsgKey(key);
+    jumpToChatAnchor({key:pinTargetKey(pin),pin:pin});
   }
   function scrollToHeaderPrompt(which){
-    var host=byId('msgs'); if(!host) return;
-    if(transcriptVirtualState&&host.classList.contains('transcript-virtualized')){
-      var virtualKey=which==='first'?transcriptVirtualState.firstUserKey:transcriptVirtualState.lastUserKey;
-      if(virtualKey){ scrollToMsgKey(virtualKey); return; }
-    }
-    var users=host.querySelectorAll('.msg.user');
-    var target=which==='first' ? users[0] : users[users.length-1];
-    if(target) scrollToMsgKey(target.getAttribute('data-msg-key'));
+    jumpToChatAnchor({which:which});
   }
   function enableHeaderPromptJump(line,which){
     if(!line) return line;
@@ -6490,7 +7394,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function sortPinsInChatOrder(pins){
     var order=msgDomOrder();
     return (pins||[]).slice().sort(function(a,b){
-      var ak=pinTargetKey(a), bk=pinTargetKey(b);
+      var ak=transcriptKeyForHistoryId(a&&a.historyId)||pinTargetKey(a), bk=transcriptKeyForHistoryId(b&&b.historyId)||pinTargetKey(b);
       var ai=Object.prototype.hasOwnProperty.call(order, ak) ? order[ak] : msgKeyIndex(ak);
       var bi=Object.prototype.hasOwnProperty.call(order, bk) ? order[bk] : msgKeyIndex(bk);
       if(ai!==bi) return ai-bi;
@@ -6704,10 +7608,15 @@ window.__CHANGELOG__ = ${changelogJson};
   function renderPinTray(){
     var tray=byId('pinTray'); if(!tray) return;
     var pins=sortPinsInChatOrder(migrateLegacySelectedCommentPins());
+    var migratedHistoryId=false;
     tray.innerHTML='';
     tray.classList.toggle('show', !!pins.length);
     tray.setAttribute('aria-hidden', pins.length ? 'false' : 'true');
     pins.forEach(function(pin){
+      if(!pin.historyId){
+        var migratedId=transcriptHistoryIdForKey(pinTargetKey(pin),pin);
+        if(migratedId){ pin.historyId=migratedId; migratedHistoryId=true; }
+      }
       var item=el('div','pinitem');
       var jumpLabel=pin.kind==='selection'?'Jump to selected text':'Jump to pinned block';
       var previewText=String(pin.text||'').trim(), fullText=pinHoverText(pin,false);
@@ -6745,6 +7654,7 @@ window.__CHANGELOG__ = ${changelogJson};
       item.appendChild(x);
       tray.appendChild(item);
     });
+    if(migratedHistoryId) savePins(cur,pins);
     syncAllMessagePinStates();
     syncTopStack();
   }
@@ -6756,13 +7666,13 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function commentMsgDomOrder(){
     var order={}, host=byId('commentMsgs'); if(!host) return order;
-    Array.prototype.forEach.call(host.querySelectorAll('.msg[data-msg-key]'),function(node,i){ order[node.getAttribute('data-msg-key')]=i; });
+    Array.prototype.forEach.call(host.querySelectorAll('.msg[data-msg-key],.toolc[data-msg-key]'),function(node,i){ order[node.getAttribute('data-msg-key')]=i; });
     return order;
   }
   function sortCommentPins(pins){
     var order=commentMsgDomOrder();
     return (pins||[]).slice().sort(function(a,b){
-      var ak=pinTargetKey(a), bk=pinTargetKey(b);
+      var ak=commentKeyForHistoryId(a&&a.historyId)||pinTargetKey(a), bk=commentKeyForHistoryId(b&&b.historyId)||pinTargetKey(b);
       var ai=Object.prototype.hasOwnProperty.call(order,ak)?order[ak]:msgKeyIndex(ak);
       var bi=Object.prototype.hasOwnProperty.call(order,bk)?order[bk]:msgKeyIndex(bk);
       if(ai!==bi) return ai-bi;
@@ -6773,19 +7683,44 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function findCommentMsgByKey(key){
     var host=byId('commentMsgs'); if(!host||!key) return null;
-    var nodes=host.querySelectorAll('.msg[data-msg-key]');
+    var nodes=host.querySelectorAll('.msg[data-msg-key],.toolc[data-msg-key]');
     for(var i=0;i<nodes.length;i++) if(nodes[i].getAttribute('data-msg-key')===key) return nodes[i];
     return null;
+  }
+  function commentKeyForHistoryId(historyId){
+    var host=byId('commentMsgs'),nodes=host&&host.querySelectorAll('[data-history-id]');
+    historyId=String(historyId||'');
+    for(var i=0;nodes&&i<nodes.length;i++){
+      if(nodes[i].getAttribute('data-history-id')===historyId) return String(nodes[i].getAttribute('data-msg-key')||'');
+    }
+    return '';
   }
   function scrollToCommentMsgKey(key,pin){
     var host=byId('commentMsgs'), target=findCommentMsgByKey(key); if(!host||!target) return;
     scrollHostToTarget(host,target,pin);
   }
+  function scrollToCommentPin(pin){
+    var historyId=String(pin&&pin.historyId||'');
+    if(historyId){
+      var key=commentKeyForHistoryId(historyId);
+      if(key) scrollToCommentMsgKey(key,pin);
+      else {
+        var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+        if(thread) loadPinnedCommentWindow(thread,pin);
+      }
+      return;
+    }
+    scrollToCommentMsgKey(pinTargetKey(pin),pin);
+  }
   function renderCommentPinTray(){
     var tray=byId('commentPinTray'), scope=commentPinSession(); if(!tray) return;
-    var pins=scope?sortCommentPins(loadPins(scope)):[];
+    var pins=scope?sortCommentPins(loadPins(scope)):[],migratedHistoryId=false;
     tray.innerHTML=''; tray.classList.toggle('show',!!pins.length); tray.setAttribute('aria-hidden',pins.length?'false':'true');
     pins.forEach(function(pin){
+      if(!pin.historyId){
+        var target=findCommentMsgByKey(pinTargetKey(pin)),migratedId=target&&target.getAttribute('data-history-id');
+        if(migratedId&&pinMatchesRenderedBlock(pin,target)){ pin.historyId=String(migratedId); migratedHistoryId=true; }
+      }
       var item=el('div','pinitem'), jumpLabel=pin.kind==='selection'?'Jump to selected text':'Jump to pinned comment message';
       var previewText=String(pin.text||'').trim(), fullText=pinHoverText(pin,true);
       item.setAttribute('aria-label',jumpLabel+(previewText?': '+previewText:''));
@@ -6797,9 +7732,10 @@ window.__CHANGELOG__ = ${changelogJson};
       item.appendChild(pinText);
       var close=el('button','pinx','×'); close.title='Unpin';
       close.onclick=function(ev){ ev.stopPropagation(); savePins(scope,loadPins(scope).filter(function(value){return value.key!==pin.key;})); renderCommentPinTray(); };
-      item.onclick=function(){ scrollToCommentMsgKey(pinTargetKey(pin),pin); };
+      item.onclick=function(){ scrollToCommentPin(pin); };
       item.appendChild(close); tray.appendChild(item);
     });
+    if(migratedHistoryId&&scope) savePins(scope,pins);
     var host=byId('commentMsgs'); if(host) Array.prototype.forEach.call(host.querySelectorAll('.msg'),syncMessagePinState);
     syncCommentTopStack();
   }
@@ -6807,24 +7743,30 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!cur || !msgEl) return;
     selectedText=String(selectedText||'').trim();
     var targetKey=msgEl.getAttribute('data-msg-key');
+    var historyId=String(msgEl.getAttribute('data-history-id')||'');
     var key=selectedText ? selectionPinKey(msgEl,selectedText) : targetKey;
     if(!key) return;
     var scope=pinScopeForBlock(msgEl); if(!scope) return;
     var pins=loadPins(scope);
-    var i=pins.findIndex(function(p){ return p.key===key; });
+    var i=pins.findIndex(function(p){
+      return p.key===key||(historyId&&p.historyId===historyId&&(selectedText?(p.kind==='selection'&&String(p.text||'')===selectedText):p.kind!=='selection'));
+    });
     if(i>=0){
+      var removedKey=pins[i].key;
       pins.splice(i,1);
-      if(scope===cur && draftPinReferences.some(function(ref){ return ref.pinKey===key; })) removePinReference(key);
+      if(scope===cur && draftPinReferences.some(function(ref){ return ref.pinKey===removedKey; })) removePinReference(removedKey);
     }
     else {
       var text=selectedText||previewTextFromMsg(msgEl);
       if(!text) return;
       if(selectedText){
         var selectionPin={key:key,targetKey:targetKey,kind:'selection',role:'selected',text:text.slice(0,1200),pinnedAt:Date.now()};
+        if(historyId) selectionPin.historyId=historyId;
         if(Number.isFinite(selectionStart)) selectionPin.selectionStart=Math.max(0,selectionStart);
         pins.push(selectionPin);
       } else {
         var role=chatBlockRole(msgEl), pin={key:key,role:role,text:text.slice(0,1200),pinnedAt:Date.now()};
+        if(historyId) pin.historyId=historyId;
         if(role==='you') pin.fullText=text;
         pins.push(pin);
       }
@@ -6864,6 +7806,9 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function syncCommentSendButton(){
     var send=byId('commentSend'); if(!send) return;
+    var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+    setActionVendor(send,(thread&&thread.vendor)||(cur&&cur.vendor));
+    setActionVendor(byId('scheduleComment'),(thread&&thread.vendor)||(cur&&cur.vendor));
     send.textContent=commentDrawerState.stopping?'Stopping…':commentDrawerState.generating?'■ stop':commentDrawerState.busy?'sending…':'send';
     send.disabled=commentDrawerState.stopping||(!commentDrawerState.generating&&commentDrawerState.busy);
     send.title=commentDrawerState.generating?'Stop the current generation (Esc)':'';
@@ -6872,6 +7817,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function syncCommentPromoteButton(){
     var button=byId('commentPromote'), thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
     if(!button) return;
+    setActionVendor(button,(thread&&thread.vendor)||(cur&&cur.vendor));
     button.disabled=!thread||!thread.providerSessionId||commentDrawerState.busy||commentDrawerState.generating||commentDrawerState.promoting;
     button.textContent=commentDrawerState.promoting?'promoting…':'promote to session';
     button.title=!thread||!thread.providerSessionId?'Send a comment before promoting':commentDrawerState.generating?'Wait for the current reply and queue to finish':'Make this comment thread a regular session';
@@ -6974,10 +7920,15 @@ window.__CHANGELOG__ = ${changelogJson};
     syncCommentUserEditActions();
     syncScrollBottomButton(byId('commentMsgs'),byId('commentScrollBottom'));
   }
-  function appendCommentMessage(role,text){
+  function appendCommentMessage(role,text,historyOrdinal,historyId,historyIndex){
     var host=byId('commentMsgs'); if(!host) return null;
     var node=el('div','msg '+role), bubble=el('div','bubble');
-    node.setAttribute('data-msg-key','comment:'+(commentMsgOrdinal++));
+    var ordinal=Number(historyOrdinal);
+    if(!Number.isFinite(ordinal)) ordinal=commentMsgOrdinal;
+    commentMsgOrdinal=Math.max(commentMsgOrdinal,ordinal+1);
+    node.setAttribute('data-msg-key','comment:'+ordinal);
+    if(historyId) node.setAttribute('data-history-id',String(historyId));
+    if(Number.isFinite(Number(historyIndex))) node.setAttribute('data-history-index',String(historyIndex));
     setBubbleText(bubble,text||'',role==='user'||role==='assistant');
     if(role==='user'){
       var edit=el('button','msg-edit comment-msg-edit');
@@ -7011,7 +7962,9 @@ window.__CHANGELOG__ = ${changelogJson};
         if(node.classList.contains('thinking')||node.classList.contains('error')) return;
         if(!node.classList.contains('user')&&!node.classList.contains('assistant')) return;
         var bubble=node.querySelector('.bubble');
-        messages.push({role:node.classList.contains('user')?'user':'assistant',text:bubble&&(bubble.getAttribute('data-raw')||bubble.textContent)||'',tools:[]});
+        var key=String(node.getAttribute('data-msg-key')||''),ordinal=Number(key.split(':').pop());
+        var historyIndexRaw=node.getAttribute('data-history-index'),historyIndex=historyIndexRaw==null?NaN:Number(historyIndexRaw);
+        messages.push({role:node.classList.contains('user')?'user':'assistant',text:bubble&&(bubble.getAttribute('data-raw')||bubble.textContent)||'',tools:[],historyId:String(node.getAttribute('data-history-id')||'')||undefined,historyOrdinal:Number.isFinite(ordinal)?ordinal:undefined,historyIndex:Number.isFinite(historyIndex)?historyIndex:undefined});
         return;
       }
       if(!node.classList.contains('toolrow')&&!node.classList.contains('toolc')) return;
@@ -7032,12 +7985,17 @@ window.__CHANGELOG__ = ${changelogJson};
     // stale bubbles behind before the authoritative history is appended.
     Array.prototype.slice.call(host.children).forEach(function(node){ if(node.id!=='commentAnchor') node.remove(); });
     commentDrawerState.assistant=null; commentMsgOrdinal=0; commentToolEls={}; commentLatestUserMsgEl=null;
+    var historyLoader=commentHistoryLoader(commentDrawerState.threadId);
+    if(historyLoader){
+      var anchor=byId('commentAnchor');
+      host.insertBefore(historyLoader,anchor&&anchor.nextSibling||host.firstChild);
+    }
     (messages||[]).forEach(function(message){
       if(!message || (message.role!=='user' && message.role!=='assistant')) return;
       // Preserve the ordinal used by persisted pin keys even though blank
       // transcript records do not deserve a visible bubble.
       if(!String(message.text||'').trim()) commentMsgOrdinal++;
-      else appendCommentMessage(message.role,message.text||'');
+      else appendCommentMessage(message.role,message.text||'',message.historyOrdinal,message.historyId,message.historyIndex);
       if(message.role==='assistant') (message.tools||[]).forEach(appendCommentTool);
     });
     if(remember!==false) cacheOpenCommentMessages();
@@ -7088,6 +8046,155 @@ window.__CHANGELOG__ = ${changelogJson};
     setBubbleText(bubble,data&&data.kind==='message'?data.text:(text||'(response text unavailable)'),true);
     node.appendChild(bubble); content.appendChild(node);
   }
+  function commentHistoryContentSize(messages){
+    return (messages||[]).reduce(function(total,message){
+      var tools=message&&message.tools||[],toolSize=0;
+      try{ toolSize=JSON.stringify(tools).length; }catch(_err){ toolSize=tools.length; }
+      return total+String(message&&message.text||'').length+toolSize;
+    },0);
+  }
+  function commentHistoryUrl(threadId,before){
+    var url='/comments/messages?id='+encodeURIComponent(threadId)+'&paged=1&limit=60';
+    if(before!=null) url+='&before='+encodeURIComponent(before);
+    return url;
+  }
+  function commentPinHistoryUrl(threadId,historyId){
+    return commentHistoryUrl(threadId)+'&around='+encodeURIComponent(historyId)+'&radius=20';
+  }
+  function commentHistoryLoader(threadId){
+    var page=threadId&&commentHistoryPages[threadId];
+    if(!page||!page.hasMore) return null;
+    var wrap=el('div','history-loader comment-history-loader'),button=el('button','history-loader-button',page.loading?'Loading earlier history…':'Load earlier history');
+    button.type='button'; button.disabled=!!page.loading||!!commentDrawerState.generating;
+    button.onclick=function(){ var thread=commentThreads[threadId]; if(thread) loadEarlierCommentHistory(thread); };
+    wrap.appendChild(button);
+    return wrap;
+  }
+  function commentViewportAnchor(){
+    var host=byId('commentMsgs'); if(!host) return null;
+    var frame=host.getBoundingClientRect(),nodes=host.querySelectorAll('.msg, .toolc');
+    for(var i=0;i<nodes.length;i++){
+      if(nodes[i].id==='commentAnchor') continue;
+      var rect=nodes[i].getBoundingClientRect();
+      if(rect.bottom<=frame.top) continue;
+      return {key:nodes[i].getAttribute('data-msg-key'),offset:rect.top-frame.top};
+    }
+    return null;
+  }
+  function restoreCommentViewportAnchor(anchor){
+    if(!anchor||!anchor.key) return;
+    requestAnimationFrame(function(){
+      var host=byId('commentMsgs'),target=findCommentMsgByKey(anchor.key);
+      if(!host||!target) return;
+      host.scrollTop=Math.max(0,host.scrollTop+(target.getBoundingClientRect().top-host.getBoundingClientRect().top)-anchor.offset);
+    });
+  }
+  function loadEarlierCommentHistory(thread){
+    var threadId=String(thread&&thread.id||''),page=threadId&&commentHistoryPages[threadId];
+    if(!threadId||!page||!page.hasMore||page.loading||commentDrawerState.generating) return Promise.resolve(false);
+    page.loading=true;
+    var anchor=commentViewportAnchor(),expectedVersion=String(page.version||commentHistoryVersions[threadId]||'');
+    return fetch(commentHistoryUrl(threadId,page.before)).then(function(r){return r.json();}).then(function(res){
+      var nextPage=res&&res.page||{},responseVersion=String(res&&res.historyVersion||nextPage.version||'');
+      if(expectedVersion&&responseVersion&&responseVersion!==expectedVersion){
+        page.loading=false;
+        return syncOpenCommentHistory(thread,true);
+      }
+      var current=commentMessageCache[threadId]||[],older=res&&res.messages||[];
+      commentHistoryPages[threadId]=Object.assign({},nextPage,{loading:false});
+      objectCacheSet(commentMessageCache,threadId,mergeTranscriptHistoryMessages(current,older),80);
+      if(commentDrawerState.threadId===threadId){
+        renderCommentMessages(commentMessageCache[threadId],false);
+        restoreCommentViewportAnchor(anchor);
+      }
+      return true;
+    }).catch(function(){ page.loading=false; return false; });
+  }
+  function loadPinnedCommentWindow(thread,pin){
+    var threadId=String(thread&&thread.id||''),historyId=String(pin&&pin.historyId||'');
+    if(!threadId||!historyId) return Promise.resolve(false);
+    var loadKey='comment\\n'+threadId+'\\n'+historyId;
+    if(pinHistoryLoads[loadKey]) return pinHistoryLoads[loadKey];
+    var drawerEpoch=commentDrawerState.epoch;
+    function attempt(retried){
+      return fetch(commentPinHistoryUrl(threadId,historyId)).then(function(r){
+        return r.json().then(function(response){
+          if(!r.ok||response&&response.ok===false) throw new Error(response&&response.error||'Pinned comment is no longer available.');
+          return response;
+        });
+      }).then(function(response){
+        if(commentDrawerState.epoch!==drawerEpoch||commentDrawerState.threadId!==threadId) return false;
+        var nextPage=response&&response.page||{},page=commentHistoryPages[threadId];
+        var expectedVersion=String(page&&page.version||commentHistoryVersions[threadId]||'');
+        var responseVersion=String(response&&response.historyVersion||nextPage.version||response&&response.window&&response.window.version||'');
+        if(expectedVersion&&responseVersion&&expectedVersion!==responseVersion){
+          if(retried) throw new Error('Comment history changed while locating this Pin. Try again.');
+          return syncOpenCommentHistory(thread,true).then(function(){ return attempt(true); });
+        }
+        var merged=mergeTranscriptHistoryMessages(commentMessageCache[threadId]||[],response&&response.messages||[]);
+        objectCacheSet(commentMessageCache,threadId,merged,80);
+        renderCommentMessages(merged,false);
+        requestAnimationFrame(function(){
+          var key=commentKeyForHistoryId(historyId);
+          if(key) scrollToCommentMsgKey(key,pin);
+          else showToast('Could not find that pinned comment in the loaded window.','warn');
+        });
+        return true;
+      });
+    }
+    var activeCommentLoad=commentHistoryRequest&&commentHistoryRequest.threadId===threadId&&commentHistoryRequest.promise;
+    var ready=activeCommentLoad|| (commentHistoryPages[threadId]?Promise.resolve():syncOpenCommentHistory(thread,false));
+    var task=ready.then(function(){ return attempt(false); }).catch(function(error){
+      showToast(error&&error.message||'Could not load the pinned comment.','warn');
+      return false;
+    }).finally(function(){ if(pinHistoryLoads[loadKey]===task) delete pinHistoryLoads[loadKey]; });
+    pinHistoryLoads[loadKey]=task;
+    return task;
+  }
+  function syncOpenCommentHistory(thread,force){
+    if(!thread||!thread.id||!thread.providerSessionId) return Promise.resolve(false);
+    var threadId=String(thread.id),drawerEpoch=commentDrawerState.epoch;
+    var expectedEpoch=String(COMMENT_INDEX_EPOCH||''),expectedVersion=String(commentHistoryVersions[threadId]||'');
+    var requestKey=threadId+'\\n'+expectedEpoch+'\\n'+expectedVersion;
+    if(!force&&commentHistoryRequest&&commentHistoryRequest.key===requestKey&&commentHistoryRequest.drawerEpoch===drawerEpoch) return commentHistoryRequest.promise;
+    var requestId=++commentHistoryRequestClock;
+    var request={id:requestId,key:requestKey,drawerEpoch:drawerEpoch,threadId:threadId,promise:null};
+    var task=fetch(commentHistoryUrl(threadId)).then(function(r){return r.json();}).then(function(res){
+      if(requestId!==commentHistoryRequestClock||commentDrawerState.epoch!==drawerEpoch||commentDrawerState.threadId!==threadId) return false;
+      if(res&&res.ok===false) throw new Error(res.error||'Could not load comments.');
+      var responseEpoch=String(res&&res.epoch||expectedEpoch||''),responseVersion=String(res&&res.historyVersion||'');
+      var responseAt=Number(res&&res.generatedAt)||0,advertised=String(commentHistoryVersions[threadId]||'');
+      // A request started before reconnect may finish after the new process's
+      // index handshake. Never let that older response overwrite newer history.
+      if(COMMENT_INDEX_EPOCH&&responseEpoch&&responseEpoch!==COMMENT_INDEX_EPOCH){
+        window.setTimeout(function(){ var latest=commentThreads[threadId]; if(latest) syncOpenCommentHistory(latest,false); },0);
+        return false;
+      }
+      if(responseAt&&COMMENT_INDEX_AT&&responseAt<COMMENT_INDEX_AT&&advertised&&responseVersion&&responseVersion!==advertised){
+        window.setTimeout(function(){ var latest=commentThreads[threadId]; if(latest) syncOpenCommentHistory(latest,false); },0);
+        return false;
+      }
+      if(!COMMENT_INDEX_EPOCH&&responseEpoch) COMMENT_INDEX_EPOCH=responseEpoch;
+      if(res&&res.thread) thread=rememberCommentThread(res.thread)||thread;
+      var fresh=res&&res.messages||[],cached=commentMessageCache[threadId]||[];
+      var keepCached=thread.status==='generating'&&commentHistoryContentSize(cached)>commentHistoryContentSize(fresh);
+      if(!keepCached) commentHistoryPages[threadId]=Object.assign({},res&&res.page||{before:0,hasMore:false,total:fresh.length,version:responseVersion},{loading:false});
+      renderCommentMessages(keepCached?cached:fresh);
+      if(responseVersion){
+        commentHistoryLoadedVersions[threadId]=responseVersion;
+        if(!advertised||responseAt>=COMMENT_INDEX_AT) commentHistoryVersions[threadId]=responseVersion;
+      }
+      setCommentGenerating(thread.status==='generating');
+      if(thread.status!=='generating') markCommentRead(thread);
+      return true;
+    }).catch(function(err){
+      if(requestId===commentHistoryRequestClock&&commentDrawerState.epoch===drawerEpoch&&commentDrawerState.threadId===threadId) appendCommentMessage('error',(err&&err.message)||'Could not load comments.');
+      return false;
+    }).finally(function(){ if(commentHistoryRequest&&commentHistoryRequest.id===requestId) commentHistoryRequest=null; });
+    request.promise=task;
+    commentHistoryRequest=request;
+    return task;
+  }
   function openCommentThread(thread,msgEl,anchorOverride){
     var drawer=byId('commentDrawer'), input=byId('commentInput');
     if(!drawer) return;
@@ -7105,19 +8212,10 @@ window.__CHANGELOG__ = ${changelogJson};
     renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false); renderCommentQueue(); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.status==='generating'));
     if(input){ input.value=''; input.focus(); }
     if(thread&&thread.providerSessionId){
-      fetch('/comments/messages?id='+encodeURIComponent(thread.id)).then(function(r){return r.json();}).then(function(res){
-        if(commentDrawerState.epoch!==drawerEpoch || commentDrawerState.threadId!==thread.id) return;
-        if(res&&res.thread) thread=rememberCommentThread(res.thread)||thread;
-        var fresh=res&&res.messages||[], cached=commentMessageCache[thread.id]||[];
-        var contentSize=function(messages){ return messages.reduce(function(total,message){
-          var tools=message&&message.tools||[], toolSize=0;
-          try{ toolSize=JSON.stringify(tools).length; }catch(_err){ toolSize=tools.length; }
-          return total+String(message&&message.text||'').length+toolSize;
-        },0); };
-        renderCommentMessages(thread.status==='generating'&&contentSize(cached)>contentSize(fresh)?cached:fresh);
-        setCommentGenerating(thread.status==='generating');
+      var knownVersion=String(commentHistoryVersions[thread.id]||'');
+      if(knownVersion&&commentHistoryLoadedVersions[thread.id]===knownVersion){
         if(thread.status!=='generating') markCommentRead(thread);
-      }).catch(function(){ if(commentDrawerState.epoch===drawerEpoch) appendCommentMessage('error','Could not load comments.'); });
+      } else syncOpenCommentHistory(thread,true);
     }
   }
   function openCommentsForMessage(msgEl){
@@ -7138,6 +8236,17 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!history) history=[];
     return history.map(function(message){ return {role:message.role,text:message.text||'',tools:message.tools||[]}; });
   }
+  function commentRunConfig(thread,targetSession){
+    if(!thread) return currentForkDefaults();
+    var vendor=String(thread.vendor||(targetSession&&targetSession.vendor)||'claude').trim().toLowerCase();
+    var sameVendor=vendor===String(targetSession&&targetSession.vendor||'').trim().toLowerCase();
+    return {
+      vendor:vendor,
+      model:sameVendor?String(targetSession&&targetSession.model||'').trim():'',
+      effort:sameVendor?String(targetSession&&targetSession.effort||'').trim():'',
+      speed:sameVendor?String(targetSession&&targetSession.speed||'').trim():''
+    };
+  }
   function sendComment(options){
     options=options||{};
     if(commentDrawerState.busy || !cur) return;
@@ -7147,10 +8256,11 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!question) return;
     ensureCommentAnchorPinned();
     var thread=commentDrawerState.threadId ? commentThreads[commentDrawerState.threadId] : null;
+    var commentConfig=commentRunConfig(thread,targetSession);
     var userMessageAt=Date.now();
     if(!thread){
       var id='comment-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,9);
-      thread=rememberCommentThread({id:id,parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,providerSessionId:'',vendor:cur.vendor,cwd:cur.cwd,createdAt:userMessageAt,lastUserMessageAt:userMessageAt,status:'generating',messageCount:0});
+      thread=rememberCommentThread({id:id,parentSessionId:commentDrawerState.parentSessionId,anchorKey:commentDrawerState.anchorKey,anchorText:commentDrawerState.anchorText,anchorData:commentDrawerState.anchorData||undefined,providerSessionId:'',vendor:commentConfig.vendor,cwd:cur.cwd,createdAt:userMessageAt,lastUserMessageAt:userMessageAt,status:'generating',messageCount:0});
       commentDrawerState.threadId=id;
       syncCommentPromoteButton();
     } else thread=rememberCommentThread(Object.assign({},thread,{lastUserMessageAt:userMessageAt}))||thread;
@@ -7190,7 +8300,7 @@ window.__CHANGELOG__ = ${changelogJson};
     fetch('/comments/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
       threadId:requestThreadId,parentSessionId:requestState.parentSessionId,anchorKey:requestState.anchorKey,
       anchorText:requestState.anchorText,anchorData:requestState.anchorData,question:question,contextMessages:context,
-      createdWhileGenerating:requestState.createdWhileGenerating,model:targetSession.model||undefined,effort:targetSession.effort||undefined,speed:targetSession.speed||undefined
+      createdWhileGenerating:requestState.createdWhileGenerating,vendor:commentConfig.vendor,model:commentConfig.model||undefined,effort:commentConfig.effort||undefined,speed:commentConfig.speed||undefined
     })}).then(function(r){return r.json();}).then(function(res){
       if(!operationIsCurrent(operation)) return;
       if(!res.ok){ failComment(res); return; }
@@ -7252,6 +8362,9 @@ window.__CHANGELOG__ = ${changelogJson};
         VAULT_STATE.commentThreads=commentThreads;
         syncAllMessageCommentStates(); syncAllSessionCommentBadges(); renderPinTray();
         delete commentMessageCache[thread.id];
+        delete commentHistoryVersions[thread.id];
+        delete commentHistoryLoadedVersions[thread.id];
+        delete commentHistoryPages[thread.id];
         var shouldOpen=drawerIsCurrent();
         var openView=function(view){
           if(!view) return;
@@ -7322,14 +8435,8 @@ window.__CHANGELOG__ = ${changelogJson};
   function jumpToLatestPin(){
     var m=byId('msgs'), target=latestUserMsgEl || refreshLatestUserMsg();
     if(!m || !target) return;
-    // Scroll by the on-screen gap between the target and the scroll viewport's top
-    // (robust to whatever the offsetParent is), landing the message ~18px below the
-    // fold so its whole top edge clears — far enough that the pin's show-condition
-    // (target bottom above the viewport top) is false and it dismisses cleanly.
-    var delta = target.getBoundingClientRect().top - m.getBoundingClientRect().top;
-    m.scrollTop = Math.max(0, m.scrollTop + delta - 18);
+    jumpToChatAnchor({key:target.getAttribute('data-msg-key')});
     hideLatestPin();
-    scheduleLatestPin();
   }
   function hideCommentLatestPin(){
     var pin=byId('commentLatestPin'), body=byId('commentLatestPinBody'); if(!pin||!body) return;
@@ -7557,6 +8664,28 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     return out.join('');
   }
+  var markdownRenderCache=new Map(), markdownRenderCacheChars=0;
+  var MARKDOWN_RENDER_CACHE_MAX_CHARS=2_000_000;
+  function renderMarkdownCached(md){
+    var raw=String(md||''), key=raw.length+':'+hashText(raw);
+    var cached=markdownRenderCache.get(key);
+    if(cached&&cached.raw===raw){
+      markdownRenderCache.delete(key); markdownRenderCache.set(key,cached);
+      return cached.html;
+    }
+    var html=renderMarkdown(raw);
+    if(raw.length<=120_000){
+      var prior=markdownRenderCache.get(key);
+      if(prior) markdownRenderCacheChars-=prior.cost;
+      var entry={raw:raw,html:html,cost:raw.length+html.length};
+      markdownRenderCache.set(key,entry); markdownRenderCacheChars+=entry.cost;
+      while(markdownRenderCacheChars>MARKDOWN_RENDER_CACHE_MAX_CHARS&&markdownRenderCache.size>1){
+        var oldest=markdownRenderCache.entries().next().value;
+        markdownRenderCache.delete(oldest[0]); markdownRenderCacheChars-=oldest[1].cost;
+      }
+    }
+    return html;
+  }
   var diagramSeq = 0;
   // Remembers which PlantUML sources the user already consented to render this
   // session, so switching tabs (which rebuilds the message list from scratch)
@@ -7588,7 +8717,10 @@ window.__CHANGELOG__ = ${changelogJson};
     return loadScriptOnce('__attendMermaidReady', MERMAID_CDN).then(function(){
       if(!window.mermaid) throw new Error('mermaid unavailable');
       if(!window.__attendMermaidInit){
-        window.mermaid.initialize({ startOnLoad:false, securityLevel:'strict' });
+        // suppressErrorRendering: on a parse error mermaid otherwise injects a full-page
+        // "Syntax error" bomb SVG into the DOM as a side effect. We render our own fallback
+        // (source + message) in the catch below, so keep that orphan out of the page entirely.
+        window.mermaid.initialize({ startOnLoad:false, securityLevel:'strict', suppressErrorRendering:true });
         window.__attendMermaidInit = true;
       }
       return window.mermaid;
@@ -7630,7 +8762,7 @@ window.__CHANGELOG__ = ${changelogJson};
     node.setAttribute('data-preview-bound', '1');
     node.setAttribute('role', 'button');
     node.setAttribute('tabindex', '0');
-    node.title='Open diagram preview';
+    node.setAttribute('aria-label', 'Open '+diagramPreviewName(node.getAttribute('data-diagram')));
     node.onclick=function(ev){ if(isDiagramControlClick(ev)) return; openDiagramPreview(node); };
     node.onkeydown=function(ev){ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); openDiagramPreview(node); } };
   }
@@ -7638,15 +8770,22 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!node || node.getAttribute('data-rendering') || node.getAttribute('data-rendered')) return;
     var source=node.getAttribute('data-source') || '';
     node.setAttribute('data-rendering', '1');
+    var renderId='attend-mermaid-'+(++diagramSeq);
     loadMermaid().then(function(mermaid){
-      var id='attend-mermaid-'+(++diagramSeq);
-      return Promise.resolve(mermaid.render(id, source));
+      return Promise.resolve(mermaid.render(renderId, source));
     }).then(function(res){
       node.removeAttribute('data-rendering');
       node.setAttribute('data-rendered', 'ok');
       node.innerHTML=(res && res.svg) ? res.svg : '';
       enableDiagramPreview(node);
     }).catch(function(err){
+      // Defensive: even with suppressErrorRendering, a failed render can leave the temp
+      // measuring node (id / 'd'+id) orphaned in <body>. Sweep it so bad diagrams degrade
+      // to just our inline fallback and never leak stray DOM onto the page.
+      [renderId, 'd'+renderId].forEach(function(orphanId){
+        var stray=document.getElementById(orphanId);
+        if(stray && stray.parentNode) stray.parentNode.removeChild(stray);
+      });
       showDiagramFallback(node, 'Mermaid render failed', source, err);
     });
   }
@@ -7749,9 +8888,87 @@ window.__CHANGELOG__ = ${changelogJson};
   function setBubbleText(bubble, text, markdown){
     if(!bubble) return;
     var raw=String(text||'');
+    if(bubble._attendStream) delete bubble._attendStream;
     bubble.setAttribute('data-raw', raw);
-    if(markdown){ bubble.innerHTML = renderMarkdown(raw); linkifyPaths(bubble); renderDiagrams(bubble); }
+    if(markdown){ bubble.innerHTML = renderMarkdownCached(raw); linkifyPaths(bubble); renderDiagrams(bubble); }
     else bubble.textContent = raw;
+  }
+  var streamingBubbleQueue=new Set(), streamingBubbleRaf=0;
+  function streamingStableBoundary(raw,start){
+    var inFence=false,last=start,lineStart=start;
+    for(var i=start;i<=raw.length;i++){
+      if(i<raw.length&&raw.charAt(i)!=='\\n') continue;
+      var line=raw.slice(lineStart,i);
+      if(/^\\s*\x60\x60\x60/.test(line)) inFence=!inFence;
+      if(!inFence){
+        if(!line.trim()) last=i+1;
+        else if(/^\\s*\x60\x60\x60\\s*$/.test(line)) last=i+1;
+      }
+      lineStart=i+1;
+    }
+    return Math.min(raw.length,last);
+  }
+  function ensureStreamingBubble(bubble){
+    var state=bubble._attendStream;
+    if(state) return state;
+    var raw=String(bubble.getAttribute('data-raw')||'');
+    var tail=el('span','streaming-tail');
+    bubble.appendChild(tail);
+    state={raw:raw,stableEnd:raw.length,tail:tail};
+    bubble._attendStream=state;
+    return state;
+  }
+  function appendStableStreamingMarkdown(bubble,state,end){
+    if(end<=state.stableEnd) return;
+    var chunk=state.raw.slice(state.stableEnd,end), staging=el('div');
+    staging.innerHTML=renderMarkdownCached(chunk);
+    linkifyPaths(staging); renderDiagrams(staging);
+    while(staging.firstChild) bubble.insertBefore(staging.firstChild,state.tail);
+    state.stableEnd=end;
+  }
+  function flushStreamingBubble(bubble){
+    var state=bubble&&bubble._attendStream;
+    if(!state) return;
+    var boundary=streamingStableBoundary(state.raw,state.stableEnd);
+    appendStableStreamingMarkdown(bubble,state,boundary);
+    state.tail.textContent=state.raw.slice(state.stableEnd);
+  }
+  function flushStreamingBubbleQueue(){
+    streamingBubbleRaf=0;
+    var queued=Array.from(streamingBubbleQueue); streamingBubbleQueue.clear();
+    var mainChanged=false,commentChanged=false;
+    queued.forEach(function(bubble){
+      if(!bubble||!bubble.isConnected) return;
+      flushStreamingBubble(bubble);
+      if(bubble.closest('#msgs')) mainChanged=true;
+      if(bubble.closest('#commentMsgs')) commentChanged=true;
+    });
+    if(mainChanged){ scroll(); scheduleLatestPin(); }
+    if(commentChanged){
+      var host=byId('commentMsgs');
+      if(host&&commentStick) host.scrollTop=host.scrollHeight;
+      syncScrollBottomButton(host,byId('commentScrollBottom'));
+      scheduleCommentLatestPin();
+    }
+  }
+  function appendStreamingBubbleText(bubble,delta){
+    if(!bubble||!delta) return;
+    var state=ensureStreamingBubble(bubble);
+    state.raw+=String(delta);
+    bubble.setAttribute('data-raw',state.raw);
+    streamingBubbleQueue.add(bubble);
+    if(!streamingBubbleRaf) streamingBubbleRaf=requestAnimationFrame(flushStreamingBubbleQueue);
+  }
+  function finalizeStreamingBubble(bubble){
+    if(!bubble) return;
+    var state=bubble._attendStream;
+    if(!state) return;
+    streamingBubbleQueue.delete(bubble);
+    setBubbleText(bubble,state.raw,true);
+  }
+  function finalizeStreamingMessage(message){
+    var bubble=message&&message.querySelector&&message.querySelector('.bubble');
+    if(bubble) finalizeStreamingBubble(bubble);
   }
   // A path-like token: absolute (/…, C:\\…, ~/…) or a relative path / bare filename
   // with a real extension. Unicode segments are kept together so text such as
@@ -7926,10 +9143,24 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function vendorTheme(vendor){
     return vendor==='claude'
-      ? { fg:'#c2410c', bg:'#fff7ed', border:'#fdba74' }
+      ? { fg:'var(--vendor-claude-fg)', bg:'var(--vendor-claude-bg)', border:'var(--vendor-claude-border)' }
       : vendor==='cursor'
         ? { fg:'var(--vendor-cursor-fg)', bg:'var(--vendor-cursor-bg)', border:'var(--vendor-cursor-border)' }
-        : { fg:'#3730a3', bg:'#eef2ff', border:'#a5b4fc' };
+        : vendor==='antigravity'
+          ? { fg:'var(--vendor-antigravity-fg)', bg:'var(--vendor-antigravity-bg)', border:'var(--vendor-antigravity-border)' }
+          : vendor==='copilot'
+            ? { fg:'var(--vendor-copilot-fg)', bg:'var(--vendor-copilot-bg)', border:'var(--vendor-copilot-border)' }
+            : { fg:'var(--vendor-codex-fg)', bg:'var(--vendor-codex-bg)', border:'var(--vendor-codex-border)' };
+  }
+  function setActionVendor(node,vendor){
+    if(!node) return;
+    var value=String(vendor||'').trim().toLowerCase();
+    if(vendorInfo(value)) node.setAttribute('data-vendor',value);
+    else node.removeAttribute('data-vendor');
+  }
+  function syncNewActionVendors(){
+    var vendor=newGoalVendor();
+    ['newToggle','nbtn','scheduleNew'].forEach(function(id){ setActionVendor(byId(id),vendor); });
   }
   function customSelectTheme(sel, optValue){
     if(!sel) return null;
@@ -8422,7 +9653,6 @@ window.__CHANGELOG__ = ${changelogJson};
     var content=el('div','todohub-content'),text=el('button','todohub-text',item.text); text.type='button';
     text.setAttribute('data-hover-tip',item.text);
     if(entry.session){
-      text.title='Open session';
       text.onclick=function(){ closeTodoHub(); select(entry.session); };
     } else {
       text.title='Edit todo';
@@ -8431,7 +9661,9 @@ window.__CHANGELOG__ = ${changelogJson};
     content.appendChild(text);
     var meta=el('div','todohub-meta');
     if(entry.session){
-      var scope=el('button','todohub-scope',todoHubSessionLabel(entry.session)); scope.type='button';
+      var sessionLabel=todoHubSessionLabel(entry.session);
+      var scope=el('button','todohub-scope',sessionLabel); scope.type='button';
+      scope.setAttribute('data-hover-tip',sessionLabel);
       scope.onclick=function(){ closeTodoHub(); select(entry.session); }; meta.appendChild(scope);
     }
     meta.appendChild(el('span','',ageLabelAt(item.updatedAt)));
@@ -8566,6 +9798,34 @@ window.__CHANGELOG__ = ${changelogJson};
       refreshGoalToggle();
     }
     drainOrphanAnalysis(s);
+  }
+  // A provider can roll a live session's id mid-turn — Claude /clear reinitializes with a
+  // fresh session_id (and a fresh transcript). The bus/snapshot still reports the run under
+  // its stable clientSessionId, so a tab that already carries that client identity should
+  // FOLLOW the roll: rebind to the new provider id (dropping the old one from its identity so
+  // the pre-clear transcript surfaces as its own historical card) and absorb any card the disk
+  // scan may have already produced for the new id. Without this the tab strands on the dead
+  // pre-clear id while the live conversation silently reappears as a second, unrelated tab.
+  function followRolledProviderId(s,newId){
+    newId=String(newId||'');
+    // Only stable-identity tabs can follow: a plain scanned/resumed session has no client
+    // handle linking old id to new, so its roll is (correctly) a distinct session.
+    if(!s || !newId || !s.clientBranchId) return false;
+    if(providerSessionId(s)===newId) return false;
+    bindProviderSessionId(s,newId);
+    // Fold any sibling the scan already surfaced for the rolled id into this tab, keeping the
+    // followed tab (and the user's selection) as the single owner. Iterate a copy so the
+    // splice is safe even when a caller is mid-iteration over SESS.
+    SESS.slice().forEach(function(other){
+      if(other===s) return;
+      if(String(other.vendor||'')!==String(s.vendor||'')) return;
+      if(chatSessionIds(other).indexOf(newId)<0) return;
+      var idx=SESS.indexOf(other); if(idx<0) return;
+      var wasCurrent=cur===other;
+      SESS.splice(idx,1);
+      if(wasCurrent) select(s);
+    });
+    return true;
   }
   function railOptionLabel(options,value,fallback){
     for(var i=0;i<(options||[]).length;i++) if(String(options[i].value)===String(value)) return options[i].label||options[i].value;
@@ -9182,6 +10442,7 @@ window.__CHANGELOG__ = ${changelogJson};
       var value=opt.value.trim();
       var label=typeof opt.label==='string' && opt.label.trim() ? opt.label.trim() : value;
       var out={ value:value, label:label };
+      if(typeof opt.resolvedModel==='string' && opt.resolvedModel.trim()) out.resolvedModel=opt.resolvedModel.trim();
       if(Array.isArray(opt.efforts)){
         var efs=opt.efforts.filter(function(e){ return typeof e==='string' && e.trim(); })
           .map(function(e){ return e.trim(); });
@@ -9214,11 +10475,38 @@ window.__CHANGELOG__ = ${changelogJson};
   function modelMetaFor(vendor, model){
     var slug=String(model||'').trim();
     if(!slug) return null;
-    var src = vendor==='claude' ? CLAUDE_MODELS : (vendor==='codex' ? CODEX_MODELS : (vendor==='cursor' ? CURSOR_MODELS : null));
+    var src = vendor==='claude' ? CLAUDE_MODELS
+      : vendor==='codex' ? CODEX_MODELS
+      : vendor==='cursor' ? CURSOR_MODELS
+      : vendor==='antigravity' ? ANTIGRAVITY_MODELS
+      : vendor==='copilot' ? COPILOT_MODELS
+      : null;
     if(!src) return null;
     var list=normalizedModelOptions(src);
     for(var i=0;i<list.length;i++){ if(list[i].value===slug) return list[i]; }
+    // A stored/CLI-default model id often isn't the advertised alias value: it may
+    // be the resolved id claude-opus-4-8[1m], a bare resolved id without the
+    // context-window suffix claude-opus-4-8, or a legacy alias whose suffix the
+    // catalog has since changed (opus, now opus[1m]). Fall back to the alias that
+    // matches by resolvedModel or by suffix-insensitive value/resolvedModel, so it
+    // inherits that alias's effort/speed metadata.
+    var bare=stripModelContextSuffix(slug);
+    for(var j=0;j<list.length;j++){
+      var opt=list[j];
+      if(opt.resolvedModel===slug) return opt;
+      if(stripModelContextSuffix(opt.value)===bare) return opt;
+      if(opt.resolvedModel && stripModelContextSuffix(opt.resolvedModel)===bare) return opt;
+    }
     return null;
+  }
+  function stripModelContextSuffix(value){
+    // No regex: this function body lives inside the SPA template literal, where a
+    // backslash escape like \\[ would be swallowed at template evaluation and
+    // silently corrupt the pattern. Strip a trailing bracketed context suffix
+    // (e.g. "[1m]") by hand instead.
+    var v=String(value||'').trim();
+    var open=v.lastIndexOf('[');
+    return open>0 && v.charAt(v.length-1)===']' ? v.slice(0,open) : v;
   }
   function matrixAxisValues(meta, axis){
     var advertised=axis==='effort' ? (meta&&meta.efforts) : (meta&&meta.speeds);
@@ -9355,8 +10643,20 @@ window.__CHANGELOG__ = ${changelogJson};
     saveNewPrefs();
   }
   function claudeModelOptions(){
-    var dynamic = normalizedModelOptions(CLAUDE_MODELS);
-    return optionsWithDefault(dynamic, cliDefault('claude', 'model'), 'CLI default');
+    var dynamic = normalizedModelOptions(CLAUDE_MODELS).map(function(o){ return Object.assign({}, o); });
+    var def = cliDefault('claude', 'model');
+    if(!def) return dynamic;
+    // The CLI default is itself an advertised alias → tag it in place, no dup row.
+    for(var i=0;i<dynamic.length;i++){
+      if(dynamic[i].value===def){ dynamic[i].label=dynamic[i].label+' (CLI default)'; return dynamic; }
+    }
+    // The CLI default is a pinned resolved id (e.g. claude-opus-4-8[1m]). Keep it
+    // as its own row — its context-window variant matters for execution — but name
+    // the alias it resolves from so it isn't confused with the bare alias entry.
+    // Effort/speed stay usable via modelMetaFor's resolvedModel fallback.
+    var base=modelMetaFor('claude', def);
+    var entry={ value:def, label:(base ? base.label+' · '+def : def)+' (CLI default)' };
+    return [entry].concat(dynamic);
   }
   function codexModelOptions(){
     var dynamic = normalizedModelOptions(CODEX_MODELS);
@@ -9465,10 +10765,32 @@ window.__CHANGELOG__ = ${changelogJson};
       applyCursorModelSnapshot(res && res.models);
     }).catch(function(){});
   }
+  function applyProcessModelSnapshot(vendor,models){
+    var next=normalizedModelOptions(models); if(!next.length) return;
+    if(vendor==='antigravity') ANTIGRAVITY_MODELS=next;
+    else if(vendor==='copilot') COPILOT_MODELS=next;
+    var nvendor=String((byId('nvendor')||{}).value||'').trim().toLowerCase();
+    if(nvendor===vendor){
+      var nmodel=selectedNewModel();
+      populateSelect('nmodel',modelOptionsFor(vendor),nmodel);
+      refreshNewConfigurationOptions(selectedNewEffort(),selectedNewSpeed());
+    }
+    var rvendor=String((byId('rvendor')||{}).value||'').trim().toLowerCase();
+    if(rvendor===vendor&&runPopOpen()) refreshRunConfigControls(false);
+  }
+  function refreshProcessModels(vendor){
+    fetch('/models/'+vendor,{cache:'no-store'}).then(function(r){ return r.json(); }).then(function(res){
+      applyModelWarning(vendor,res&&res.warning);
+      applyModelDefaults(vendor,res&&res.defaults);
+      applyProcessModelSnapshot(vendor,res&&res.models);
+    }).catch(function(){});
+  }
   function modelOptionsFor(vendor){
     if(vendor==='claude') return claudeModelOptions();
     if(vendor==='codex') return codexModelOptions();
     if(vendor==='cursor') return cursorModelOptions();
+    if(vendor==='antigravity') return optionsWithDefault(ANTIGRAVITY_MODELS,cliDefault(vendor,'model'),'CLI default');
+    if(vendor==='copilot') return optionsWithDefault(COPILOT_MODELS,cliDefault(vendor,'model'),'CLI default');
     return optionsWithDefault([], cliDefault(vendor, 'model'), 'CLI default');
   }
   function applyNewSessionPrefs(force){
@@ -9730,7 +11052,7 @@ window.__CHANGELOG__ = ${changelogJson};
       addChoice(dirChoiceFromPath(dir, 'recent'));
     });
     (remoteHits||[]).forEach(addChoice);
-    return out.slice(0, DIR_SUGGEST_LIMIT);
+    return out;
   }
   function rememberRecentDir(dir){
     var value=String(dir||'').trim(); if(!value) return;
@@ -9856,6 +11178,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var wantsOpen=false;
     var remoteQuery=null;
     var remoteHits=[];
+    var remoteHasMore=false;
     var remoteLoading=false;
     var remoteSeq=0;
     var remoteTimer=null;
@@ -9911,7 +11234,8 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     function render(open, query){
       var q=String(query==null ? input.value : query);
-      var remote = remoteQuery===q ? remoteHits : [];
+      var remoteMatches=remoteQuery===q;
+      var remote = remoteMatches ? remoteHits : [];
       var hits=dirChoices(q, remote);
       drop.innerHTML='';
       hits.forEach(function(choice){ renderDirChoice(choice); });
@@ -9921,35 +11245,59 @@ window.__CHANGELOG__ = ${changelogJson};
         var tip=remoteLoading ? 'Loading local folders...' : (isAbsolutePathLike(input.value) ? 'Type a folder path, or keep typing to browse local subfolders' : 'Type a folder path; relative inputs resolve against your vault roots');
         drop.appendChild(el('div','chooser-empty', tip));
       }
+      if(remoteMatches && (remoteHasMore || (remoteLoading && remoteHits.length))){
+        var more=el('button','chooser-more',remoteLoading ? 'Loading more folders…' : 'Load more folders');
+        more.type='button';
+        more.disabled=remoteLoading;
+        more.onmousedown=function(ev){ ev.preventDefault(); ev.stopPropagation(); };
+        more.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); requestSuggestions(q,true); };
+        drop.appendChild(more);
+      }
       drop.hidden = !open && !hits.length;
       if(open) drop.hidden=false;
       positionDrop();
       if(active>=items().length) active=items().length-1;
       Array.prototype.forEach.call(items(), function(node, idx){ node.classList.toggle('on', idx===active); });
     }
-    function requestSuggestions(query){
+    function fetchSuggestionsPage(q, offset, append, seq){
+      remoteLoading=true;
+      if(wantsOpen) render(true, q);
+      fetch('/dirs/suggest?q='+encodeURIComponent(q)+'&offset='+offset+'&limit='+DIR_SUGGEST_LIMIT)
+        .then(function(r){ return r.ok ? r.json() : { dirs:[], hasMore:false }; })
+        .then(function(res){
+          if(seq!==remoteSeq) return;
+          var next=(res && Array.isArray(res.dirs) ? res.dirs : []).map(normalizeDirSuggestion).filter(Boolean);
+          remoteQuery=q;
+          remoteHits=append ? remoteHits.concat(next) : next;
+          remoteHasMore=!!(res && res.hasMore);
+          remoteLoading=false;
+          if(wantsOpen) render(true, currentQuery());
+        })
+        .catch(function(){
+          if(seq!==remoteSeq) return;
+          remoteQuery=q;
+          if(!append){ remoteHits=[]; remoteHasMore=false; }
+          remoteLoading=false;
+          if(wantsOpen) render(true, currentQuery());
+        });
+    }
+    function requestSuggestions(query, append){
       var q=String(query||'');
       if(remoteTimer) window.clearTimeout(remoteTimer);
+      if(append){
+        if(remoteLoading || remoteQuery!==q || !remoteHasMore) return;
+        fetchSuggestionsPage(q,remoteHits.length,true,++remoteSeq);
+        return;
+      }
+      var seq=++remoteSeq;
+      remoteQuery=q;
+      remoteHits=[];
+      remoteHasMore=false;
+      remoteLoading=true;
+      if(wantsOpen) render(true, q);
       remoteTimer=window.setTimeout(function(){
-        var seq=++remoteSeq;
-        remoteLoading=true;
-        if(wantsOpen) render(true, q);
-        fetch('/dirs/suggest?q='+encodeURIComponent(q))
-          .then(function(r){ return r.ok ? r.json() : { dirs:[] }; })
-          .then(function(res){
-            if(seq!==remoteSeq) return;
-            remoteQuery=q;
-            remoteHits=(res && Array.isArray(res.dirs) ? res.dirs : []).map(normalizeDirSuggestion).filter(Boolean);
-            remoteLoading=false;
-            if(wantsOpen) render(true, currentQuery());
-          })
-          .catch(function(){
-            if(seq!==remoteSeq) return;
-            remoteQuery=q;
-            remoteHits=[];
-            remoteLoading=false;
-            if(wantsOpen) render(true, currentQuery());
-          });
+        remoteTimer=null;
+        fetchSuggestionsPage(q,0,false,seq);
       }, q.trim() ? 90 : 0);
     }
     input.addEventListener('click', function(ev){ ev.stopPropagation(); });
@@ -9965,6 +11313,10 @@ window.__CHANGELOG__ = ${changelogJson};
     });
     drop.addEventListener('mousedown', function(ev){ ev.stopPropagation(); });
     drop.addEventListener('click', function(ev){ ev.stopPropagation(); });
+    drop.addEventListener('scroll', function(){
+      if(drop.hidden || remoteLoading || remoteQuery!==currentQuery() || !remoteHasMore) return;
+      if(drop.scrollTop+drop.clientHeight>=drop.scrollHeight-24) requestSuggestions(currentQuery(),true);
+    });
     function insideChooser(target){
       var box=byId('ndirBox');
       return !!((box&&box.contains(target)) || drop.contains(target));
@@ -10209,6 +11561,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function openNewBox(){
     closeTodoHub();
     refreshCodexModels();
+    refreshNewGoalToggle();
     var box=byId('newbox'); if(box) box.classList.add('open');
     var btn=byId('newToggle'); if(btn) btn.setAttribute('aria-expanded','true');
     syncNewBoxPlacement();
@@ -10663,7 +12016,7 @@ window.__CHANGELOG__ = ${changelogJson};
         }
       }
       if(def.kind==='user' && !hidden && visiblePinnedCount && !pinned && !pinDividerInserted) appendPinDivider();
-      var manageable=def.deletable && !hidden;
+      var manageable=def.deletable;
       var chip=el('span','gtag'+(active?' on':'')+(def.kind!=='user'?' auto':'')+(def.kind==='untagged'?' untagged':'')+(manageable?' deletable':'')+(pinned?' tag-pinned':'')+(hidden?' tag-hidden':''));
       var btn=el('button','gtagbtn',def.label);
       var count=tagCounts[def.key]||0;
@@ -10859,7 +12212,7 @@ window.__CHANGELOG__ = ${changelogJson};
     clearButton.disabled=count===0;
     modal.hidden=false;
     modal.setAttribute('aria-hidden','false');
-    window.setTimeout(function(){ (clearButton.hidden?byId('tagActionDelete'):clearButton).focus(); },0);
+    window.setTimeout(function(){ byId('tagActionDelete').focus(); },0);
   }
   function closeGlobalTagAction(){
     var modal=byId('tagAction');
@@ -11075,6 +12428,19 @@ window.__CHANGELOG__ = ${changelogJson};
     highlightSessionTagOption();
     positionSessionTagPopover();
   }
+  function currentSessionTagAddButton(s,surface){
+    if(!s||!s.sessionId) return null;
+    if(surface==='header'){
+      return cur&&sameChatSession(cur,s) ? byId('h-tags').querySelector('.it-tagadd') : null;
+    }
+    var host=byId(surface==='panel'?'sessionPanelList':'list'),id=String(s.sessionId);
+    if(!host) return null;
+    var rows=host.querySelectorAll('.item[data-session-id]');
+    for(var i=0;i<rows.length;i++){
+      if(rows[i].getAttribute('data-session-id')===id) return rows[i].querySelector('.it-tagadd');
+    }
+    return null;
+  }
   function openSessionTagPopover(button,s,surface){
     if(!button||!s||!s.sessionId) return;
     if(sessionTagPopoverState&&sessionTagPopoverState.button===button){ closeSessionTagPopover(); return; }
@@ -11086,6 +12452,43 @@ window.__CHANGELOG__ = ${changelogJson};
     pop.hidden=false; input.value=''; input.setAttribute('aria-expanded','true');
     renderSessionTagPopover();
     setTimeout(function(){ if(sessionTagPopoverState&&sessionTagPopoverState.button===button){ input.focus(); positionSessionTagPopover(); } },0);
+  }
+  function bindSessionTagAddButton(add,s,surface){
+    var suppressClick=false;
+    add.onpointerdown=function(ev){
+      if((ev.pointerType&&ev.pointerType!=='mouse')||ev.button!==0) return;
+      var pointerId=ev.pointerId,startX=ev.clientX,startY=ev.clientY,moved=false;
+      function cleanup(){
+        window.removeEventListener('pointermove',move);
+        window.removeEventListener('pointerup',finish);
+        window.removeEventListener('pointercancel',cancel);
+      }
+      function move(next){
+        if(next.pointerId!==pointerId) return;
+        if(Math.abs(next.clientX-startX)>5||Math.abs(next.clientY-startY)>5) moved=true;
+      }
+      function finish(next){
+        if(next.pointerId!==pointerId) return;
+        cleanup();
+        // A live update can rebuild the session row between pointerdown and
+        // pointerup. In that case the detached button never receives a click,
+        // so finish the activation against the row's current button instead.
+        suppressClick=true;
+        setTimeout(function(){ suppressClick=false; },0);
+        if(moved) return;
+        var current=currentSessionTagAddButton(s,surface);
+        if(current) openSessionTagPopover(current,s,surface);
+      }
+      function cancel(next){ if(next.pointerId===pointerId) cleanup(); }
+      window.addEventListener('pointermove',move);
+      window.addEventListener('pointerup',finish);
+      window.addEventListener('pointercancel',cancel);
+    };
+    add.onclick=function(ev){
+      ev.preventDefault(); ev.stopPropagation();
+      if(suppressClick){ suppressClick=false; return; }
+      openSessionTagPopover(add.isConnected?add:currentSessionTagAddButton(s,surface),s,surface);
+    };
   }
   // Auto-scroll is "sticky": we only pull to the bottom while the user is already
   // there. If they scroll up to read mid-turn, streamed chunks must NOT yank them
@@ -11147,11 +12550,15 @@ window.__CHANGELOG__ = ${changelogJson};
     var m=byId('commentMsgs'); if(!m) return;
     commentStick=true; m.scrollTo({top:m.scrollHeight,behavior:'smooth'});
   }
-  (function(){ var m=byId('msgs'); if(m){
+  function bindTranscriptPaneHost(m){
+    if(!m||m._attendTranscriptBound) return;
+    m._attendTranscriptBound=true;
     m.addEventListener('wheel',function(ev){ handoffNestedToolScroll(ev,m); },{passive:false});
-    m.addEventListener('scroll', function(ev){ stick = nearBottom(); if(cur) stashSessionScroll(cur); syncScrollBottomButton(m,byId('chatScrollBottom')); trackVisitScroll(ev); scheduleLatestPin(); scheduleTranscriptVirtualWindow(); });
-  } })();
-  function clearPh(){ var p=byId('ph'); if(p) p.remove(); }
+    m.addEventListener('scroll', function(ev){ stick = nearBottom(); if(cur) stashSessionScroll(cur); syncScrollBottomButton(m,byId('chatScrollBottom')); trackVisitScroll(ev); scheduleLatestPin(); scheduleTranscriptVirtualWindow(); if(ev.isTrusted&&cur&&m.scrollTop<120) loadEarlierTranscript(cur); });
+  }
+  bindTranscriptPaneHost(byId('msgs'));
+  function activeTranscriptPlaceholder(){ var host=byId('msgs'); return host&&host.querySelector('#ph'); }
+  function clearPh(){ var p=activeTranscriptPlaceholder(); if(p) p.remove(); }
 
   // A persistent "生成中…" indicator pinned to the BOTTOM of the chat (the append
   // point) for the whole turn — before the first token, between text chunks, and
@@ -11222,7 +12629,8 @@ window.__CHANGELOG__ = ${changelogJson};
       top:Math.max(0,host.scrollTop),
       max:max,
       atBottom:nearScrollBottom(host),
-      unreadRatio:currentTurnUnreadRatio(host)
+      unreadRatio:currentTurnUnreadRatio(host),
+      anchor:transcriptViewportAnchor()
     };
     syncSessionReadProgress(s);
   }
@@ -11515,6 +12923,7 @@ window.__CHANGELOG__ = ${changelogJson};
       go.title=turn.goal?'Goals start with the next turn':immediate.unavailable;
     } else {
       go=el('button','qdispatch qsend',turnActive?immediate.label:'send');
+      setActionVendor(go,(turn&&turn.vendor)||(cur&&currentForkDefaults().vendor)||(cur&&cur.vendor));
       go.disabled=queuedSendBusy(cur,turn.id);
       go.title=turnActive?immediate.title:'Send this edited queued message now';
       go.onclick=function(ev){ ev.stopPropagation(); commit(true); };
@@ -11538,6 +12947,9 @@ window.__CHANGELOG__ = ${changelogJson};
   function composerVendorChanged(){ return !!(cur && cur.runVendor && cur.runVendor!==cur.vendor); }
   function updateSendLabel(){ var b=byId('send'),forkButton=byId('forkBtn'); if(!b) return;
     var changed=composerVendorChanged(),vendor=(currentForkDefaults()).vendor||'selected vendor';
+    setActionVendor(b,vendor);
+    setActionVendor(forkButton,vendor);
+    setActionVendor(byId('scheduleChat'),vendor);
     if(turnActive){
       b.textContent='■ stop'; b.disabled=false; b.title='Stop the current generation (Esc)';
       if(forkButton){ forkButton.hidden=false; setForkButtonLabel(forkButton,changed?'fork with '+vendor:'fork'); }
@@ -11570,7 +12982,7 @@ window.__CHANGELOG__ = ${changelogJson};
     refreshForkButton();
     renderQueue();
   }
-  function endTurn(outcome){ clearGen(); turnActive=false; setInputEnabled(true); updateSendLabel(); markCurGenerating(false,outcome); refreshForkButton(); refreshGoalToggle(); }
+  function endTurn(outcome){ finalizeStreamingMessage(assistantEl); clearGen(); turnActive=false; setInputEnabled(true); updateSendLabel(); markCurGenerating(false,outcome); refreshForkButton(); refreshGoalToggle(); }
   function markCurGenerating(on,outcome){
     if(!cur) return;
     if(!on && cur.lastGenerationDurationMs==null) finishGenerationTiming(cur,Date.now(),outcome);
@@ -11615,11 +13027,13 @@ window.__CHANGELOG__ = ${changelogJson};
         sb.title=turn.goal?'Goals start with the next turn':immediate.unavailable;
       } else {
         sb=el('button','qdispatch qsend',turnActive?immediate.label:'send');
+        setActionVendor(sb,(turn&&turn.vendor)||(cur&&currentForkDefaults().vendor)||(cur&&cur.vendor));
         sb.disabled=queuedSendBusy(cur,turn.id);
         sb.title=turnActive?immediate.title:'Send this queued message now';
         sb.onclick=function(){ sendQueued(i); };
       }
       var fb=el('button','qaction qfork');
+      setActionVendor(fb,(turn&&turn.vendor)||(cur&&currentForkDefaults().vendor)||(cur&&cur.vendor));
       setIconButton(fb,'fork','Fork queued message into a new session');
       var forkReady=String(turn.id||'').indexOf('pending-')!==0;
       fb.disabled=!forkReady || queuedForkBusy(cur,turn.id);
@@ -12022,15 +13436,16 @@ window.__CHANGELOG__ = ${changelogJson};
     group.sessions.splice(index,1);
     if(!group.sessions.length) removeChatGroup(group);
     persistChatGroups([group]);
-    if(!wasCurrent){ renderChatTabs(); return; }
+    if(!wasCurrent){ discardTranscriptPane(s); renderChatTabs(); return; }
     var next=group.sessions[Math.min(index,group.sessions.length-1)]||null;
-    if(next){ select(next); return; }
+    if(next){ select(next); discardTranscriptPane(s); return; }
     flushVisit(false);
     stashSessionScroll(cur);
     stashComposerDraft(cur); stashAttachmentState(cur); stashPinReferenceState(cur); stashQueueState(cur);
     if(!(byId('commentDrawer')||{}).hidden) closeCommentDrawer();
     closeComposerRail(); clearGen(); turnActive=false;
     resetOpenHeader(); renderSidebar(); renderChatTabs();
+    discardTranscriptPane(s);
     document.body.classList.remove('show-chat');
   }
   function renderChatTabs(){
@@ -12121,9 +13536,7 @@ window.__CHANGELOG__ = ${changelogJson};
       var add=el('button','it-tagadd','+ tag');
       add.type='button';
       add.setAttribute('aria-haspopup','dialog'); add.setAttribute('aria-expanded','false'); add.setAttribute('aria-controls','sessionTagPopover');
-      add.onclick=function(ev){
-        ev.preventDefault(); ev.stopPropagation(); openSessionTagPopover(add,s,'header');
-      };
+      bindSessionTagAddButton(add,s,'header');
       tags.appendChild(add);
     }
     row.appendChild(tags);
@@ -12252,12 +13665,7 @@ window.__CHANGELOG__ = ${changelogJson};
     button.setAttribute('aria-pressed',pinned?'true':'false');
   }
   function titleDirLabel(s){
-    var dir=String((s&&s.cwd)||'').replace(/\\\\/g,'/').replace(/\\/+$/,'');
-    if(dir){
-      var i=dir.lastIndexOf('/');
-      return dir.slice(i+1) || dir;
-    }
-    return String((s&&s.project)||'').trim();
+    return String((s&&s.tabTitle)||'').trim();
   }
   function syncPageTitle(s){
     var label=titleDirLabel(s);
@@ -12323,6 +13731,7 @@ window.__CHANGELOG__ = ${changelogJson};
         if(found){
           if(found.file) s.file = found.file;
           if(found.cwd) s.cwd = found.cwd;
+          if(typeof found.tabTitle==='string') s.tabTitle = found.tabTitle;
           if(found.project) s.project = found.project;
           if(found.vendor) s.vendor = found.vendor;
           if(found.title && (!s.title || s.title==='(new session)')) s.title = found.title;
@@ -12351,13 +13760,6 @@ window.__CHANGELOG__ = ${changelogJson};
       .catch(function(){ return s; })
       .finally(function(){ s._resolvingSource = false; });
   }
-  function warmTranscriptCache(s){
-    if(!s || !s.sessionId || s.pendingFork || s._warmingTranscript) return Promise.resolve();
-    s._warmingTranscript = true;
-    return loadTranscriptBaseline(s,{force:true,preserveSort:true}).catch(function(){})
-      .finally(function(){ s._warmingTranscript = false; });
-  }
-
   function sessionSortTs(s){
     if(!s) return null;
     return Math.max(Number(s.sortTs!=null ? s.sortTs : s.lastTs)||0,latestCommentUserTsForSession(s));
@@ -12366,10 +13768,68 @@ window.__CHANGELOG__ = ${changelogJson};
     var id=String(s&&s.sessionId||'');
     return id&&VAULT_STATE.sessionPins ? Number(VAULT_STATE.sessionPins[id])||0 : 0;
   }
+  function orderedSessionPinIds(){
+    var pins=VAULT_STATE.sessionPins&&typeof VAULT_STATE.sessionPins==='object' ? VAULT_STATE.sessionPins : {};
+    return Object.keys(pins).filter(function(id){ return Number(pins[id])>0; }).sort(function(a,b){
+      var ap=Number(pins[a])||0,bp=Number(pins[b])||0;
+      if(ap!==bp) return ap-bp;
+      return a<b ? -1 : a>b ? 1 : 0;
+    });
+  }
   function compareSessionPins(a,b){
     var ap=sessionPinTime(a), bp=sessionPinTime(b);
     if(!!ap!==!!bp) return ap ? -1 : 1;
-    return 0;
+    if(!ap) return 0;
+    if(ap!==bp) return ap-bp;
+    var aid=String(a&&a.sessionId||''), bid=String(b&&b.sessionId||'');
+    return aid<bid ? -1 : aid>bid ? 1 : 0;
+  }
+  function nextSessionPinTime(){
+    var latest=orderedSessionPinIds().reduce(function(value,id){
+      return Math.max(value,Number(VAULT_STATE.sessionPins[id])||0);
+    },0);
+    return Math.max(nextMutationTimestamp(),latest+1);
+  }
+  function sameSessionPinOrder(a,b){
+    if(a.length!==b.length) return false;
+    for(var i=0;i<a.length;i++){ if(a[i]!==b[i]) return false; }
+    return true;
+  }
+  function saveVisibleSessionPinOrder(visibleOrder){
+    var fullOrder=orderedSessionPinIds(),visibleSet={},cleanVisible=[];
+    visibleOrder.forEach(function(id){
+      id=String(id||'');
+      if(!id||visibleSet[id]||fullOrder.indexOf(id)<0) return;
+      visibleSet[id]=true; cleanVisible.push(id);
+    });
+    if(cleanVisible.length<2) return false;
+    var cursor=0;
+    var nextOrder=fullOrder.map(function(id){ return visibleSet[id] ? cleanVisible[cursor++] : id; });
+    if(sameSessionPinOrder(fullOrder,nextOrder)) return false;
+    var prevPins=Object.assign({},VAULT_STATE.sessionPins||{}),nextPins=Object.assign({},prevPins),patch={};
+    nextOrder.forEach(function(id,index){ nextPins[id]=index+1; patch[id]=index+1; });
+    var operation=beginOperation('session-pins','order');
+    VAULT_STATE.sessionPins=nextPins;
+    sortSessions(); renderSidebar();
+    saveVaultUiState({sessionPins:patch}).then(function(ok){
+      if(ok||!operationIsCurrent(operation)) return;
+      VAULT_STATE.sessionPins=prevPins;
+      sortSessions(); renderSidebar();
+      syncHeaderPinButton();
+    });
+    return true;
+  }
+  function reorderPinnedSession(sourceId,targetId,after){
+    sourceId=String(sourceId||''); targetId=String(targetId||'');
+    if(!sourceId||!targetId||sourceId===targetId) return false;
+    var visible=sidebarVisibleSessions.filter(function(s){ return !!sessionPinTime(s); }).map(function(s){ return String(s.sessionId||''); });
+    var sourceIndex=visible.indexOf(sourceId);
+    if(sourceIndex<0) return false;
+    visible.splice(sourceIndex,1);
+    var targetIndex=visible.indexOf(targetId);
+    if(targetIndex<0) return false;
+    visible.splice(targetIndex+(after?1:0),0,sourceId);
+    return saveVisibleSessionPinOrder(visible);
   }
   function sessionPinBoundaryIndex(sessions){
     for(var i=1;i<(sessions||[]).length;i++){
@@ -12398,12 +13858,18 @@ window.__CHANGELOG__ = ${changelogJson};
   function toggleSessionPin(s){
     var id=String(s&&s.sessionId||''); if(!id) return;
     if(!VAULT_STATE.sessionPins || typeof VAULT_STATE.sessionPins!=='object') VAULT_STATE.sessionPins={};
-    var patch={};
+    var prevPins=Object.assign({},VAULT_STATE.sessionPins),patch={};
+    var operation=beginOperation('session-pins','order');
     if(sessionPinTime(s)){ delete VAULT_STATE.sessionPins[id]; patch[id]=null; }
-    else { VAULT_STATE.sessionPins[id]=Date.now(); patch[id]=VAULT_STATE.sessionPins[id]; }
-    saveVaultUiState({sessionPins:patch});
+    else { VAULT_STATE.sessionPins[id]=nextSessionPinTime(); patch[id]=VAULT_STATE.sessionPins[id]; }
     sortSessions(); renderSidebar();
     if(cur&&String(cur.sessionId||'')===id) syncHeaderPinButton();
+    saveVaultUiState({sessionPins:patch}).then(function(ok){
+      if(ok||!operationIsCurrent(operation)) return;
+      VAULT_STATE.sessionPins=prevPins;
+      sortSessions(); renderSidebar();
+      syncHeaderPinButton();
+    });
   }
   // Bump a session to the top on user-authored activity. Plainly opening a tab is
   // handled by engagement telemetry and must not affect recent sorting.
@@ -12435,6 +13901,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var contentSearchQ='';
   var contentSearchTimer=null;
   var contentSearchSeq=0;
+  var contentSearchLoading=false;
   var contentSearchResults={};
   var parsedSessionSearch={clauses:[],groups:[],test:function(){return true;}};
   function escapeSearchLiteral(text){ return String(text).replace(/[.*+?^\${}()|[\]\\]/g,'\\$&'); }
@@ -12490,25 +13957,41 @@ window.__CHANGELOG__ = ${changelogJson};
     contentSearchQ=q;
     contentSearchResults=map;
   }
+  function contentSearchUrl(q){
+    var url='/search?q='+encodeURIComponent(q);
+    var bounds=sessionSearchRangeBounds(sessionSearchRange);
+    if(!bounds) return url;
+    url+='&start='+encodeURIComponent(String(bounds.start))+'&end='+encodeURIComponent(String(bounds.end));
+    if(bounds.inclusiveEnd) url+='&inclusiveEnd=1';
+    return url;
+  }
   function scheduleContentSearch(){
     var q=filterQ;
     contentSearchSeq++;
     var seq=contentSearchSeq;
     if(contentSearchTimer) clearTimeout(contentSearchTimer);
     if(!q){
+      contentSearchLoading=false;
       setContentSearchResults('', []);
       return;
     }
+    contentSearchLoading=true;
     contentSearchTimer=setTimeout(function(){
-      fetch('/search?q='+encodeURIComponent(q))
+      contentSearchTimer=null;
+      fetch(contentSearchUrl(q))
         .then(function(r){ return r.json(); })
         .then(function(res){
           if(seq!==contentSearchSeq || q!==filterQ) return;
+          contentSearchLoading=false;
           setContentSearchResults(q, res && res.results);
-          sortSessions();
+          requestSessionReorder();
           scheduleSidebarRender();
         })
-        .catch(function(){});
+        .catch(function(){
+          if(seq!==contentSearchSeq || q!==filterQ) return;
+          contentSearchLoading=false;
+          scheduleSidebarRender();
+        });
     }, 300);
   }
   function textHasSearch(value){
@@ -13092,9 +14575,28 @@ window.__CHANGELOG__ = ${changelogJson};
     if(row) paintSessionReadProgress(row.querySelector('.session-read-progress'),s);
     sessionPanelNodes(s,'.session-read-progress').forEach(function(bar){ paintSessionReadProgress(bar,s); });
   }
+  var SESSION_ATTENTION_RAIL_DURATION_MS=1450;
+  function syncSessionAttentionRailPhase(row,s,generating){
+    if(!row) return;
+    if(!generating){
+      row.style.removeProperty('--session-attention-delay');
+      return;
+    }
+    // The middle panel is structurally rebuilt when ordering, tags, or analysis
+    // changes. A plain CSS animation would restart at each replacement. Anchor
+    // every new card to the turn (or the Unix epoch for legacy snapshots) so a
+    // replacement resumes at the same point in the loop.
+    if(row.style.getPropertyValue('--session-attention-delay')) return;
+    var startedAt=Number(s&&s.generatingStartedAt);
+    var origin=isFinite(startedAt)&&startedAt>0?startedAt:0;
+    var elapsed=Math.max(0,Date.now()-origin);
+    row.style.setProperty('--session-attention-delay','-'+Math.floor(elapsed%SESSION_ATTENTION_RAIL_DURATION_MS)+'ms');
+  }
   function paintSessionPanelRowStatus(row,s){
     if(!row) return;
-    ['generating','unread','seen','read'].forEach(function(state){ row.classList.toggle('session-status-'+state,statusState(s)===state); });
+    var current=statusState(s);
+    ['generating','unread','seen','read'].forEach(function(state){ row.classList.toggle('session-status-'+state,current===state); });
+    syncSessionAttentionRailPhase(row,s,current==='generating');
   }
   function applyGenerating(s){
     if(!s) return;
@@ -13286,9 +14788,221 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     return false;
   }
+  function sessionPinHost(surface){
+    return byId(surface==='panel'?'sessionPanelList':'list');
+  }
+  function sessionPinCards(host){
+    if(!host) return [];
+    return Array.prototype.slice.call(host.querySelectorAll('.item.session-pinned[data-session-id]')).filter(function(node){
+      return node.getAttribute('data-session-id')!==draggedPinnedSessionId;
+    });
+  }
+  function captureSessionPinDropGeometry(host,surface){
+    var cards=sessionPinCards(host).map(function(node){
+      var rect=node.getBoundingClientRect();
+      return {node:node,id:node.getAttribute('data-session-id')||'',left:rect.left,top:rect.top,right:rect.right,bottom:rect.bottom,width:rect.width,height:rect.height};
+    }).filter(function(entry){ return entry.width>0&&entry.height>0; });
+    if(surface!=='panel') return {surface:surface,cards:cards,rows:[],columns:1};
+    cards.sort(function(a,b){ return Math.abs(a.top-b.top)>3 ? a.top-b.top : a.left-b.left; });
+    var rows=[];
+    cards.forEach(function(entry){
+      var row=rows[rows.length-1];
+      if(!row||Math.abs(entry.top-row.top)>4){ row={cards:[],top:entry.top,bottom:entry.bottom}; rows.push(row); }
+      row.cards.push(entry);
+      row.top=Math.min(row.top,entry.top); row.bottom=Math.max(row.bottom,entry.bottom);
+    });
+    return {surface:surface,cards:cards,rows:rows,columns:sessionPanelColumnCount()};
+  }
+  function captureSessionPinDropGeometries(){
+    sessionPinDropGeometries={
+      sidebar:captureSessionPinDropGeometry(sessionPinHost('sidebar'),'sidebar'),
+      panel:captureSessionPinDropGeometry(sessionPinHost('panel'),'panel')
+    };
+  }
+  function sessionPinDropPosition(host,surface,ev){
+    var geometry=sessionPinDropGeometries[surface];
+    if(!geometry||!geometry.cards.length){
+      geometry=captureSessionPinDropGeometry(host,surface);
+      sessionPinDropGeometries[surface]=geometry;
+    }
+    if(!geometry.cards.length) return null;
+    var x=Number(ev&&ev.clientX)||0,y=Number(ev&&ev.clientY)||0;
+    if(surface!=='panel'){
+      for(var i=0;i<geometry.cards.length;i++){
+        var card=geometry.cards[i];
+        if(y<card.top+card.height/2) return {target:card.node,targetId:card.id,after:false};
+      }
+      var last=geometry.cards[geometry.cards.length-1];
+      return {target:last.node,targetId:last.id,after:true};
+    }
+    var rows=geometry.rows;
+    for(var r=0;r<rows.length;r++){
+      var row=rows[r],next=rows[r+1];
+      if(y<row.top){
+        var before=row.cards[0];
+        return {target:before.node,targetId:before.id,after:false};
+      }
+      var rowEnd=next ? row.bottom+(next.top-row.bottom)/2 : Infinity;
+      if(y>rowEnd) continue;
+      if(geometry.columns<=1){
+        var only=row.cards[0],afterOnly=y>=only.top+only.height/2;
+        return {target:only.node,targetId:only.id,after:afterOnly};
+      }
+      for(var c=0;c<row.cards.length;c++){
+        var entry=row.cards[c];
+        if(x<entry.left+entry.width/2) return {target:entry.node,targetId:entry.id,after:false};
+      }
+      var rowLast=row.cards[row.cards.length-1];
+      return {target:rowLast.node,targetId:rowLast.id,after:true};
+    }
+    var finalCard=geometry.cards[geometry.cards.length-1];
+    return {target:finalCard.node,targetId:finalCard.id,after:true};
+  }
+  function captureSessionPinRects(host){
+    var out={};
+    sessionPinCards(host).forEach(function(node){
+      var id='id:'+(node.getAttribute('data-session-id')||''),rect=node.getBoundingClientRect();
+      out[id]={left:rect.left,top:rect.top};
+    });
+    return out;
+  }
+  function animateSessionPinShift(host,before){
+    if(!host||!before) return;
+    var moved=[],dragToken=sessionCardDragToken;
+    sessionPinCards(host).forEach(function(node){
+      var previous=before['id:'+(node.getAttribute('data-session-id')||'')];
+      if(!previous) return;
+      var rect=node.getBoundingClientRect(),dx=previous.left-rect.left,dy=previous.top-rect.top;
+      if(Math.abs(dx)<0.5&&Math.abs(dy)<0.5) return;
+      if(node._sessionPinShiftTimer) window.clearTimeout(node._sessionPinShiftTimer);
+      node._sessionPinShiftEpoch=(node._sessionPinShiftEpoch||0)+1;
+      node.style.transition='none';
+      node.style.transform='translate('+dx+'px,'+dy+'px)';
+      moved.push({node:node,epoch:node._sessionPinShiftEpoch});
+    });
+    if(!moved.length) return;
+    host.offsetWidth;
+    window.requestAnimationFrame(function(){
+      moved.forEach(function(entry){
+        var node=entry.node;
+        if(sessionCardDragToken!==dragToken||node._sessionPinShiftEpoch!==entry.epoch){ node.style.transition=''; node.style.transform=''; return; }
+        node.style.transition='transform 165ms cubic-bezier(0.2,0.8,0.2,1)';
+        node.style.transform='';
+        node._sessionPinShiftTimer=window.setTimeout(function(){
+          if(node._sessionPinShiftEpoch!==entry.epoch) return;
+          node.style.transition=''; node.style.transform=''; node._sessionPinShiftTimer=0;
+        },190);
+      });
+    });
+  }
+  function sizeSessionPinPlaceholder(placeholder,rect,surface){
+    if(!placeholder||!rect) return;
+    placeholder.setAttribute('data-session-surface',surface);
+    placeholder.style.height=Math.max(surface==='panel'?72:30,Math.round(rect.height-(surface==='panel'?0:6)))+'px';
+  }
+  function createSessionPinPlaceholder(rect,surface){
+    var placeholder=el('div','session-pin-drop-placeholder');
+    placeholder.setAttribute('aria-hidden','true');
+    var label=el('span','session-pin-drop-label');
+    label.innerHTML='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 4 2 2v1H8.7L8 14l-.7-4.5H4v-1l2-2-1-4Z"></path></svg><span>Pinned position</span>';
+    placeholder.appendChild(label);
+    sizeSessionPinPlaceholder(placeholder,rect,surface);
+    return placeholder;
+  }
+  function showSessionPinDropPreview(host,surface,position){
+    if(!host||!position||!position.target||!position.target.parentNode) return;
+    var key=surface+':'+position.targetId+':'+(position.after?'after':'before');
+    if(sessionPinDropPlaceholder&&sessionPinDropPlaceholder.isConnected&&sessionPinDropKey===key) return;
+    var oldHost=sessionPinDropPlaceholder&&sessionPinDropPlaceholder.closest&&sessionPinDropPlaceholder.closest('#list,#sessionPanelList');
+    var snapshots=[];
+    if(oldHost) snapshots.push({host:oldHost,rects:captureSessionPinRects(oldHost)});
+    if(host!==oldHost) snapshots.push({host:host,rects:captureSessionPinRects(host)});
+    var targetRect=position.target.getBoundingClientRect();
+    if(!sessionPinDropPlaceholder) sessionPinDropPlaceholder=createSessionPinPlaceholder(targetRect,surface);
+    sizeSessionPinPlaceholder(sessionPinDropPlaceholder,targetRect,surface);
+    var anchor=position.after?position.target.nextSibling:position.target;
+    if(anchor===sessionPinDragSource) anchor=anchor.nextSibling;
+    position.target.parentNode.insertBefore(sessionPinDropPlaceholder,anchor);
+    sessionPinDropKey=key;
+    snapshots.forEach(function(snapshot){ animateSessionPinShift(snapshot.host,snapshot.rects); });
+  }
+  function markSessionPinDragPeers(source){
+    Array.prototype.forEach.call(document.querySelectorAll('.item.session-pinned[data-session-id]'),function(node){
+      if(node!==source&&node.getAttribute('data-session-id')===draggedPinnedSessionId) node.classList.add('session-pin-drag-peer');
+    });
+  }
+  function beginSessionCardDrag(item,s,surface){
+    var token=++sessionCardDragToken;
+    draggedChatSession=s;
+    item.classList.add('session-card-dragging');
+    draggedPinnedSessionId=sessionPinTime(s)?String(s.sessionId||''):'';
+    sessionPinDragSource=draggedPinnedSessionId?item:null;
+    sessionPinDragSurface=draggedPinnedSessionId?surface:'';
+    sessionPinDropKey='';
+    sessionPinDropGeometries={sidebar:null,panel:null};
+    if(!draggedPinnedSessionId) return token;
+    var rect=item.getBoundingClientRect();
+    captureSessionPinDropGeometries();
+    markSessionPinDragPeers(item);
+    window.setTimeout(function(){
+      if(sessionCardDragToken!==token||!draggedPinnedSessionId||!item.parentNode) return;
+      if(!sessionPinDropPlaceholder) sessionPinDropPlaceholder=createSessionPinPlaceholder(rect,surface);
+      item.parentNode.insertBefore(sessionPinDropPlaceholder,item);
+      sessionPinDropKey='source:'+surface+':'+draggedPinnedSessionId;
+      item.classList.add('session-pin-drag-layout-source');
+    },0);
+    return token;
+  }
+  function finishSessionCardDrag(token){
+    if(token!=null&&token!==sessionCardDragToken) return;
+    sessionCardDragToken++;
+    sessionRowClickSuppressUntil=Date.now()+350;
+    if(sessionPinDropPlaceholder) sessionPinDropPlaceholder.remove();
+    sessionPinDropPlaceholder=null;
+    sessionPinDropKey='';
+    sessionPinDropGeometries={sidebar:null,panel:null};
+    if(sessionPinDragSource) sessionPinDragSource.classList.remove('session-card-dragging','session-pin-drag-layout-source');
+    Array.prototype.forEach.call(document.querySelectorAll('.session-card-dragging,.session-pin-drag-layout-source,.session-pin-drag-peer'),function(node){
+      if(node._sessionPinShiftTimer) window.clearTimeout(node._sessionPinShiftTimer);
+      node._sessionPinShiftTimer=0; node.style.transition=''; node.style.transform='';
+      node.classList.remove('session-card-dragging','session-pin-drag-layout-source','session-pin-drag-peer');
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('#list.session-pin-drop-active,#sessionPanelList.session-pin-drop-active'),function(node){ node.classList.remove('session-pin-drop-active'); });
+    draggedPinnedSessionId='';
+    sessionPinDragSource=null;
+    sessionPinDragSurface='';
+    draggedChatSession=null;
+    var main=document.querySelector('.main'); if(main) main.classList.remove('session-drop-target');
+  }
+  function bindSessionPinOrderDrop(){
+    [{host:sessionPinHost('sidebar'),surface:'sidebar'},{host:sessionPinHost('panel'),surface:'panel'}].forEach(function(binding){
+      var host=binding.host,surface=binding.surface;
+      if(!host) return;
+      host.addEventListener('dragover',function(ev){
+        if(!draggedPinnedSessionId) return;
+        ev.preventDefault();
+        if(ev.dataTransfer) ev.dataTransfer.dropEffect='move';
+        var position=sessionPinDropPosition(host,surface,ev);
+        if(!position) return;
+        Array.prototype.forEach.call(document.querySelectorAll('#list.session-pin-drop-active,#sessionPanelList.session-pin-drop-active'),function(node){ node.classList.remove('session-pin-drop-active'); });
+        host.classList.add('session-pin-drop-active');
+        showSessionPinDropPreview(host,surface,position);
+      });
+      host.addEventListener('dragleave',function(ev){
+        if(!ev.relatedTarget||!host.contains(ev.relatedTarget)) host.classList.remove('session-pin-drop-active');
+      });
+      host.addEventListener('drop',function(ev){
+        if(!draggedPinnedSessionId) return;
+        ev.preventDefault(); ev.stopPropagation();
+        var sourceId=draggedPinnedSessionId,position=sessionPinDropPosition(host,surface,ev);
+        finishSessionCardDrag();
+        if(position) reorderPinnedSession(sourceId,position.targetId,position.after);
+      });
+    });
+  }
   var SIDEBAR_VIRTUAL_THRESHOLD=80;
   var SIDEBAR_ROW_ESTIMATE=132;
-  var SIDEBAR_PIN_DIVIDER_HEIGHT=13;
+  var SIDEBAR_PIN_DIVIDER_HEIGHT=8;
   var SIDEBAR_OVERSCAN_PX=650;
   var SIDEBAR_ROW_CACHE_LIMIT=160;
   var SESSION_PANEL_VIRTUAL_THRESHOLD=60;
@@ -13419,11 +15133,51 @@ window.__CHANGELOG__ = ${changelogJson};
     sidebarVirtualRaf=window.requestAnimationFrame(function(){ sidebarVirtualRaf=0; renderSidebarWindow(); });
   }
   function scheduleSidebarRender(){
+    if(sessionListPointerInside){ sidebarRenderDeferred=true; scheduleSessionListIdleFlush(); return; }
     if(sidebarRenderRaf) return;
     sidebarRenderRaf=window.requestAnimationFrame(function(){ sidebarRenderRaf=0; renderSidebar(); });
   }
+  // A live event wants to reorder the list. Honour the pointer freeze so the row a
+  // user is aiming at cannot slide out from under the cursor; the deferred reorder
+  // is applied on pointerleave or after a short stillness (below).
+  function requestSessionReorder(){
+    if(sessionListPointerInside){ sessionReorderDeferred=true; scheduleSessionListIdleFlush(); return; }
+    sortSessions();
+  }
+  function flushDeferredSessionListUpdates(){
+    if(sessionListIdleFlushTimer){ clearTimeout(sessionListIdleFlushTimer); sessionListIdleFlushTimer=0; }
+    var reorder=sessionReorderDeferred, render=sidebarRenderDeferred;
+    sessionReorderDeferred=false; sidebarRenderDeferred=false;
+    if(reorder) sortSessions();
+    if(reorder||render) renderSidebar();
+  }
+  // A resting cursor still lets fresh state land: once the pointer holds still for a
+  // beat (each move reschedules this), flush the held updates even before it leaves.
+  function scheduleSessionListIdleFlush(){
+    if(sessionListIdleFlushTimer) clearTimeout(sessionListIdleFlushTimer);
+    sessionListIdleFlushTimer=window.setTimeout(function(){
+      sessionListIdleFlushTimer=0;
+      if(sessionListPointerInside) flushDeferredSessionListUpdates();
+    },1200);
+  }
+  function bindSessionListInteractionFreeze(){
+    ['list','sessionPanel'].forEach(function(id){
+      var host=byId(id); if(!host) return;
+      host.addEventListener('pointerenter',function(){
+        sessionListPointerInside=true;
+        if(sessionListIdleFlushTimer){ clearTimeout(sessionListIdleFlushTimer); sessionListIdleFlushTimer=0; }
+      });
+      host.addEventListener('pointermove',function(){
+        if(sessionListPointerInside&&(sessionReorderDeferred||sidebarRenderDeferred)) scheduleSessionListIdleFlush();
+      });
+      host.addEventListener('pointerleave',function(){ sessionListPointerInside=false; flushDeferredSessionListUpdates(); });
+      host.addEventListener('pointercancel',function(){ sessionListPointerInside=false; flushDeferredSessionListUpdates(); });
+    });
+  }
   function sessionListEmptyText(){
     var filterTags=currentFilterTags();
+    if(filterQ&&contentSearchLoading) return 'Searching session content…';
+    if(SESSIONS_PENDING&&!filterQ&&!tagSearchQ) return 'Indexing sessions…';
     return (filterQ||tagSearchQ||activeTagView!=='all'||filterTags.length||priorityFilter.length<5)
       ? ('No matches'+(filterQ?(' for “'+filterQ+'”'):'')+(tagSearchQ?(' · tag search: “'+tagSearchQ+'”'):'')+(priorityFilter.length<5?(' · priority: '+priorityFilterLabel(priorityFilter)):'')+(filterTags.length?(' · tags: '+activeTagLabels().join(', ')):'')+(activeTagView==='unread'?' · Unread':'')+(activeTagView==='active'?' · Active':'')+(activeTagView==='focus'?' · Focus':''))
       : 'No sessions yet';
@@ -13656,10 +15410,12 @@ window.__CHANGELOG__ = ${changelogJson};
   function buildSessionRow(s,surface){
       surface=surface==='panel'?'panel':'sidebar';
       var taggable=!!s.sessionId;
-      var item=el('div','item'+(s.pattern==='avoidance'?' avoidance':'')+(cur&&cur.sessionId===s.sessionId?' active':''));
+      var pinned=!!sessionPinTime(s);
+      var item=el('div','item'+(s.pattern==='avoidance'?' avoidance':'')+(pinned?' session-pinned':'')+(cur&&cur.sessionId===s.sessionId?' active':''));
       if(surface==='panel') paintSessionPanelRowStatus(item,s);
       item.setAttribute('data-session-surface',surface);
       if(s.sessionId) item.setAttribute('data-session-id',String(s.sessionId));
+      if(pinned) item.setAttribute('aria-description','Pinned session. Drag to reorder pinned sessions.');
       if(s.pattern==='avoidance') item.title='avoidance';
       var readProgress=el('span','session-read-progress');
       readProgress.hidden=true;
@@ -13701,11 +15457,10 @@ window.__CHANGELOG__ = ${changelogJson};
       var age=ageLabel(s);
       if(age) trow.appendChild(el('span','it-age', age));
       if(s.sessionId && !s.pendingFork){
-        var pinned=!!sessionPinTime(s);
         var pinButton=el('button','it-pin'+(pinned?' on':''));
         pinButton.type='button';
-        pinButton.title=pinned?'Unpin session':'Pin session to top';
-        pinButton.setAttribute('aria-label',pinButton.title);
+        pinButton.title=pinned?'Unpin session · drag card to reorder':'Pin session to top';
+        pinButton.setAttribute('aria-label',pinned?'Unpin session':'Pin session to top');
         pinButton.setAttribute('aria-pressed',pinned?'true':'false');
         pinButton.innerHTML='<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 4 2 2v1H8.7L8 14l-.7-4.5H4v-1l2-2-1-4Z"></path></svg>';
         pinButton.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); toggleSessionPin(s); };
@@ -13759,9 +15514,7 @@ window.__CHANGELOG__ = ${changelogJson};
         if(taggable){
           var add=el('button','it-tagadd','+ tag');
           add.type='button'; add.setAttribute('aria-haspopup','dialog'); add.setAttribute('aria-expanded','false'); add.setAttribute('aria-controls','sessionTagPopover');
-          add.onclick=function(ev){
-            ev.preventDefault(); ev.stopPropagation(); openSessionTagPopover(add,s,surface);
-          };
+          bindSessionTagAddButton(add,s,surface);
           tagrow.appendChild(add);
         }
       }
@@ -13800,18 +15553,18 @@ window.__CHANGELOG__ = ${changelogJson};
         if(!sameChatSession(cur,s)) select(s);
       };
       item.draggable=true;
+      var rowDragToken=0;
       item.ondragstart=function(ev){
         if(window.innerWidth<=760||isSessionRowControl(ev.target,item)){ ev.preventDefault(); return; }
-        draggedChatSession=s; item.classList.add('session-card-dragging');
+        rowDragToken=beginSessionCardDrag(item,s,surface);
         if(ev.dataTransfer){
           ev.dataTransfer.effectAllowed='move';
           try{ ev.dataTransfer.setData('application/x-attend-session',String(s.sessionId||s.clientBranchId||'')); }catch(_err){}
         }
       };
       item.ondragend=function(){
-        item.classList.remove('session-card-dragging');
-        draggedChatSession=null;
-        var main=document.querySelector('.main'); if(main) main.classList.remove('session-drop-target');
+        var endedToken=rowDragToken;
+        window.setTimeout(function(){ finishSessionCardDrag(endedToken); },0);
       };
       return item;
   }
@@ -13835,7 +15588,7 @@ window.__CHANGELOG__ = ${changelogJson};
       if(!dropped||!cur||sameChatSession(dropped,cur)){ clearDrop(); return; }
       ev.preventDefault();
       var anchor=cur;
-      draggedChatSession=null; clearDrop();
+      finishSessionCardDrag(sessionCardDragToken); clearDrop();
       groupChatSession(anchor,dropped);
       select(dropped);
     });
@@ -13873,6 +15626,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var bar=el('div','inline-edit-bar');
     var save=el('button','inline-edit-save',primaryLabel || 'save ▸');
     if(/^fork\\b/i.test(String(primaryLabel||''))){
+      setActionVendor(save,(currentForkDefaults()).vendor);
       setForkButtonLabel(save,String(primaryLabel||'fork').replace(/\\s*▸\\s*$/,''));
     }
     var cancel=editCancelButton('Cancel edit (Esc)');
@@ -13961,23 +15715,44 @@ window.__CHANGELOG__ = ${changelogJson};
   function editAndForkFromMessage(msgEl, bubble){
     if(!cur || !cur.sessionId || cur.pendingFork) return;
     if(msgEl.classList.contains('editing')) return;
-    var prefix=historyBeforeMsg(msgEl);
-    if(!prefix){ showToast('Could not find the transcript point for this message.', 'warn'); return; }
-    var raw=bubble.getAttribute('data-raw') || bubble.textContent || '', target=cur;
-    msgEl.classList.add('editing');
-    function restore(){ msgEl.classList.remove('editing'); if(editor.isConnected) editor.replaceWith(bubble); }
-    var editor=makeInlineEditor(raw, function(v){
-      msgEl.classList.remove('editing');
-      if(!v){ editor.replaceWith(bubble); return; } // empty → just cancel, don't send
-      editor.replaceWith(bubble);
-      startForkFromPrefix(prefix, { text:v, attachments:[] });
-    }, function(){
-      restore();
-    }, 'fork', {id:'fork',label:'Fork',submit:function(runAt,v){
-      if(!v) throw new Error('A scheduled fork needs a first message.');
-      return scheduleForkFor(runAt,target,{text:v,attachments:[],references:[]},prefix,{selectCard:true}).then(function(res){ restore(); return res; });
-    }});
-    bubble.replaceWith(editor);
+    var target=cur,prefix=historyBeforeMsg(msgEl);
+    function openEditor(resolvedPrefix){
+      if(cur!==target || !msgEl.isConnected || !bubble.isConnected || msgEl.classList.contains('editing')) return;
+      if(!resolvedPrefix){ showToast('Could not find the transcript point for this message.', 'warn'); return; }
+      var prefix=resolvedPrefix,raw=bubble.getAttribute('data-raw') || bubble.textContent || '';
+      msgEl.classList.add('editing');
+      function restore(){ msgEl.classList.remove('editing'); if(editor.isConnected) editor.replaceWith(bubble); }
+      var editor=makeInlineEditor(raw, function(v){
+        msgEl.classList.remove('editing');
+        if(!v){ editor.replaceWith(bubble); return; } // empty → just cancel, don't send
+        editor.replaceWith(bubble);
+        startForkFromPrefix(prefix, { text:v, attachments:[] });
+      }, function(){
+        restore();
+      }, 'fork', {id:'fork',label:'Fork',submit:function(runAt,v){
+        if(!v) throw new Error('A scheduled fork needs a first message.');
+        return scheduleForkFor(runAt,target,{text:v,attachments:[],references:[]},prefix,{selectCard:true}).then(function(res){ restore(); return res; });
+      }});
+      bubble.replaceWith(editor);
+    }
+    if(prefix && !transcriptHasEarlierHistory(target)){ openEditor(prefix); return; }
+    if(msgEl.classList.contains('resolving-history')) return;
+    msgEl.classList.add('resolving-history');
+    showToast('Loading earlier history for this fork…','info');
+    loadCompleteTranscriptForFork(target).then(function(history){
+      if(history && cur===target) {
+        // Read from the completed snapshot rather than the live cache: a turn
+        // may still be streaming, in which case that cache must not be replaced.
+        var saved=cachedTranscriptFor(target),prefixFromComplete=null;
+        if(saved!==history){
+          var sidKey='sid:'+target.sessionId,previous=transcriptCache[sidKey];
+          transcriptCache[sidKey]=history;
+          prefixFromComplete=historyBeforeMsg(msgEl);
+          transcriptCache[sidKey]=previous;
+        } else prefixFromComplete=historyBeforeMsg(msgEl);
+        openEditor(prefixFromComplete);
+      } else openEditor(null);
+    }).finally(function(){ msgEl.classList.remove('resolving-history'); });
   }
   function editUserMessage(msgEl, bubble){
     if(canResendStoppedLatest(msgEl)) editStoppedLatestAndResend(msgEl, bubble);
@@ -14444,8 +16219,9 @@ window.__CHANGELOG__ = ${changelogJson};
       failAnswer('network error: '+(e&&e.message?e.message:e));
     });
   }
+  var questionRenderSequence=0;
   function renderQuestions(qs, meta){
-    var wrap=el('div','rq');
+    var wrap=el('div','rq'),groupPrefix='qpick-'+(++questionRenderSequence)+'-';
     qs.forEach(function(q, qi){
       var card=el('div','q-card');
       if(q.header||q.multiSelect) card.appendChild(el('div','q-head', (q.header||'Question')+(q.multiSelect?' · multi-select':'')));
@@ -14455,7 +16231,7 @@ window.__CHANGELOG__ = ${changelogJson};
         var pick=document.createElement('input');
         pick.className='q-pick';
         pick.type=q.multiSelect ? 'checkbox' : 'radio';
-        pick.name='qpick-'+qi;
+        pick.name=groupPrefix+qi;
         pick.value=o.label||'';
         pick.setAttribute('data-qindex', String(qi));
         row.appendChild(pick);
@@ -14546,6 +16322,8 @@ window.__CHANGELOG__ = ${changelogJson};
     block._attendTool={name:String(tc.name||'tool'),input:tc.input,result:tc.result,resultReceived:tc.result!=null,isError:tc.isError===true};
     block.setAttribute('data-msg-key',toolBlockKey(tc));
     block.setAttribute('data-tool-name',String(tc.name||'tool'));
+    if(tc.historyId) block.setAttribute('data-history-id',String(tc.historyId));
+    if(Number.isFinite(Number(tc.historyIndex))) block.setAttribute('data-history-index',String(tc.historyIndex));
     if(tc.result==null) block.setAttribute('data-tool-pending','true');
     if(tc.isError===true) block.setAttribute('data-tool-error','true');
   }
@@ -14609,6 +16387,56 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!s) return '';
     return s.sessionId ? ('sid:'+s.sessionId) : transcriptCacheKey(s.file,s.vendor);
   }
+  function transcriptPageFor(s){
+    var key=transcriptLoadKey(s);
+    return key&&transcriptPages[key]||null;
+  }
+  function setTranscriptPage(s,page){
+    var key=transcriptLoadKey(s);
+    if(key) transcriptPages[key]=page||null;
+    return page;
+  }
+  function transcriptHistoryUrl(s,before){
+    var id=providerSessionId(s),query=id
+      ? 'session='+encodeURIComponent(id)
+      : 'file='+encodeURIComponent(s&&s.file||'');
+    var url='/chat/messages?'+query+'&vendor='+encodeURIComponent(s&&s.vendor||'')+'&paged=1&limit=60';
+    if(before!=null) url+='&before='+encodeURIComponent(before);
+    return url;
+  }
+  function transcriptPinHistoryUrl(s,historyId){
+    return transcriptHistoryUrl(s)+'&around='+encodeURIComponent(historyId)+'&radius=20';
+  }
+  function historyMessageOrder(message){
+    var index=Number(message&&message.historyIndex);
+    if(Number.isFinite(index)) return index;
+    var ordinal=Number(message&&message.historyOrdinal);
+    return Number.isFinite(ordinal)?ordinal:Number.POSITIVE_INFINITY;
+  }
+  function mergeTranscriptHistoryMessages(current,incoming){
+    var merged=[],seen={},sequence=0;
+    cloneTranscriptMsgs(current).concat(cloneTranscriptMsgs(incoming)).forEach(function(message){
+      var id=String(message&&message.historyId||'');
+      var order=historyMessageOrder(message);
+      var key=id||((Number.isFinite(order)?'order:'+order+':':'')+String(message&&message.role||'')+':'+hashText(String(message&&message.text||'')));
+      if(id&&seen[key]) return;
+      if(id) seen[key]=true;
+      merged.push({message:message,order:order,sequence:sequence++});
+    });
+    merged.sort(function(a,b){
+      if(a.order!==b.order) return a.order-b.order;
+      return a.sequence-b.sequence;
+    });
+    return merged.map(function(entry){ return entry.message; });
+  }
+  function parseTranscriptHistoryResponse(res){
+    if(Array.isArray(res)) return {messages:res,page:{before:0,hasMore:false,total:res.length,version:'legacy',sourceTruncated:false},window:null};
+    return {
+      messages:Array.isArray(res&&res.messages)?res.messages:[],
+      page:res&&res.page&&typeof res.page==='object'?res.page:{before:0,hasMore:false,total:0,version:'',sourceTruncated:false},
+      window:res&&res.window&&typeof res.window==='object'?res.window:null
+    };
+  }
   function loadTranscriptBaseline(s, opts){
     opts=opts||{};
     if(!s) return Promise.resolve([]);
@@ -14616,12 +16444,13 @@ window.__CHANGELOG__ = ${changelogJson};
     var key=transcriptLoadKey(s);
     if(key && transcriptLoads[key]) return transcriptLoads[key];
     var busVersion=Number(s._busVersion||0);
-    var load=hydrateSessionSource(s,{force:!!opts.force,preserveSort:opts.preserveSort!==false}).then(function(){
-      if(!s.file) return cachedTranscriptFor(s)||[];
-      return fetch('/chat/messages?file='+encodeURIComponent(s.file)+'&vendor='+encodeURIComponent(s.vendor||''))
+    var load=Promise.resolve().then(function(){
+      if(!providerSessionId(s)&&!s.file) return cachedTranscriptFor(s)||[];
+      return fetch(transcriptHistoryUrl(s))
         .then(function(r){ return r.json(); })
-        .then(function(msgs){
-          msgs=Array.isArray(msgs)?msgs:[];
+        .then(function(response){
+          var parsed=parseTranscriptHistoryResponse(response),msgs=parsed.messages;
+          setTranscriptPage(s,Object.assign({},parsed.page,{loading:false}));
           // Cursor has no headless native fork, and cross-provider forks cannot
           // copy the provider's transcript. In both cases the backend seeds the
           // new run with a hidden context prompt. That prompt gives the model the
@@ -14634,6 +16463,7 @@ window.__CHANGELOG__ = ${changelogJson};
           var parent=parentId ? findSessionById(parentId) : null;
           var needsParent=!!(parent && (s.vendor==='cursor' || parent.vendor!==s.vendor));
           if(needsParent){
+            setTranscriptPage(s,Object.assign({},parsed.page,{hasMore:false,loading:false}));
             return loadTranscriptBaseline(parent,{preserveSort:true}).catch(function(){
               return cachedTranscriptFor(parent)||[];
             }).then(function(parentMsgs){
@@ -14661,6 +16491,115 @@ window.__CHANGELOG__ = ${changelogJson};
     if(key) transcriptLoads[key]=load;
     return load;
   }
+  function transcriptViewportAnchor(){
+    var host=byId('msgs'); if(!host) return null;
+    var frame=host.getBoundingClientRect(),nodes=host.querySelectorAll('.msg, .toolc');
+    for(var i=0;i<nodes.length;i++){
+      var rect=nodes[i].getBoundingClientRect();
+      if(rect.bottom<=frame.top) continue;
+      return {key:nodes[i].getAttribute('data-msg-key'),offset:rect.top-frame.top};
+    }
+    return null;
+  }
+  function alignTranscriptViewportAnchorNow(anchor){
+    if(!anchor||!anchor.key) return false;
+    var host=byId('msgs'),target=findMsgByKey(anchor.key);
+    if(!target&&ensureTranscriptKeyVisible(anchor.key,true)) target=findMsgByKey(anchor.key);
+    if(!host||!target) return false;
+    var frame=host.getBoundingClientRect(),rect=target.getBoundingClientRect();
+    host.scrollTop=Math.max(0,host.scrollTop+(rect.top-frame.top)-anchor.offset);
+    return true;
+  }
+  function restoreTranscriptViewportAnchor(anchor){
+    if(!anchor||!anchor.key) return;
+    var host=byId('msgs'); if(!host) return;
+    requestAnimationFrame(function(){
+      if(host!==byId('msgs')) return;
+      if(!alignTranscriptViewportAnchorNow(anchor)) return;
+      requestAnimationFrame(function(){
+        if(!host||host!==byId('msgs')) return;
+        var current=findMsgByKey(anchor.key); if(!current||!host.contains(current)) return;
+        var next=current.getBoundingClientRect();
+        host.scrollTop=Math.max(0,host.scrollTop+(next.top-host.getBoundingClientRect().top)-anchor.offset);
+      });
+    });
+  }
+  function loadEarlierTranscript(s){
+    var page=transcriptPageFor(s);
+    if(!s||!page||!page.hasMore||page.loading||s.generating) return Promise.resolve(false);
+    page.loading=true;
+    var expectedVersion=String(page.version||''),anchor=cur===s?transcriptViewportAnchor():null;
+    return fetch(transcriptHistoryUrl(s,page.before)).then(function(r){ return r.json(); }).then(function(response){
+      var parsed=parseTranscriptHistoryResponse(response),nextPage=parsed.page||{};
+      if(expectedVersion&&nextPage.version&&String(nextPage.version)!==expectedVersion){
+        page.loading=false;
+        return loadTranscriptBaseline(s,{force:true,preserveSort:true}).then(function(msgs){
+          if(cur===s) renderPersistedAndPending(cachedTranscriptFor(s)||msgs||[],s.sessionId);
+          return false;
+        });
+      }
+      var current=transcriptStateRef(s)||[],merged=mergeTranscriptHistoryMessages(current,parsed.messages);
+      setTranscriptPage(s,Object.assign({},nextPage,{loading:false}));
+      cacheTranscript(s,merged);
+      if(cur===s){
+        renderPersistedAndPending(merged,s.sessionId,{top:Math.max(0,(byId('msgs')||{}).scrollTop||0)});
+        restoreTranscriptViewportAnchor(anchor);
+      }
+      return true;
+    }).catch(function(){
+      page.loading=false;
+      return false;
+    });
+  }
+  function loadPinnedTranscriptWindow(s,pin){
+    var historyId=String(pin&&pin.historyId||'');
+    if(!s||!historyId) return Promise.resolve(false);
+    var loadKey=transcriptLoadKey(s)+'\\n'+historyId;
+    if(pinHistoryLoads[loadKey]) return pinHistoryLoads[loadKey];
+    function attempt(retried){
+      return fetch(transcriptPinHistoryUrl(s,historyId)).then(function(r){
+        return r.json().then(function(response){
+          if(!r.ok||response&&response.ok===false) throw new Error(response&&response.error||'Pinned message is no longer available.');
+          return response;
+        });
+      }).then(function(response){
+        var parsed=parseTranscriptHistoryResponse(response),nextPage=parsed.page||{};
+        var page=transcriptPageFor(s),expectedVersion=String(page&&page.version||''),responseVersion=String(nextPage.version||parsed.window&&parsed.window.version||'');
+        if(expectedVersion&&responseVersion&&expectedVersion!==responseVersion){
+          if(retried) throw new Error('History changed while locating this Pin. Try again.');
+          return loadTranscriptBaseline(s,{force:true,preserveSort:true}).then(function(){ return attempt(true); });
+        }
+        var merged=mergeTranscriptHistoryMessages(transcriptStateRef(s)||[],parsed.messages);
+        cacheTranscript(s,merged);
+        if(cur===s){
+          renderPersistedAndPending(merged,s.sessionId,{top:Math.max(0,(byId('msgs')||{}).scrollTop||0)});
+          requestAnimationFrame(function(){
+            var key=transcriptKeyForHistoryId(historyId);
+            if(key) jumpToChatAnchor({key:key,pin:pin});
+            else showToast('Could not find that pinned message in the loaded window.','warn');
+          });
+        }
+        return true;
+      });
+    }
+    var activeBaselineLoad=transcriptLoads[transcriptLoadKey(s)];
+    var ready=activeBaselineLoad||(hasTranscriptBaseline(s)?Promise.resolve():loadTranscriptBaseline(s,{preserveSort:true}));
+    var task=ready.then(function(){ return attempt(false); }).catch(function(error){
+      showToast(error&&error.message||'Could not load the pinned message.','warn');
+      return false;
+    }).finally(function(){ if(pinHistoryLoads[loadKey]===task) delete pinHistoryLoads[loadKey]; });
+    pinHistoryLoads[loadKey]=task;
+    return task;
+  }
+  function transcriptHistoryLoader(sessionId){
+    var s=sessionId&&findSessionById(sessionId)||cur,page=transcriptPageFor(s);
+    if(!s||!page||!page.hasMore) return null;
+    var wrap=el('div','history-loader'),button=el('button','history-loader-button',page.loading?'Loading earlier history…':'Load earlier history');
+    button.type='button'; button.disabled=!!page.loading||!!s.generating;
+    button.onclick=function(){ loadEarlierTranscript(s); };
+    wrap.appendChild(button);
+    return wrap;
+  }
   function reconcileMissingTranscriptBaseline(s){
     if(!s || hasTranscriptBaseline(s)) return;
     Promise.resolve().then(function(){
@@ -14679,6 +16618,11 @@ window.__CHANGELOG__ = ${changelogJson};
   function select(s){
     var selectionGeneration=++transcriptSelectionGeneration;
     var previousSelection=cur;
+    if(previousSelection!==s){
+      if(chatAnchorJump&&chatAnchorJump.highlight) chatAnchorJump.highlight.classList.remove('anchor-arrived');
+      if(chatAnchorJump) stopChatAnchorJump(chatAnchorJump);
+      pendingChatAnchor=null;
+    }
     if(refreshBusy) setRefreshBusy(false);
     if(cur && cur!==s && !(byId('commentDrawer')||{}).hidden) closeCommentDrawer();
     flushVisit(false);
@@ -14687,6 +16631,7 @@ window.__CHANGELOG__ = ${changelogJson};
     stashAttachmentState(cur);
     stashPinReferenceState(cur);
     stashQueueState(cur);
+    parkTranscriptPane(previousSelection);
     // Opening a session is navigation, not activity. Anchor its current ordering
     // before source hydration so a click alone cannot move the row.
     if(s && s.sortTs==null && s.lastTs!=null) s.sortTs=s.lastTs;
@@ -14697,9 +16642,10 @@ window.__CHANGELOG__ = ${changelogJson};
     // of the newly appended turn. Keep it bottom-pinned even after generation ends.
     var restoreBottom=!!(savedScrollState&&savedScrollState.atBottom);
     var restoreReadingPosition=!s.generating&&!restoreBottom&&savedScrollTop!=null;
-    var selectionScrollMode=restoreReadingPosition ? {top:savedScrollTop} : null;
+    var selectionScrollMode=restoreReadingPosition ? {top:savedScrollTop,anchor:savedScrollState&&savedScrollState.anchor||null} : null;
     closeSessionTagPopover();
     cur=s; activateChatGroupForSession(s); goalArmed=false; editingScheduleId='';
+    var restoredPane=restoreTranscriptPane(s);
     clearGen(); turnActive=false; msgOrdinal=0; toolOrdinal=0; setInputEnabled(true); updateSendLabel();
     refreshGoalToggle();
     markSeen(s); syncSessionListsAfterSelection(previousSelection,s);
@@ -14714,16 +16660,24 @@ window.__CHANGELOG__ = ${changelogJson};
     refreshForkButton();
     syncGoalFromServer(s);
     closeComposerRail(); populateRunConfigControls(); refreshRunConfigButton();
-    stick=!restoreReadingPosition; assistantEl=null; toolEls={}; endCatchup(); restoreQueueState(s);
+    stick=restoredPane?(s.generating?true:!!restoredPane.stick):!restoreReadingPosition; assistantEl=null; toolEls={}; endCatchup(); restoreQueueState(s);
+    if(restoredPane&&stick){ var restoredHost=byId('msgs'); if(restoredHost) restoredHost.scrollTop=restoredHost.scrollHeight; }
+    if(restoredPane){
+      msgOrdinal=Number(restoredPane.msgOrdinal)||0;
+      toolOrdinal=Number(restoredPane.toolOrdinal)||0;
+      Array.prototype.forEach.call((byId('msgs')||document).querySelectorAll('.toolc[data-tool-id]'),function(tool){
+        var id=tool.getAttribute('data-tool-id'); if(id) toolEls[id]=tool;
+      });
+    }
     hideLatestPin(); latestUserMsgEl=null;
     renderPinTray();
     restoreComposerDraft(s);
     restoreAttachmentState(s);
     restorePinReferenceState(s);
     renderAvoidancePanel();
-    var cached=cachedTranscriptFor(s);
-    if(cached) renderPersistedAndPending(cached, s.sessionId, selectionScrollMode);
-    else {
+    var cached=transcriptStateRef(s);
+    if(!restoredPane&&cached) renderPersistedAndPending(cached, s.sessionId, selectionScrollMode);
+    else if(!restoredPane) {
       var loading=el('div','placeholder','Loading…'); loading.id='ph'; replaceMessages(loading,selectionScrollMode);
     }
     var selectionIsCurrent=function(){ return cur===s && selectionGeneration===transcriptSelectionGeneration; };
@@ -14735,6 +16689,11 @@ window.__CHANGELOG__ = ${changelogJson};
       // fork still awaiting its first message — starting it here would land
       // after materializeFork and erase the opener. Skip the async path outright.
       if(s.pendingFork.opener) return;
+      if(restoredPane){
+        beginVisit(s);
+        syncOpenHeader();
+        return;
+      }
       var parent=findSessionById(s.pendingFork.parent) || {
         sessionId:s.pendingFork.parent,
         vendor:s.vendor||'claude',
@@ -14772,11 +16731,11 @@ window.__CHANGELOG__ = ${changelogJson};
       }).catch(function(){});
       return;
     }
-    var rendered=cached;
+    var rendered=cached,renderedStamp=transcriptPaneStamp(s);
     loadTranscriptBaseline(s,{preserveSort:true}).then(function(msgs){
       if(!selectionIsCurrent()) return;
-      var next=cachedTranscriptFor(s)||msgs||[];
-      if(!rendered || !sameTranscript(rendered,next)) renderPersistedAndPending(next,s.sessionId,selectionScrollMode);
+      var next=transcriptStateRef(s)||msgs||[];
+      if(!rendered || renderedStamp!==transcriptPaneStamp(s)) renderPersistedAndPending(next,s.sessionId,selectionScrollMode);
       syncOpenHeader(); syncSessionListsAfterPatch(s); finishHistoryLoad();
     }).catch(function(){
       if(!selectionIsCurrent()) return;
@@ -14843,13 +16802,22 @@ window.__CHANGELOG__ = ${changelogJson};
     var clientSessionIds=res&&res.clientSessionIds||{};
     var lastAssistantAt=res&&res.lastAssistantAt||{};
     var queues=res&&res.queues||{};
-    SESS.forEach(function(s){
+    var committedLiveActivity=false;
+    // Iterate a stable copy: following a rolled provider id (below) can fold a duplicate card
+    // out of SESS mid-loop, and a live forEach would then skip a sibling.
+    SESS.slice().forEach(function(s){
       if(!s.sessionId) return;
-      if(s.clientBranchId && !s.providerSessionId){
+      if(s.clientBranchId){
         Object.keys(clientSessionIds).some(function(providerId){
           if(clientSessionIds[providerId]!==s.clientBranchId) return false;
-          bindProviderSessionId(s,providerId);
-          flushPendingSessionTags(s);
+          if(!s.providerSessionId){
+            bindProviderSessionId(s,providerId);
+            flushPendingSessionTags(s);
+          } else if(providerSessionId(s)!==providerId){
+            // Fallback for a missed bus event: the run's stable client id now maps to a new
+            // provider id (mid-turn roll, e.g. Claude /clear) — follow it.
+            if(followRolledProviderId(s,providerId)) flushPendingSessionTags(s);
+          }
           return true;
         });
       }
@@ -14883,7 +16851,10 @@ window.__CHANGELOG__ = ${changelogJson};
         s.analysisPending=false;
         clearTurnScopedSignals(s);
       }
-      if(!g && wasGenerating) finishGenerationTiming(s,Date.now(),'generated');
+      if(!g && wasGenerating){
+        finishGenerationTiming(s,Date.now(),'generated');
+        if(commitDeferredSessionActivity(s)) committedLiveActivity=true;
+      }
       s.generatingStartedAt = g ? (startedAt || s.generatingStartedAt || Date.now()) : null;
       if(g){
         var outputAt=Number(lastAssistantAt[liveId])||0;
@@ -14896,7 +16867,7 @@ window.__CHANGELOG__ = ${changelogJson};
         if(g && viewVisit && viewVisit.sessionId===s.sessionId) viewVisit.wasGenerating=true;
         if(!g && wasGenerating){
           if(s===cur) markSeen(s, true);
-          else { markUnread(s); warmTranscriptCache(s); }
+          else markUnread(s);
         } else {
           reviveAttention(s);
           applyGenerating(s);
@@ -14904,6 +16875,7 @@ window.__CHANGELOG__ = ${changelogJson};
       }
       syncLiveTiming(s);
     });
+    if(committedLiveActivity){ requestSessionReorder(); scheduleSidebarRender(); }
     recoverCurrentTurnFromLive(active);
     if(cur && cur.sessionId && res.queues){
       var curQueueInfo=res.queues[providerSessionId(cur)];
@@ -14932,6 +16904,66 @@ window.__CHANGELOG__ = ${changelogJson};
     if(liveConnectionFailed) showToast('Attend service connection restored.', 'live-restored');
     liveConnectionFailed=false;
   }
+  function applyCommentIndex(message){
+    if(!message||message.kind!=='comment_index') return;
+    var epoch=String(message.epoch||''),generatedAt=Number(message.generatedAt)||0;
+    if(!epoch) return;
+    if(!Array.isArray(message.comments)){
+      var snapshotUrl=String(message.snapshotUrl||'');
+      if(!snapshotUrl) return;
+      if(epoch===COMMENT_INDEX_EPOCH&&generatedAt<COMMENT_INDEX_AT) return;
+      var requestKey=epoch+':'+generatedAt;
+      if(commentIndexSnapshotRequest===requestKey) return;
+      commentIndexSnapshotRequest=requestKey;
+      fetch(snapshotUrl).then(function(response){
+        if(!response.ok) throw new Error('comment index snapshot failed');
+        return response.json();
+      }).then(function(snapshot){
+        if(commentIndexSnapshotRequest!==requestKey) return;
+        commentIndexSnapshotRequest='';
+        applyCommentIndex(snapshot);
+      }).catch(function(){
+        if(commentIndexSnapshotRequest===requestKey) commentIndexSnapshotRequest='';
+      });
+      return;
+    }
+    if(epoch===COMMENT_INDEX_EPOCH&&generatedAt<COMMENT_INDEX_AT) return;
+    var epochChanged=!!COMMENT_INDEX_EPOCH&&epoch!==COMMENT_INDEX_EPOCH;
+    if(epochChanged) commentHistoryLoadedVersions={};
+    COMMENT_INDEX_EPOCH=epoch;
+    COMMENT_INDEX_AT=generatedAt;
+    commentIndexSnapshotRequest='';
+    var nextKnown={},nextVersions={};
+    message.comments.forEach(function(entry){
+      var thread=entry&&entry.thread,id=String(thread&&thread.id||'');
+      if(!id) return;
+      nextKnown[id]=true;
+      nextVersions[id]=String(entry.historyVersion||'');
+      var saved=rememberCommentThread(thread);
+      if(saved) drainCommentOrphanEvents(saved);
+    });
+    // Only remove threads that a previous authoritative index knew about.
+    // A just-created optimistic thread may not have reached the server yet.
+    Object.keys(commentIndexKnownThreads).forEach(function(id){
+      if(nextKnown[id]) return;
+      delete commentThreads[id];
+      delete commentMessageCache[id];
+      delete commentHistoryVersions[id];
+      delete commentHistoryLoadedVersions[id];
+      delete commentHistoryPages[id];
+      if(commentDrawerState.threadId===id) closeCommentDrawer();
+    });
+    commentIndexKnownThreads=nextKnown;
+    commentHistoryVersions=nextVersions;
+    VAULT_STATE.commentThreads=commentThreads;
+    syncAllMessageCommentStates();
+    syncAllSessionCommentBadges();
+    var openId=String(commentDrawerState.threadId||''),openThread=openId&&commentThreads[openId];
+    if(openThread&&openThread.providerSessionId&&nextKnown[openId]){
+      var loaded=String(commentHistoryLoadedVersions[openId]||''),expected=String(nextVersions[openId]||'');
+      if(epochChanged||!expected||loaded!==expected) syncOpenCommentHistory(openThread,false);
+    }
+  }
   function openLiveStateStream(){
     if(!window.EventSource){
       markLiveConnectionFailed();
@@ -14944,7 +16976,10 @@ window.__CHANGELOG__ = ${changelogJson};
     source.onmessage=function(e){
       markLiveRestored();
       liveEventChain=liveEventChain.then(function(){ return e2eeEventData(e.data); }).then(function(message){
-        if(message && message.kind==='session_event') onBusSessionEvent(message);
+        if(message && message.kind==='session_index') applySessionIndex(message);
+        else if(message && message.kind==='comment_index') applyCommentIndex(message);
+        else if(message && message.kind==='session_operation') onSessionOperation(message);
+        else if(message && message.kind==='session_event') onBusSessionEvent(message);
         else if(message && message.kind==='analysis') onBusAnalysisEvent(message);
         else applyLiveSnapshot(message||{});
       }).catch(function(){});
@@ -14952,6 +16987,21 @@ window.__CHANGELOG__ = ${changelogJson};
     source.onerror=function(){
       markLiveConnectionFailed();
     };
+  }
+  function onSessionOperation(message){
+    if(!message||message.kind!=='session_operation') return;
+    var clientSessionId=String(message.clientSessionId||''),operationId=String(message.operationId||'');
+    var s=findSessionByClientId(clientSessionId);
+    if(!s) return;
+    if(s.operationId&&operationId&&String(s.operationId)!==operationId) return;
+    var result=message.result&&typeof message.result==='object' ? message.result : {};
+    if(message.status==='completed'){
+      if(message.operation==='fork' && typeof s._completeForkSession==='function') s._completeForkSession(result);
+      else if(typeof s._completeNewSession==='function') s._completeNewSession(result);
+      return;
+    }
+    if(message.operation==='fork' && typeof s._failForkSession==='function') s._failForkSession(result);
+    else if(typeof s._failNewSession==='function') s._failNewSession(result);
   }
   function reduceLatestLiveSnapshotEvent(sessionId, clientSessionId, ev, emittedAt){
     if(!sessionId || !ev || !latestLiveSnapshot) return;
@@ -15027,9 +17077,17 @@ window.__CHANGELOG__ = ${changelogJson};
       return;
     }
     if(clientSessionId && !s.clientBranchId) s.clientBranchId=clientSessionId;
-    if(!s.providerSessionId && s.clientBranchId){
-      bindProviderSessionId(s,sessionId);
-      flushPendingSessionTags(s);
+    if(s.clientBranchId){
+      if(!s.providerSessionId){
+        bindProviderSessionId(s,sessionId);
+        flushPendingSessionTags(s);
+      } else if(clientSessionId && clientSessionId===s.clientBranchId && providerSessionId(s)!==sessionId){
+        // Same run (matched by stable clientSessionId) but a new provider id: the provider
+        // rolled its session id mid-turn (e.g. Claude /clear). Follow it here — the bus
+        // delivers this before the disk scan surfaces the new id, so the tab keeps owning
+        // the live conversation instead of stranding on the pre-clear id.
+        if(followRolledProviderId(s,sessionId)) flushPendingSessionTags(s);
+      }
     }
     if(ev.kind==='run_config') applyRunConfigEvent(s,ev);
     if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started'){
@@ -15061,9 +17119,13 @@ window.__CHANGELOG__ = ${changelogJson};
     syncLiveTiming(s);
     if(cur===s){
       onEvent(ev, String(s.sessionId||''), emittedAt);
-      if(ev.kind==='result'||ev.kind==='error') reconcileMissingTranscriptBaseline(s);
+      if(ev.kind==='result'||ev.kind==='error'){
+        reconcileMissingTranscriptBaseline(s);
+        if(commitDeferredSessionActivity(s)){ requestSessionReorder(); scheduleSidebarRender(); }
+      }
       return;
     }
+    var committedActivity=false;
     if(ev.kind==='user_turn_started'){
       var userTurn={text:ev.text||'',attachments:Array.isArray(ev.attachments)?ev.attachments:[]};
       var userShown=shownTurnText(userTurn);
@@ -15090,6 +17152,7 @@ window.__CHANGELOG__ = ${changelogJson};
       s.generating=false;
       s.generatingStartedAt=null;
       s.lastAssistantOutputAt=null;
+      committedActivity=commitDeferredSessionActivity(s);
       markUnread(s);
       refreshAnalysis(s);
       reconcileMissingTranscriptBaseline(s);
@@ -15101,7 +17164,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // row during a click. Lifecycle edges can change ordering or filter
     // membership, so those still get one structural render.
     if(sessionEventNeedsSidebarRebuild(ev)){
-      if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered') sortSessions();
+      if(committedActivity || ev.kind==='user_turn_started' || ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered') requestSessionReorder();
       scheduleSidebarRender();
     }
   }
@@ -15122,20 +17185,16 @@ window.__CHANGELOG__ = ${changelogJson};
         var delta=String(ev.text||'');
         if(!delta) return true;
         commentDrawerState.lastAssistantOutputAt=emittedAt;
-        if(!commentDrawerState.assistant) commentDrawerState.assistant=appendCommentMessage('assistant',delta);
-        else {
-          var bubble=commentDrawerState.assistant.querySelector('.bubble');
-          setBubbleText(bubble,(bubble&&bubble.getAttribute('data-raw')||'')+delta,true);
-        }
+        if(!commentDrawerState.assistant) commentDrawerState.assistant=appendCommentMessage('assistant','');
+        var bubble=commentDrawerState.assistant.querySelector('.bubble');
+        appendStreamingBubbleText(bubble,delta);
         keepCommentGeneratingLast();
-        var host=byId('commentMsgs');
-        if(host&&commentStick) host.scrollTop=host.scrollHeight;
-        syncScrollBottomButton(host,byId('commentScrollBottom'));
         cacheOpenCommentMessages();
       }
     } else if(ev.kind==='tool_use'){
       if(open){
         commentDrawerState.lastAssistantOutputAt=emittedAt;
+        finalizeStreamingMessage(commentDrawerState.assistant);
         commentDrawerState.assistant=null;
         appendCommentTool({id:ev.id,name:ev.name,input:ev.input});
         cacheOpenCommentMessages();
@@ -15143,6 +17202,7 @@ window.__CHANGELOG__ = ${changelogJson};
     } else if(ev.kind==='tool_result'){
       if(open){
         commentDrawerState.lastAssistantOutputAt=emittedAt;
+        finalizeStreamingMessage(commentDrawerState.assistant);
         commentDrawerState.assistant=null;
         var tool=ev.id?commentToolEls[ev.id]:null;
         if(tool){
@@ -15158,6 +17218,7 @@ window.__CHANGELOG__ = ${changelogJson};
       var status=ev.kind==='error'||ev.ok===false ? 'failed' : (message.hasQueuedTurns?'generating':(open?'read':'unread'));
       thread=rememberCommentThread(Object.assign({},thread,{status:status}))||thread;
       if(open){
+        finalizeStreamingMessage(commentDrawerState.assistant);
         if(ev.kind==='error') appendCommentProviderError(ev);
         setCommentBusy(false); setCommentGenerating(status==='generating');
         if(status==='read') markCommentRead(thread);
@@ -15229,31 +17290,31 @@ window.__CHANGELOG__ = ${changelogJson};
       cacheTranscriptAssistantText(cur, ev.text);
       if(!assistantEl) assistantEl=addMsg('assistant','');
       var b=assistantEl.querySelector('.bubble');
-      setBubbleText(b, (b&&b.getAttribute('data-raw')||'') + ev.text, true);
-      scroll();
-      scheduleLatestPin();
+      appendStreamingBubbleText(b,ev.text);
     }
     else if(ev.kind==='tool_use'){
+      finalizeStreamingMessage(assistantEl);
       assistantEl=null; // catch-up persists across tools (tools dedup by id below)
       cacheTranscriptToolUse(cur, {id:ev.id,name:ev.name,input:ev.input});
       var d=ev.id&&toolEls[ev.id] ? toolEls[ev.id] : addTool({id:ev.id,name:ev.name,input:ev.input});
       if(ev.id) toolEls[ev.id]=d;
       if(isQuestionTool(ev.name, ev.input) && turnActive) endTurn();
     }
-    else if(ev.kind==='tool_result'){ assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
+    else if(ev.kind==='tool_result'){ finalizeStreamingMessage(assistantEl); assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
       cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
       if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; updateToolBlockResult(t,ev.text,ev.isError); if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t); }
       else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
       keepGenLast(); scroll(); scheduleLatestPin(); }
     else if(ev.kind==='goal'){ applyGoalState(cur,ev.goal||null); }
     else if(ev.kind==='result'){
+      finalizeStreamingMessage(assistantEl);
       assistantEl=null;
       var currentGoal=goalForSession(cur);
       if(currentGoal && currentGoal.vendor==='claude') applyGoalState(cur,null);
       turnEnded(generationOutcome(ev));
     }
     else if(ev.kind==='error'){
-      endCatchup(); assistantEl=null;
+      endCatchup(); finalizeStreamingMessage(assistantEl); assistantEl=null;
       var failedSession=cur;
       addProviderError(ev,failedSession&&failedSession._providerRetry?function(){ return retryProviderTurn(failedSession); }:undefined);
       turnEnded('failed');
@@ -15504,6 +17565,7 @@ window.__CHANGELOG__ = ${changelogJson};
       title:forkTitleFromSession(cur, firstTurn.text),
       lastPrompt:null,
       cwd:cur.cwd,
+      tabTitle:cur.tabTitle||'',
       project:cur.project,
       file:'',
       ageDays:0,
@@ -15545,7 +17607,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var queueItemId=String(opts&&opts.queueItemId||'');
     var clientBranchId=makeClientBranchId();
     var parentSession=cur;
-    var ns={vendor:config.vendor,model:config.model||'',effort:config.effort||'',speed:config.speed||'',sessionId:clientBranchId,clientBranchId:clientBranchId,providerSessionId:null,forkParentId:providerSessionId(cur),pendingFork:{parent:providerSessionId(cur),parentVendor:cur.vendor,cwd:cur.cwd||'',consumeParentDraft:!openingTurn&&!!(firstTurn.text || firstTurn.attachments.length),opener:!!(firstTurn.text || firstTurn.attachments.length),queueItemId:queueItemId||null,model:config.model||'',effort:config.effort||'',speed:config.speed||''},title:forkTitleFromSession(cur, firstTurn.text),lastPrompt:null,cwd:cur.cwd,project:cur.project,file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:(cur.tags||[]).slice()};
+    var ns={vendor:config.vendor,model:config.model||'',effort:config.effort||'',speed:config.speed||'',sessionId:clientBranchId,clientBranchId:clientBranchId,providerSessionId:null,forkParentId:providerSessionId(cur),pendingFork:{parent:providerSessionId(cur),parentVendor:cur.vendor,cwd:cur.cwd||'',consumeParentDraft:!openingTurn&&!!(firstTurn.text || firstTurn.attachments.length),opener:!!(firstTurn.text || firstTurn.attachments.length),queueItemId:queueItemId||null,model:config.model||'',effort:config.effort||'',speed:config.speed||''},title:forkTitleFromSession(cur, firstTurn.text),lastPrompt:null,cwd:cur.cwd,tabTitle:cur.tabTitle||'',project:cur.project,file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:(cur.tags||[]).slice()};
     inheritSessionTextCollections(parentSession,ns);
     inheritSessionGoal(parentSession,ns);
     insertSession(ns); groupChatSession(parentSession,ns); renderSidebar();
@@ -15642,55 +17704,89 @@ window.__CHANGELOG__ = ${changelogJson};
       renderSidebar();
       return true;
     }
+    function failForkSession(rawError){
+      delete branch._completeForkSession;
+      delete branch._failForkSession;
+      if(keepAcknowledgedFork()) return;
+      settleQueuedFork(false);
+      var failure=rawError&&typeof rawError==='object' ? rawError : {message:String(rawError||'fork failed')};
+      if(cur===branch){
+        branch._awaitingLiveStart=false;
+        branch._awaitingLiveStartAt=null;
+        addProviderError(failure);
+        endTurn('failed');
+      } else {
+        rejectSessionRun(branch,'failed');
+        renderSidebar();
+        showToast(failure.error||failure.message||'fork failed','warn');
+      }
+    }
+    function completeForkSession(res){
+      if(!res||!res.ok){ failForkSession(res||{}); return; }
+      delete branch._completeForkSession;
+      delete branch._failForkSession;
+      if(branch.pendingFork&&branch.pendingFork.consumeParentDraft) clearDraftForSession(parent);
+      var forkAlreadyFinished=res.generating===false;
+      if(forkAlreadyFinished) rejectSessionRun(branch,'generated');
+      bindProviderSessionId(branch,res.session);
+      if(goalRequested && res.goal) applyGoalState(branch,res.goal);
+      branch.forkParentId=res.parentSessionId||branch.forkParentId||(branch.pendingFork&&branch.pendingFork.parent)||null;
+      rememberForkRelation(res.session,branch.forkParentId);
+      branch.pendingFork=null;
+      if(res.cwd) branch.cwd=res.cwd;
+      if(res.project) branch.project=res.project;
+      else if(res.cwd) branch.project=basename(res.cwd);
+      branch.file='';
+      branch.model=model; branch.effort=effort; branch.speed=speed;
+      flushPendingSessionTags(branch);
+      drainOrphanBusEvents(branch);
+      markReplied(branch);
+      settleQueuedFork(true);
+      // The active snapshot may have arrived while this object still had its
+      // pending id. Re-project the already-received SSE state after the id bind;
+      // this is local event-store reduction, not an extra live-status request.
+      var snapshotActive=latestLiveSnapshot&&Array.isArray(latestLiveSnapshot.active) ? latestLiveSnapshot.active : [];
+      if(latestLiveSnapshot && (!background || snapshotActive.indexOf(res.session)>=0)) applyLiveSnapshot(latestLiveSnapshot);
+      if(cur===branch){ syncOpenHeader(); renderSidebar(); refreshForkButton(); refreshRunConfigButton(); }
+      else renderSidebar();
+      if(forkAlreadyFinished && branch.analysisPending) refreshAnalysis(branch);
+    }
     var forkPath=(queuedItemId?'/chat/queue/fork':'/chat/fork')+'?session='+encodeURIComponent(branch.pendingFork.parent)+'&cwd='+encodeURIComponent(branch.pendingFork.cwd)+'&vendor='+encodeURIComponent(vendor)+(queuedItemId?'&item='+encodeURIComponent(queuedItemId):'');
+    branch._completeForkSession=completeForkSession;
+    branch._failForkSession=failForkSession;
+    var forkHeaders={'content-type':'application/json'};
+    if(!queuedItemId){
+      forkHeaders.prefer='respond-async';
+      forkHeaders['x-attend-client-session-id']=String(branch.clientBranchId||'');
+    }
     fetch(forkPath,
-      {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})
-       .then(function(r){return r.json();}).then(function(res){ if(!res.ok){
-        if(keepAcknowledgedFork()) return;
-        settleQueuedFork(false);
-        if(cur===branch){ branch._awaitingLiveStart=false; branch._awaitingLiveStartAt=null; addProviderError(res); endTurn('failed'); }
-        else { rejectSessionRun(branch,'failed'); renderSidebar(); showToast(res.error||'fork failed','warn'); }
-        return;
-       }
-       if(branch.pendingFork.consumeParentDraft) clearDraftForSession(parent);
-        var forkAlreadyFinished=res.generating===false;
-        if(forkAlreadyFinished) rejectSessionRun(branch,'generated');
-        bindProviderSessionId(branch,res.session);
-        if(goalRequested && res.goal) applyGoalState(branch,res.goal);
-        branch.forkParentId=res.parentSessionId||branch.forkParentId||branch.pendingFork.parent;
-        rememberForkRelation(res.session,branch.forkParentId);
-        branch.pendingFork=null;
-        if(res.cwd) branch.cwd=res.cwd;
-        if(res.project) branch.project=res.project;
-        else if(res.cwd) branch.project=basename(res.cwd);
-        branch.file='';
-        branch.model=model; branch.effort=effort; branch.speed=speed;
-        flushPendingSessionTags(branch);
-        drainOrphanBusEvents(branch);
-        markReplied(branch);
-        settleQueuedFork(true);
-        // The active snapshot may have arrived while this object still had its
-        // pending id. Re-project the already-received SSE state after the id bind;
-        // this is local event-store reduction, not an extra live-status request.
-        var snapshotActive=latestLiveSnapshot&&Array.isArray(latestLiveSnapshot.active) ? latestLiveSnapshot.active : [];
-        if(latestLiveSnapshot && (!background || snapshotActive.indexOf(res.session)>=0)) applyLiveSnapshot(latestLiveSnapshot);
-        if(cur===branch){ syncOpenHeader(); renderSidebar(); refreshForkButton(); refreshRunConfigButton(); }
-        else renderSidebar();
-        if(forkAlreadyFinished && branch.analysisPending) refreshAnalysis(branch);
-        // Best-effort: resolve the fork's own JSONL so a full page reload (which
-        // drops the in-memory cache) can reload its complete history from disk.
-        warmTranscriptCache(branch); })
-       .catch(function(e){
-        if(keepAcknowledgedFork()) return;
-        settleQueuedFork(false);
-        if(cur===branch){ branch._awaitingLiveStart=false; branch._awaitingLiveStartAt=null; addProviderError({message:'Fork failed: '+(e&&e.message?e.message:e),retryable:true}); endTurn('failed'); }
-        else { rejectSessionRun(branch,'failed'); renderSidebar(); showToast('fork failed: '+(e&&e.message?e.message:e),'warn'); }
-       });
+      {method:'POST',headers:forkHeaders,body:JSON.stringify(body)})
+       .then(function(r){return r.json();}).then(function(res){
+        if(res&&res.accepted){
+          branch.operationId=String(res.operationId||'');
+          return;
+        }
+        completeForkSession(res);
+       })
+       .catch(function(e){ failForkSession({message:'Fork failed: '+(e&&e.message?e.message:e),retryable:true}); });
   }
   function vendorInfo(id){
     var want=String(id||'').trim().toLowerCase();
     for(var i=0;i<VENDORS.length;i++){ if(String(VENDORS[i].vendor||'').toLowerCase()===want) return VENDORS[i]; }
     return null;
+  }
+  function vendorCapability(id,name){
+    var info=vendorInfo(id),caps=info&&info.capabilities;
+    return caps&&caps[name] ? caps[name] : null;
+  }
+  function nativeVendorCapability(id,name){
+    var capability=vendorCapability(id,name);
+    if(!capability) return (name==='goal'||name==='fork')&&(id==='claude'||id==='codex');
+    return !!(capability&&capability.support==='native');
+  }
+  function vendorCapabilityFallback(id,name){
+    var capability=vendorCapability(id,name);
+    return capability&&capability.fallback ? String(capability.fallback) : '';
   }
   function newSession(){
     if(newSessionPending) return;
@@ -15706,7 +17802,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!info){ byId('nmsg').textContent='unknown vendor: '+vendor; return; }
     var goalRequested=newGoalArmed;
     if(goalRequested && !text){ byId('nmsg').textContent='Goal requires an objective'; return; }
-    if(goalRequested && vendor!=='codex' && vendor!=='claude'){ byId('nmsg').textContent=vendor+' does not support Goal'; return; }
+    if(goalRequested && !nativeVendorCapability(vendor,'goal')){ byId('nmsg').textContent=vendorCapabilityFallback(vendor,'goal')||vendor+' does not support Goal'; return; }
     var requestedText=text;
     var model=selectedNewModel();
     var effort=selectedNewEffort();
@@ -15737,7 +17833,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var previous=cur;
     var clientSessionId=makeClientSessionId('new');
     var shown=composeTurnText(text, attachments);
-    var ns={vendor:vendor,model:model||'',effort:effort||'',speed:speed||'',sessionId:clientSessionId,clientBranchId:clientSessionId,providerSessionId:null,pendingNew:true,title:shown||'(new session)',lastPrompt:null,cwd:dir,project:basename(dir),file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:initialTags,_pendingSessionTags:initialTags.slice(),generating:!!shown,generatingStartedAt:shown?Date.now():null};
+    var ns={vendor:vendor,model:model||'',effort:effort||'',speed:speed||'',sessionId:clientSessionId,clientBranchId:clientSessionId,providerSessionId:null,pendingNew:true,title:shown||'(new session)',lastPrompt:null,cwd:dir,tabTitle:'',project:basename(dir),file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:initialTags,_pendingSessionTags:initialTags.slice(),generating:!!shown,generatingStartedAt:shown?Date.now():null};
     if(shown) expectSessionRun(ns,ns.generatingStartedAt);
     var runEpoch=Number(ns._runEpoch)||0;
     cacheTranscript(ns, []);
@@ -15755,6 +17851,8 @@ window.__CHANGELOG__ = ${changelogJson};
     setNewPending(false,'');
     var resetFormSnapshot=newSessionFormSnapshot();
     function failNewSession(rawError){
+      delete ns._completeNewSession;
+      delete ns._failNewSession;
       if(sessionRunWasAcknowledged(ns,runEpoch)){
         ns.pendingNew=false;
         renderSidebar();
@@ -15783,26 +17881,36 @@ window.__CHANGELOG__ = ${changelogJson};
       openNewBox();
       showNewSessionProviderError(publicError,function(){ newSession(); });
     }
-    fetch('/chat/new?cwd='+encodeURIComponent(dir)+'&vendor='+encodeURIComponent(vendor),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:text, attachments:attachments, model:model||undefined, effort:effort||undefined, speed:speed||undefined, clientSessionId:clientSessionId, goal:goalRequested===true})})
-      .then(function(r){return r.json();}).then(function(res){ if(!res.ok){ failNewSession(res); return; }
+    function completeNewSession(res){
+        if(!res||!res.ok){ failNewSession(res||{}); return; }
         rememberNewSessionPrefs(vendor, model, effort, speed);
         var cwd=res.cwd||dir;
         rememberRecentDir(cwd);
         bindProviderSessionId(ns,res.session);
         if(goalRequested && res.goal) applyGoalState(ns,res.goal);
         ns.pendingNew=false;
-        ns.cwd=cwd; ns.project=basename(cwd);
+        ns.cwd=cwd; ns.tabTitle=String(res.tabTitle||''); ns.project=basename(cwd);
         flushPendingSessionTags(ns);
         drainOrphanBusEvents(ns);
         if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);
-        if(cur===ns){ syncOpenHeader(); refreshForkButton(); refreshGoalToggle(); }
-        renderSidebar(); warmTranscriptCache(ns);
+        if(cur===ns){ syncPageTitle(ns); syncOpenHeader(); refreshForkButton(); refreshGoalToggle(); }
+        renderSidebar();
         // Do not let this older request rewrite a newer draft. When the form is
         // still untouched, it is safe to refine its reset dir to the resolved cwd.
         if(operation===newSessionOperation && newSessionFormSnapshot()===resetFormSnapshot){
           resetNewSessionDir(cwd);
           resetFormSnapshot=newSessionFormSnapshot();
         }
+        delete ns._completeNewSession;
+        delete ns._failNewSession;
+      }
+    ns._completeNewSession=completeNewSession;
+    ns._failNewSession=failNewSession;
+    fetch('/chat/new?cwd='+encodeURIComponent(dir)+'&vendor='+encodeURIComponent(vendor),{method:'POST',headers:{'content-type':'application/json','prefer':'respond-async','x-attend-client-session-id':clientSessionId},body:JSON.stringify({text:text, attachments:attachments, model:model||undefined, effort:effort||undefined, speed:speed||undefined, clientSessionId:clientSessionId, goal:goalRequested===true})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res.ok){ failNewSession(res); return; }
+        if(res.accepted){ ns.operationId=String(res.operationId||''); return; }
+        completeNewSession(res);
       }).catch(function(e){ failNewSession({message:e&&e.message?e.message:'Could not start session.',retryable:true}); });
   }
 
@@ -15846,7 +17954,13 @@ window.__CHANGELOG__ = ${changelogJson};
   });
   var chatScrollBottom=byId('chatScrollBottom'); if(chatScrollBottom){ setIconButton(chatScrollBottom,'down','Scroll to bottom'); chatScrollBottom.onclick=scrollChatToBottom; }
   var commentScrollBottom=byId('commentScrollBottom'); if(commentScrollBottom){ setIconButton(commentScrollBottom,'down','Scroll comments to bottom'); commentScrollBottom.onclick=scrollCommentsToBottom; }
-  var commentMsgs=byId('commentMsgs'); if(commentMsgs) commentMsgs.addEventListener('scroll',function(){ commentStick=nearScrollBottom(commentMsgs); syncScrollBottomButton(commentMsgs,commentScrollBottom); scheduleCommentLatestPin(); });
+  var commentMsgs=byId('commentMsgs'); if(commentMsgs) commentMsgs.addEventListener('scroll',function(ev){
+    commentStick=nearScrollBottom(commentMsgs); syncScrollBottomButton(commentMsgs,commentScrollBottom); scheduleCommentLatestPin();
+    if(ev.isTrusted&&commentDrawerState.threadId&&commentMsgs.scrollTop<120){
+      var thread=commentThreads[commentDrawerState.threadId];
+      if(thread) loadEarlierCommentHistory(thread);
+    }
+  });
   var commentLatestPin=byId('commentLatestPin'); if(commentLatestPin){ commentLatestPin.onclick=jumpToCommentLatestPin; commentLatestPin.onkeydown=function(ev){ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); jumpToCommentLatestPin(); } }; }
   var commentClose=byId('commentClose'); if(commentClose) commentClose.onclick=closeCommentDrawer;
   var commentPromote=byId('commentPromote'); if(commentPromote) commentPromote.onclick=promoteCommentThread;
@@ -15894,6 +18008,15 @@ window.__CHANGELOG__ = ${changelogJson};
     cursorModelRefreshCount++;
     if(cursorModelRefreshCount>=12) window.clearInterval(cursorModelRefreshTimer);
   }, 5000);
+  refreshProcessModels('antigravity');
+  refreshProcessModels('copilot');
+  var processModelRefreshCount=0;
+  var processModelRefreshTimer=window.setInterval(function(){
+    refreshProcessModels('antigravity');
+    refreshProcessModels('copilot');
+    processModelRefreshCount++;
+    if(processModelRefreshCount>=12) window.clearInterval(processModelRefreshTimer);
+  }, 5000);
 
   // Drag the divider to resize the sidebar; width persists across reloads.
   (function(){
@@ -15908,6 +18031,7 @@ window.__CHANGELOG__ = ${changelogJson};
   })();
   initSessionPanelLayout();
   bindChatGroupDrop();
+  bindSessionPinOrderDrop();
 
   sortSessions();
   restoreChatGroups();
@@ -15917,6 +18041,7 @@ window.__CHANGELOG__ = ${changelogJson};
   renderTodoHubSummary();
   byId('list').addEventListener('scroll',scheduleSidebarWindow,{passive:true});
   byId('sessionPanel').addEventListener('scroll',scheduleSessionPanelVirtualWindow,{passive:true});
+  bindSessionListInteractionFreeze();
   window.addEventListener('resize',scheduleSessionPanelVirtualWindow);
   window.setInterval(tickLiveTimings,1000);
   resetOpenHeader();
@@ -16182,7 +18307,7 @@ window.__CHANGELOG__ = ${changelogJson};
       if(end<start){ error.textContent='End time must be after the start time.'; return; }
       sessionSearchCustomStart=start; sessionSearchCustomEnd=end; sessionSearchCustomDraftStart=start; sessionSearchCustomDraftEnd=end;
       sessionSearchRange='custom'; closeSessionSearchRange(true); syncSessionSearchRangeControl();
-      if(filterQ){ sortSessions(); byId('list').scrollTop=0; renderSidebar(); }
+      if(filterQ){ scheduleContentSearch(); sortSessions(); byId('list').scrollTop=0; renderSidebar(); }
     };
     actions.appendChild(apply); fields.appendChild(actions); menu.appendChild(fields);
   }
@@ -16281,7 +18406,7 @@ window.__CHANGELOG__ = ${changelogJson};
     sessionSearchRange=value;
     closeSessionSearchRange(true);
     syncSessionSearchRangeControl();
-    if(filterQ){ sortSessions(); byId('list').scrollTop=0; renderSidebar(); }
+    if(filterQ){ scheduleContentSearch(); sortSessions(); byId('list').scrollTop=0; renderSidebar(); }
   }
   function setupSessionSearchRange(){
     var button=byId('searchRangeButton'),menu=byId('searchRangeMenu'); if(!button||!menu) return;
@@ -16318,7 +18443,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var next=input.value.trim();
     try{ parsedSessionSearch=compileSessionSearch(next); filterQ=next; setSessionSearchError(''); }
     catch(err){ setSessionSearchError(err&&err.message||'invalid search'); syncSearchFilterState(input); return; }
-    syncSearchFilterState(input); sortSessions(); byId('list').scrollTop=0; renderSidebar(); scheduleContentSearch();
+    syncSearchFilterState(input); scheduleContentSearch(); sortSessions(); byId('list').scrollTop=0; renderSidebar();
   }
   var sessionSearchInputTimer=null;
   function scheduleSessionSearch(input){
@@ -16435,9 +18560,19 @@ window.__CHANGELOG__ = ${changelogJson};
       hideTimer=setTimeout(function(){ if(!overRail) hide(); },90);
     }
     function hide(){ active=null; activeSelection=''; activeSelectionStart=null; rail.classList.remove('show','has-selection'); rail.setAttribute('aria-hidden','true'); }
-    host.addEventListener('pointermove',function(ev){ var block=blockFromTarget(ev.target); if(block) show(block); else if(!overRail) hideSoon(); });
-    host.addEventListener('pointerleave',hideSoon);
-    host.addEventListener('scroll',function(){ closeReferenceComposer(false); if(active&&!overRail) positionRail(); },{passive:true});
+    function bindHost(nextHost){
+      if(!nextHost) return;
+      host=nextHost;
+      hide();
+      closeReferenceComposer(false);
+      if(nextHost._attendFloatingActionsBound) return;
+      nextHost._attendFloatingActionsBound=true;
+      nextHost.addEventListener('pointermove',function(ev){ var block=blockFromTarget(ev.target); if(block) show(block); else if(!overRail) hideSoon(); });
+      nextHost.addEventListener('pointerleave',hideSoon);
+      nextHost.addEventListener('scroll',function(){ closeReferenceComposer(false); if(active&&!overRail) positionRail(); },{passive:true});
+    }
+    bindTranscriptFloatingActions=bindHost;
+    bindHost(host);
     rail.addEventListener('pointerenter',function(){ overRail=true; if(hideTimer) clearTimeout(hideTimer); });
     rail.addEventListener('pointerleave',function(){ overRail=false; hideSoon(); });
     document.addEventListener('selectionchange',function(){ if(active) syncRail(); });
@@ -16760,4 +18895,85 @@ window.__CHANGELOG__ = ${changelogJson};
 </script>
 </body>
 </html>`;
+}
+
+interface ExtractedConsoleAssets {
+  style: string;
+  script: string;
+  styleName: string;
+  scriptName: string;
+}
+
+let extractedConsoleAssets: ExtractedConsoleAssets | null = null;
+
+function consoleAssetName(contents: string, extension: "css" | "js"): string {
+  const fingerprint = createHash("sha256").update(contents).digest("hex").slice(0, 12);
+  return `console-${fingerprint}.${extension}`;
+}
+
+function splitConsoleAssets(document: string): {
+  shell: string;
+  assets: ExtractedConsoleAssets;
+} {
+  const styleOpen = document.indexOf("<style>");
+  const styleClose = document.indexOf("</style>", styleOpen);
+  const scriptOpen = document.lastIndexOf("<script>\n(function(){");
+  const scriptClose = document.indexOf("</script>", scriptOpen);
+  if (styleOpen < 0 || styleClose < 0 || scriptOpen < 0 || scriptClose < 0) {
+    throw new Error("console document is missing its static style or application script");
+  }
+  const style = document.slice(styleOpen + "<style>".length, styleClose);
+  const script = document.slice(scriptOpen + "<script>".length, scriptClose);
+  const assets = {
+    style,
+    script,
+    styleName: consoleAssetName(style, "css"),
+    scriptName: consoleAssetName(script, "js"),
+  };
+  const styleLink = `<link rel="stylesheet" href="/assets/${assets.styleName}">`;
+  const withStyleAsset = `${document.slice(0, styleOpen)}${styleLink}${document.slice(styleClose + "</style>".length)}`;
+  const adjustedScriptOpen =
+    scriptOpen - (styleClose + "</style>".length - styleOpen) + styleLink.length;
+  const adjustedScriptClose = withStyleAsset.indexOf("</script>", adjustedScriptOpen);
+  const shell = `${withStyleAsset.slice(0, adjustedScriptOpen)}<script src="/assets/${assets.scriptName}"></script>${withStyleAsset.slice(adjustedScriptClose + "</script>".length)}`;
+  return { shell, assets };
+}
+
+/**
+ * Production page shell. The large, immutable CSS and browser application are
+ * served separately so navigation only transfers DOM + compact bootstrap data.
+ * `renderConsole` stays self-contained for exported snapshots and browser tests.
+ */
+export function renderConsoleShell(v: ConsoleView): string {
+  const { shell, assets } = splitConsoleAssets(renderConsole(v));
+  extractedConsoleAssets ??= assets;
+  return shell;
+}
+
+function ensureConsoleAssets(): ExtractedConsoleAssets {
+  if (extractedConsoleAssets) return extractedConsoleAssets;
+  const minimal: ConsoleView = {
+    sessions: [],
+    knownDirs: [],
+    scopeRoots: [],
+    defaultNewDir: "",
+    changelogMarkdown: "",
+    sessions1h: 0,
+    prompts1h: 0,
+    chars1h: 0,
+    vendors: [],
+    claudeModels: [],
+    codexModels: [],
+    cursorModels: [],
+    tags: [],
+  };
+  extractedConsoleAssets = splitConsoleAssets(renderConsole(minimal)).assets;
+  return extractedConsoleAssets;
+}
+
+export function consoleAsset(name: string): string | null {
+  const assets = ensureConsoleAssets();
+  if (name === assets.styleName) return assets.style;
+  if (name === assets.scriptName) return assets.script;
+  return null;
 }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeAnalyzer } from "../src/chat/analyzer/claude.js";
@@ -16,13 +17,23 @@ import type {
 } from "../src/chat/driver.js";
 import { ChatEngine, type QueryFn } from "../src/chat/engine.js";
 import type { UiEvent } from "../src/chat/events.js";
+import { TranscriptHistoryCache } from "../src/chat/history-cache.js";
+import { searchSessions } from "../src/chat/search.js";
 import { resolveConfig } from "../src/config.js";
+import { buildAlignmentModel } from "../src/core/alignment.js";
 import { AnalysisCache } from "../src/core/daemon/cache.js";
 import { DaemonRegistry } from "../src/core/daemon/registry.js";
 import type { LaunchAction, LaunchVendor } from "../src/core/launch.js";
+import { discoverMemorySources, loadMemoryDocs } from "../src/core/memory.js";
 import type { ModelOption } from "../src/core/model-options.js";
 import { TagStore } from "../src/core/tags.js";
+import type { RawSession } from "../src/core/types.js";
 import type { ClaudeModelCatalogInspection } from "../src/core/vendor/claude-models.js";
+import { buildSources } from "../src/core/vendor/index.js";
+import type { ProcessCliModelInspection } from "../src/core/vendor/process-cli-models.js";
+import { ScanCache } from "../src/core/vendor/scan-cache.js";
+import type { SessionIndex, SessionIndexSnapshot } from "../src/core/vendor/session-index.js";
+import { TranscriptPathIndex } from "../src/core/vendor/transcript-index.js";
 import { WorkEventStore } from "../src/core/work-events.js";
 import {
   type AppDeps,
@@ -42,6 +53,72 @@ interface Call {
 const queryCalls: Array<{ prompt: unknown; options?: Record<string, unknown> }> = [];
 const defaultConfig = resolveConfig({ positionals: [] });
 
+class TestSessionIndex implements SessionIndex {
+  private readonly epoch = `test-index-${Math.random().toString(36).slice(2)}`;
+  private readonly listeners = new Set<(snapshot: SessionIndexSnapshot) => void>();
+  private readonly caches = {
+    claude: new ScanCache(),
+    codex: new ScanCache(),
+    cursor: new ScanCache(),
+    cursorCaptured: new ScanCache(),
+    antigravity: new ScanCache(),
+    copilot: new ScanCache(),
+  };
+  private current: SessionIndexSnapshot;
+
+  constructor(
+    private readonly config: ReturnType<typeof resolveConfig>,
+    private readonly transcriptIndex?: AppDeps["transcriptIndex"],
+  ) {
+    this.current = {
+      epoch: this.epoch,
+      revision: 0,
+      scannedAt: 0,
+      pending: true,
+      sessions: [],
+    };
+    this.refresh();
+  }
+
+  snapshot(): SessionIndexSnapshot {
+    return this.current;
+  }
+
+  lookup(vendor: string, sessionId: string): RawSession | null {
+    return (
+      this.current.sessions.find(
+        (session) => session.vendor === vendor && session.sessionId === sessionId,
+      ) ?? null
+    );
+  }
+
+  requestRefresh(): void {
+    this.refresh();
+  }
+
+  subscribe(listener: (snapshot: SessionIndexSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  close(): void {}
+
+  private refresh(): void {
+    const sessions = buildSources(this.config, this.caches, this.transcriptIndex).flatMap(
+      (source) => source.scan(),
+    );
+    const changed = JSON.stringify(sessions) !== JSON.stringify(this.current.sessions);
+    this.current = {
+      epoch: this.epoch,
+      revision: this.current.revision + (changed || this.current.pending ? 1 : 0),
+      scannedAt: Date.now(),
+      pending: false,
+      sessions,
+    };
+    for (const listener of this.listeners) listener(this.current);
+  }
+}
+
 function createApp(config: ReturnType<typeof resolveConfig>, deps: AppDeps) {
   const uniq = Math.random().toString(36).slice(2);
   if (config.claudeProjects === defaultConfig.claudeProjects)
@@ -52,9 +129,55 @@ function createApp(config: ReturnType<typeof resolveConfig>, deps: AppDeps) {
     config.cursorProjects = path.join(os.tmpdir(), `attend-isolated-cursor-projects-${uniq}`);
   if (config.cursorSessions === defaultConfig.cursorSessions)
     config.cursorSessions = path.join(os.tmpdir(), `attend-isolated-cursor-sessions-${uniq}`);
+  if (config.copilotSessions === defaultConfig.copilotSessions)
+    config.copilotSessions = path.join(os.tmpdir(), `attend-isolated-copilot-sessions-${uniq}`);
+  if (config.copilotCapturedSessions === defaultConfig.copilotCapturedSessions)
+    config.copilotCapturedSessions = path.join(
+      os.tmpdir(),
+      `attend-isolated-copilot-captured-${uniq}`,
+    );
+  if (config.antigravityBrain === defaultConfig.antigravityBrain)
+    config.antigravityBrain = path.join(os.tmpdir(), `attend-isolated-antigravity-brain-${uniq}`);
+  if (config.antigravityCapturedSessions === defaultConfig.antigravityCapturedSessions)
+    config.antigravityCapturedSessions = path.join(
+      os.tmpdir(),
+      `attend-isolated-antigravity-captured-${uniq}`,
+    );
   if (config.workEvents === defaultConfig.workEvents)
     config.workEvents = path.join(os.tmpdir(), `attend-isolated-work-events-${uniq}.sqlite3`);
-  return createServerApp(config, deps);
+  const effectiveDeps: AppDeps = {
+    ...deps,
+    sessionIndex: deps.sessionIndex ?? new TestSessionIndex(config, deps.transcriptIndex),
+    transcriptHistory: deps.transcriptHistory ?? new TranscriptHistoryCache(),
+    sessionSearch: deps.sessionSearch ?? {
+      search: async (sessions, query, opts) => searchSessions(sessions, query, opts),
+    },
+    alignmentModel: deps.alignmentModel ?? {
+      snapshot: () =>
+        buildAlignmentModel(
+          loadMemoryDocs(
+            config.memorySources.length
+              ? config.memorySources
+              : discoverMemorySources(config.claudeProjects),
+          ),
+        ),
+      requestRefresh: () => {},
+      subscribe: () => () => {},
+    },
+    workPromptIndex: deps.workPromptIndex ?? {
+      sync: (sessions) => {
+        const store = new WorkEventStore(config.workEvents);
+        try {
+          store.backfillPrompts(sessions);
+        } finally {
+          store.close();
+        }
+      },
+      subscribe: () => () => {},
+    },
+    compactTransport: deps.compactTransport ?? false,
+  };
+  return createServerApp(config, effectiveDeps);
 }
 // Fake SDK query(): yields init → assistant → result, no network.
 const fakeQuery = ((args: { prompt: unknown; options?: Record<string, unknown> }) => {
@@ -70,6 +193,40 @@ const fakeQuery = ((args: { prompt: unknown; options?: Record<string, unknown> }
   }
   return gen();
 }) as unknown as QueryFn;
+
+async function readSseUntil(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  predicate: (text: string) => boolean,
+  timeoutMs = 3_000,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + timeoutMs;
+  let text = "";
+  while (Date.now() < deadline && !predicate(text)) {
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 50)),
+    ]);
+    if (!chunk) continue;
+    if (chunk.value) text += decoder.decode(chunk.value, { stream: true });
+    if (chunk.done) break;
+  }
+  return text;
+}
+
+function sseJsonMessages(text: string): Array<Record<string, unknown>> {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data: "))
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line.slice("data: ".length)) as unknown;
+        return parsed && typeof parsed === "object" ? [parsed as Record<string, unknown>] : [];
+      } catch {
+        return [];
+      }
+    });
+}
 
 function appWithSpy(config = resolveConfig({ positionals: [] }), extraDeps: Partial<AppDeps> = {}) {
   queryCalls.length = 0;
@@ -111,6 +268,22 @@ function appWithSpy(config = resolveConfig({ positionals: [] }), extraDeps: Part
       config.codexSessions === defaultConfig.codexSessions ? codexSessions : config.codexSessions,
     cursorProjects,
     cursorSessions,
+    copilotSessions:
+      config.copilotSessions === defaultConfig.copilotSessions
+        ? path.join(os.tmpdir(), `attend-test-copilot-sessions-${uniq}`)
+        : config.copilotSessions,
+    copilotCapturedSessions:
+      config.copilotCapturedSessions === defaultConfig.copilotCapturedSessions
+        ? path.join(os.tmpdir(), `attend-test-copilot-captured-${uniq}`)
+        : config.copilotCapturedSessions,
+    antigravityBrain:
+      config.antigravityBrain === defaultConfig.antigravityBrain
+        ? path.join(os.tmpdir(), `attend-test-antigravity-brain-${uniq}`)
+        : config.antigravityBrain,
+    antigravityCapturedSessions:
+      config.antigravityCapturedSessions === defaultConfig.antigravityCapturedSessions
+        ? path.join(os.tmpdir(), `attend-test-antigravity-captured-${uniq}`)
+        : config.antigravityCapturedSessions,
     daemonRegistry:
       config.daemonRegistry === defaultConfig.daemonRegistry
         ? path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)
@@ -194,6 +367,221 @@ describe("new-session directory default", () => {
 });
 
 describe("GET /", () => {
+  it("exposes route, event-loop, index, and background refresh diagnostics", async () => {
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      compactTransport: true,
+    });
+    await app.request("/");
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+
+    const response = await app.request("/debug/performance");
+    expect(response.status).toBe(200);
+    const diagnostics = (await response.json()) as {
+      eventLoop?: { p99Ms?: number };
+      routes?: Record<string, { count?: number }>;
+      sessionIndex?: { pending?: boolean; sessions?: number; error?: string | null };
+      background?: {
+        compactTransport?: boolean;
+        refreshing?: Record<string, boolean>;
+      };
+    };
+    expect(diagnostics.eventLoop?.p99Ms).toBeTypeOf("number");
+    expect(diagnostics.routes?.["/"]?.count).toBe(1);
+    expect(diagnostics.sessionIndex).toMatchObject({ pending: false, error: null });
+    expect(diagnostics.sessionIndex?.sessions).toBeTypeOf("number");
+    expect(diagnostics.background?.compactTransport).toBe(true);
+    expect(diagnostics.background?.refreshing).toMatchObject({
+      vendors: false,
+      claudeModels: false,
+      codexModels: false,
+      cursorModels: false,
+    });
+  });
+
+  it("keeps a 5,000-session projection responsive and serves cached snapshots", async () => {
+    const now = Date.now();
+    const sessions: RawSession[] = Array.from({ length: 5_000 }, (_, index) => ({
+      vendor: "claude",
+      sessionId: `stress-${index}`,
+      path: path.join(os.tmpdir(), `stress-${index}.jsonl`),
+      title: `stress session ${index}`,
+      lastPrompt: `prompt ${index}`,
+      cwd: path.join(os.tmpdir(), `project-${index % 50}`),
+      firstTs: now - index * 1_000 - 60_000,
+      lastTs: now - index * 1_000,
+      lastAssistantTs: now - index * 1_000,
+      userPromptTs: [now - index * 1_000],
+      userPromptActivity: [{ at: now - index * 1_000, chars: 12 }],
+      assistantTextActivity: [{ at: now - index * 1_000, chars: 20 }],
+      prompts: 1,
+      actions: 0,
+      visits: 1,
+      chars: 32,
+      lastTurnChars: 20,
+    }));
+    const readySnapshot: SessionIndexSnapshot = {
+      epoch: "stress-index",
+      revision: 1,
+      scannedAt: now,
+      pending: false,
+      sessions,
+    };
+    let current: SessionIndexSnapshot = {
+      ...readySnapshot,
+      revision: 0,
+      sessions: [],
+    };
+    const listeners = new Set<(snapshot: SessionIndexSnapshot) => void>();
+    const sessionIndex: SessionIndex = {
+      snapshot: () => current,
+      lookup: (_vendor, id) => current.sessions.find((session) => session.sessionId === id) ?? null,
+      requestRefresh: () => {},
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      close: () => {},
+    };
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      sessionIndex,
+      compactTransport: true,
+      sessionSearch: { search: async () => [], sync: () => {}, close: () => {} },
+      alignmentModel: {
+        snapshot: () => null,
+        requestRefresh: () => {},
+        subscribe: () => () => {},
+      },
+      workPromptIndex: {
+        sync: () => {},
+        subscribe: () => () => {},
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    let ticks = 0;
+    let maxLagMs = 0;
+    let lastTickAt = performance.now();
+    const ticker = setInterval(() => {
+      const tickedAt = performance.now();
+      maxLagMs = Math.max(maxLagMs, tickedAt - lastTickAt - 2);
+      lastTickAt = tickedAt;
+      ticks += 1;
+    }, 2);
+    try {
+      const startedAt = performance.now();
+      current = readySnapshot;
+      for (const listener of listeners) listener(current);
+      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      const projectionMs = performance.now() - startedAt;
+      const projectionTicks = ticks;
+      const projectionMaxLagMs = maxLagMs;
+      ticks = 0;
+      maxLagMs = 0;
+      lastTickAt = performance.now();
+      const responses = await Promise.all(
+        Array.from({ length: 20 }, () => app.request("/session-index")),
+      );
+      const payloads = await Promise.all(responses.map((response) => response.arrayBuffer()));
+      const diagnostics = (await (await app.request("/debug/performance")).json()) as {
+        routes?: Record<string, { p95Ms?: number }>;
+      };
+
+      expect(projectionMs).toBeLessThan(1_000);
+      expect(projectionTicks).toBeGreaterThan(5);
+      expect(projectionMaxLagMs).toBeLessThan(50);
+      expect(maxLagMs).toBeLessThan(50);
+      expect(payloads[0]?.byteLength).toBeLessThan(4 * 1024 * 1024);
+      expect(diagnostics.routes?.["/session-index"]?.p95Ms).toBeLessThan(50);
+    } finally {
+      clearInterval(ticker);
+    }
+  });
+
+  it("serves a compact production shell and keeps SSE index control messages bounded", async () => {
+    const indexedSession: RawSession = {
+      vendor: "claude",
+      sessionId: "indexed-shell-session",
+      path: path.join(os.tmpdir(), "indexed-shell-session.jsonl"),
+      title: "Indexed outside the page shell",
+      lastPrompt: "latest",
+      cwd: os.tmpdir(),
+      firstTs: Date.now() - 1_000,
+      lastTs: Date.now(),
+      lastAssistantTs: null,
+      userPromptTs: [Date.now()],
+      userPromptActivity: [{ at: Date.now(), chars: 6 }],
+      assistantTextActivity: [],
+      prompts: 1,
+      actions: 0,
+      visits: 1,
+      chars: 6,
+      lastTurnChars: 0,
+    };
+    const snapshot: SessionIndexSnapshot = {
+      epoch: "production-shell-index",
+      revision: 7,
+      scannedAt: Date.now(),
+      pending: false,
+      sessions: [indexedSession],
+    };
+    const sessionIndex: SessionIndex = {
+      snapshot: () => snapshot,
+      lookup: (_vendor, sessionId) =>
+        sessionId === indexedSession.sessionId ? indexedSession : null,
+      requestRefresh: () => {},
+      subscribe: () => () => {},
+      close: () => {},
+    };
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      sessionIndex,
+      compactTransport: true,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const page = await app.request("/");
+    const html = await page.text();
+    expect(Buffer.byteLength(html)).toBeLessThan(100_000);
+    const styleAsset = html.match(/\/assets\/(console-[a-f0-9]{12}\.css)/)?.[1];
+    const scriptAsset = html.match(/\/assets\/(console-[a-f0-9]{12}\.js)/)?.[1];
+    expect(styleAsset).toBeDefined();
+    expect(scriptAsset).toBeDefined();
+    if (!styleAsset || !scriptAsset) throw new Error("missing fingerprinted console assets");
+    expect(html).not.toContain("var SESS = window.__SESSIONS__");
+    expect(html).not.toContain("Indexed outside the page shell");
+
+    const script = await app.request(`/assets/${scriptAsset}`);
+    expect(script.status).toBe(200);
+    expect(script.headers.get("cache-control")).toContain("immutable");
+    expect((await script.text()).length).toBeGreaterThan(500_000);
+    const style = await app.request(`/assets/${styleAsset}`);
+    expect(style.headers.get("content-type")).toContain("text/css");
+    expect((await app.request("/assets/console-v3.css")).status).toBe(404);
+
+    const stream = await app.request("/chat/live-stream");
+    const reader = stream.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) throw new Error("missing SSE response body");
+    const handshake = await readSseUntil(reader, (text) => text.includes("snapshotUrl"));
+    const control = sseJsonMessages(handshake).find(
+      (message) => message.kind === "session_index" && typeof message.snapshotUrl === "string",
+    );
+    expect(control).toMatchObject({
+      epoch: "production-shell-index",
+      revision: 7,
+      pending: false,
+    });
+    expect(control).not.toHaveProperty("sessions");
+    expect(Buffer.byteLength(JSON.stringify(control))).toBeLessThan(16_000);
+    await reader.cancel();
+
+    const indexed = (await (await app.request(String(control?.snapshotUrl))).json()) as {
+      sessions?: Array<Record<string, unknown>>;
+    };
+    expect(indexed.sessions).toMatchObject([
+      { sessionId: "indexed-shell-session", title: "Indexed outside the page shell" },
+    ]);
+  });
+
   it("shows the scoped vault name while e2ee is locked", async () => {
     const uniq = Math.random().toString(36).slice(2);
     const vaultRoot = path.join(os.tmpdir(), `attend-test-vault-${uniq}`);
@@ -221,6 +609,151 @@ describe("GET /", () => {
     expect(html).toContain('window.__CHANGELOG__ = "# Changelog\\n');
     expect(html).toContain("## 1.0.0 — 2026-07-12");
     expect(html).not.toContain(">locked</span>");
+  });
+
+  it("redacts an e2ee passphrase from a matching scope basename and page title", async () => {
+    const passphrase = "do-not-project-this-passphrase";
+    const config = {
+      ...resolveConfig({
+        positionals: [path.join(os.tmpdir(), passphrase)],
+        e2eePassphrase: passphrase,
+      }),
+      workEvents: path.join(os.tmpdir(), `attend-title-redaction-${Date.now()}.sqlite3`),
+    };
+    const { app } = appWithSpy(config);
+
+    const html = await (await app.request("/")).text();
+
+    expect(html).not.toContain(passphrase);
+    expect(html).toContain("<title>Attend — protected</title>");
+    expect(html).toContain('<span class="brand-scope" title="Attend — protected">protected</span>');
+  });
+
+  it("delivers a cold session index on first connect and repeats it authoritatively on reconnect", async () => {
+    const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), "attend-cold-scan-"));
+    const projectDir = path.join(claudeProjects, "-tmp-cold-project");
+    const cwd = path.join(claudeProjects, "worktree");
+    const transcript = path.join(projectDir, "cold-session.jsonl");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(cwd);
+    fs.writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "user",
+        sessionId: "cold-session",
+        cwd,
+        timestamp: new Date().toISOString(),
+        message: { content: "index me after first paint" },
+      }),
+    );
+    try {
+      const config = {
+        ...resolveConfig({ positionals: [] }),
+        claudeProjects,
+      };
+      const ready: SessionIndexSnapshot = {
+        epoch: `cold-index-${Math.random().toString(36).slice(2)}`,
+        revision: 1,
+        scannedAt: Date.now(),
+        pending: false,
+        sessions: [
+          {
+            vendor: "claude",
+            sessionId: "cold-session",
+            path: transcript,
+            title: "index me after first paint",
+            lastPrompt: "index me after first paint",
+            cwd,
+            firstTs: Date.now(),
+            lastTs: Date.now(),
+            lastAssistantTs: null,
+            userPromptTs: [Date.now()],
+            userPromptActivity: [{ at: Date.now(), chars: 26 }],
+            assistantTextActivity: [],
+            prompts: 1,
+            actions: 0,
+            visits: 1,
+            chars: 26,
+            lastTurnChars: 0,
+          },
+        ],
+      };
+      let current: SessionIndexSnapshot = {
+        epoch: ready.epoch,
+        revision: 0,
+        scannedAt: 0,
+        pending: true,
+        sessions: [],
+      };
+      const listeners = new Set<(snapshot: SessionIndexSnapshot) => void>();
+      const deferredIndex: SessionIndex = {
+        snapshot: () => current,
+        lookup: (vendor, sessionId) =>
+          current.sessions.find(
+            (session) => session.vendor === vendor && session.sessionId === sessionId,
+          ) ?? null,
+        requestRefresh: () => {},
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        close: () => {},
+      };
+      setImmediate(() => {
+        current = ready;
+        for (const listener of listeners) listener(current);
+      });
+      const { app } = appWithSpy(config, {
+        sessionIndex: deferredIndex,
+        compactTransport: true,
+      });
+
+      const html = await (await app.request("/")).text();
+      expect(html).toContain("window.__SESSIONS__ = [];");
+      expect(html).toContain("window.__SESSIONS_PENDING__ = true;");
+      expect(html).toContain("window.__SESSION_INDEX_REVISION__ = 0;");
+      expect(html).toMatch(/window\.__SESSION_INDEX_EPOCH__ = "[^"]+";/);
+
+      const first = await app.request("/chat/live-stream");
+      const firstReader = (first.body as ReadableStream<Uint8Array>).getReader();
+      const firstText = await readSseUntil(
+        firstReader,
+        (text) => text.includes('"pending":false') && text.includes('"snapshotUrl"'),
+      );
+      await firstReader.cancel().catch(() => {});
+
+      expect(firstText).toContain('"kind":"session_index"');
+      expect(firstText).toContain('"pending":true');
+      expect(firstText).toContain('"pending":false');
+      const epoch = firstText.match(/"kind":"session_index","epoch":"([^"]+)"/)?.[1];
+      expect(epoch).toBeTruthy();
+      const firstControl = sseJsonMessages(firstText).find(
+        (message) => message.kind === "session_index" && message.pending === false,
+      );
+      const firstSnapshot = await app.request(String(firstControl?.snapshotUrl));
+      const firstSnapshotText = await firstSnapshot.text();
+      expect(firstSnapshotText).toContain('"sessionId":"cold-session"');
+      expect(firstSnapshotText).toContain(JSON.stringify(cwd));
+
+      // A browser can reconnect with an id retained from a previous Attend
+      // process. The process-local event counter must not suppress the new
+      // process's authoritative index handshake.
+      const reconnect = await app.request("/chat/live-stream", {
+        headers: { "last-event-id": "999999" },
+      });
+      const reconnectReader = (reconnect.body as ReadableStream<Uint8Array>).getReader();
+      const reconnectText = await readSseUntil(reconnectReader, (text) =>
+        text.includes('"snapshotUrl"'),
+      );
+      await reconnectReader.cancel().catch(() => {});
+
+      expect(reconnectText).toContain(
+        `"kind":"session_index","epoch":"${epoch}","revision":1,"pending":false`,
+      );
+      expect((await app.request("/sessions")).status).toBe(404);
+    } finally {
+      fs.rmSync(claudeProjects, { recursive: true, force: true });
+    }
   });
 });
 
@@ -259,7 +792,7 @@ describe("GET /models/codex", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("does not shrink the startup model snapshot before the first browser request", async () => {
+  it("refreshes a changing cache asynchronously instead of blocking startup on a frozen copy", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-model-startup-"));
     const cache = path.join(root, "models_cache.json");
     fs.writeFileSync(
@@ -286,10 +819,10 @@ describe("GET /models/codex", () => {
       warning: string | null;
     };
     const firstPageHtml = await (await app.request("/")).text();
-    expect(first.models.map((model) => model.value)).toEqual(["gpt-5.6-sol", "gpt-5.5"]);
-    expect(first.warning).toContain("temporarily removed known models");
-    expect(firstPageHtml).toContain('"value":"gpt-5.6-sol"');
-    expect(firstPageHtml).toContain("Codex model discovery temporarily removed known models");
+    expect(first.models.map((model) => model.value)).toEqual(["gpt-5.5"]);
+    expect(first.warning).toBeNull();
+    expect(firstPageHtml).toContain('"value":"gpt-5.5"');
+    expect(firstPageHtml).not.toContain('"value":"gpt-5.6-sol"');
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -463,6 +996,58 @@ describe("GET /models/cursor", () => {
     expect(body.models[0]?.speedLabels).toEqual({ true: "Fast" });
     expect(body.defaults.model).toBe("gpt-5.3-codex");
     expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+describe("GET /models/process vendors", () => {
+  it("refreshes Antigravity and Copilot asynchronously and serves cached snapshots", async () => {
+    let finishAntigravity: ((inspection: ProcessCliModelInspection) => void) | undefined;
+    const antigravityCatalog = vi.fn(
+      () =>
+        new Promise<ProcessCliModelInspection>((resolve) => {
+          finishAntigravity = resolve;
+        }),
+    );
+    const copilotCatalog = vi.fn(
+      async (): Promise<ProcessCliModelInspection> => ({
+        models: [{ value: "auto", label: "Auto" }],
+        defaults: { model: "auto", effort: "", speed: "" },
+        warning: null,
+      }),
+    );
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      antigravityModelCatalog: antigravityCatalog,
+      copilotModelCatalog: copilotCatalog,
+    });
+
+    const pageResponse = await app.request("/");
+    const pending = (await (await app.request("/models/antigravity")).json()) as {
+      models: ModelOption[];
+      warning: string | null;
+    };
+    expect(pageResponse.status).toBe(200);
+    expect(pending.models).toEqual([]);
+    expect(pending.warning).toContain("Discovering models");
+
+    finishAntigravity?.({
+      models: [{ value: "gemini-3-pro", label: "Gemini 3 Pro" }],
+      defaults: { model: "gemini-3-pro", effort: "high", speed: "" },
+      warning: null,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const antigravity = (await (await app.request("/models/antigravity")).json()) as {
+      models: ModelOption[];
+    };
+    const copilot = (await (await app.request("/models/copilot")).json()) as {
+      models: ModelOption[];
+    };
+    await app.request("/");
+
+    expect(antigravity.models.map((model) => model.value)).toEqual(["gemini-3-pro"]);
+    expect(copilot.models.map((model) => model.value)).toEqual(["auto"]);
+    expect(antigravityCatalog).toHaveBeenCalledTimes(1);
+    expect(copilotCatalog).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -837,7 +1422,7 @@ describe("POST /launch", () => {
       (await app.request(`/launch?action=zap&vendor=claude&cwd=${tmp}`, { method: "POST" })).status,
     ).toBe(400);
     expect(
-      (await app.request(`/launch?action=new&vendor=gemini&cwd=${tmp}`, { method: "POST" })).status,
+      (await app.request(`/launch?action=new&vendor=llama&cwd=${tmp}`, { method: "POST" })).status,
     ).toBe(400);
   });
 
@@ -848,6 +1433,22 @@ describe("POST /launch", () => {
       { method: "POST" },
     );
     expect(res.status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("returns the explicit context-seeded fallback for non-native terminal forks", async () => {
+    const { app, calls } = appWithSpy();
+    const res = await app.request(`/launch?action=fork&vendor=antigravity&id=agy-1&cwd=${tmp}`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "capability_unavailable",
+      vendor: "antigravity",
+      capability: "fork",
+      fallback: expect.stringContaining("seeded with the parent transcript"),
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -931,14 +1532,52 @@ describe("POST /paths/exists", () => {
 });
 
 describe("GET /dirs/suggest", () => {
-  it("caps recent directories at five while retaining browsed folders", () => {
+  it("paginates folder suggestions without dropping later directories", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-page-"));
+    for (let index = 0; index < 29; index += 1) {
+      fs.mkdirSync(path.join(root, `folder-${String(index).padStart(2, "0")}`));
+    }
+    try {
+      const { app } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const first = await app.request(
+        `/dirs/suggest?q=${encodeURIComponent(root)}&offset=0&limit=12`,
+      );
+      const firstBody = (await first.json()) as {
+        dirs: Array<{ path: string; source: string }>;
+        hasMore: boolean;
+      };
+      const second = await app.request(
+        `/dirs/suggest?q=${encodeURIComponent(root)}&offset=12&limit=12`,
+      );
+      const secondBody = (await second.json()) as typeof firstBody;
+      const last = await app.request(
+        `/dirs/suggest?q=${encodeURIComponent(root)}&offset=24&limit=12`,
+      );
+      const lastBody = (await last.json()) as typeof firstBody;
+
+      expect(firstBody.dirs).toHaveLength(12);
+      expect(firstBody.hasMore).toBe(true);
+      expect(secondBody.dirs).toHaveLength(12);
+      expect(secondBody.hasMore).toBe(true);
+      expect(lastBody.dirs).toHaveLength(5);
+      expect(lastBody.hasMore).toBe(false);
+      expect(
+        new Set([...firstBody.dirs, ...secondBody.dirs, ...lastBody.dirs].map((item) => item.path))
+          .size,
+      ).toBe(29);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("caps recent directories at five while retaining browsed folders", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-dirs-"));
     const recentDirs = Array.from({ length: 8 }, (_, index) => path.join(root, `recent-${index}`));
     const folder = path.join(root, "folder-only");
     for (const dir of recentDirs) fs.mkdirSync(dir);
     fs.mkdirSync(folder);
     try {
-      const suggestions = suggestProjectDirs(root, [root], recentDirs);
+      const suggestions = await suggestProjectDirs(root, [root], recentDirs);
       expect(suggestions.filter((item) => item.source === "recent")).toHaveLength(5);
       expect(suggestions).toContainEqual({ path: folder, source: "folder" });
     } finally {
@@ -2041,6 +2680,133 @@ describe("GET /session/source", () => {
 });
 
 describe("request boundaries", () => {
+  it("pages chat history through the transcript index without rescanning vendors", async () => {
+    const codexSessions = fs.mkdtempSync(path.join(os.tmpdir(), "attend-history-index-"));
+    const file = path.join(codexSessions, "rollout-history-index.jsonl");
+    const rows: Array<Record<string, unknown>> = [
+      {
+        timestamp: new Date().toISOString(),
+        type: "session_meta",
+        payload: { id: "history-index", cwd: os.tmpdir() },
+      },
+    ];
+    for (let index = 0; index < 100; index++) {
+      rows.push({
+        timestamp: new Date().toISOString(),
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `question ${index}` }],
+        },
+      });
+      rows.push({
+        timestamp: new Date().toISOString(),
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: `answer ${index}` }],
+        },
+      });
+    }
+    fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n"));
+    const transcriptIndex = new TranscriptPathIndex();
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      codexSessions,
+    };
+    try {
+      const { app } = appWithSpy(config, { transcriptIndex });
+      await app.request("/");
+      const replaceVendor = vi.spyOn(transcriptIndex, "replaceVendor");
+      replaceVendor.mockClear();
+
+      const first = await app.request(
+        "/chat/messages?session=history-index&vendor=codex&paged=1&limit=60",
+      );
+      const firstBody = (await first.json()) as {
+        messages: Array<{ text: string; historyOrdinal: number }>;
+        page: { before: number; hasMore: boolean; total: number; version: string };
+      };
+      expect(first.status).toBe(200);
+      expect(firstBody.messages).toHaveLength(60);
+      expect(firstBody.messages[0]).toMatchObject({
+        text: "question 70",
+        historyOrdinal: 140,
+      });
+      expect(firstBody.page).toMatchObject({ before: 140, hasMore: true, total: 200 });
+      expect(firstBody.page.version).toBeTruthy();
+      expect(replaceVendor).not.toHaveBeenCalled();
+
+      const older = (await (
+        await app.request(
+          `/chat/messages?session=history-index&vendor=codex&paged=1&limit=60&before=${firstBody.page.before}`,
+        )
+      ).json()) as {
+        messages: Array<{
+          text: string;
+          historyId: string;
+          historyOrdinal: number;
+          historyIndex: number;
+        }>;
+        page: { before: number; hasMore: boolean };
+      };
+      expect(older.messages).toHaveLength(60);
+      expect(older.messages[0]).toMatchObject({
+        text: "question 40",
+        historyOrdinal: 80,
+      });
+      expect(older.page).toMatchObject({ before: 80, hasMore: true });
+      expect(replaceVendor).not.toHaveBeenCalled();
+
+      const target = older.messages[30];
+      expect(target?.historyId).toMatch(/^m_/);
+      const targeted = (await (
+        await app.request(
+          `/chat/messages?session=history-index&vendor=codex&around=${encodeURIComponent(target?.historyId ?? "")}&radius=20`,
+        )
+      ).json()) as {
+        messages: Array<{ text: string; historyId: string; historyIndex: number }>;
+        window: {
+          historyId: string;
+          center: number;
+          start: number;
+          end: number;
+          hasEarlier: boolean;
+          hasLater: boolean;
+          total: number;
+        };
+      };
+      expect(targeted.messages).toHaveLength(41);
+      expect(targeted.messages[20]?.historyId).toBe(target?.historyId);
+      expect(targeted.messages[0]?.historyIndex).toBe(90);
+      expect(targeted.messages.at(-1)?.historyIndex).toBe(130);
+      expect(targeted.window).toMatchObject({
+        historyId: target?.historyId,
+        center: 110,
+        start: 90,
+        end: 131,
+        hasEarlier: true,
+        hasLater: true,
+        total: 200,
+      });
+      expect(replaceVendor).not.toHaveBeenCalled();
+
+      const missing = await app.request(
+        "/chat/messages?session=history-index&vendor=codex&around=m_missing_pin",
+      );
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({
+        ok: false,
+        error: "history target not found",
+      });
+      expect(replaceVendor).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(codexSessions, { recursive: true, force: true });
+    }
+  });
+
   it("does not read an arbitrary JSONL path that is not a visible session", async () => {
     const file = path.join(
       os.tmpdir(),
@@ -2133,6 +2899,21 @@ describe("GET /search", () => {
           },
         ],
       });
+
+      const beforeSession = await app.request(
+        `/search?q=${encodeURIComponent("port 5050")}&end=${Date.now() - 60_000}`,
+      );
+      expect(beforeSession.status).toBe(200);
+      expect(await beforeSession.json()).toEqual({ results: [] });
+
+      const invalidRange = await app.request(
+        `/search?q=${encodeURIComponent("port 5050")}&start=200&end=100`,
+      );
+      expect(invalidRange.status).toBe(400);
+      expect(await invalidRange.json()).toEqual({
+        results: [],
+        error: "invalid search range",
+      });
     } finally {
       fs.rmSync(claudeProjects, { recursive: true, force: true });
       fs.rmSync(codexSessions, { recursive: true, force: true });
@@ -2143,6 +2924,7 @@ describe("GET /search", () => {
 describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
   function appWithCodexSpy(engine?: ChatDriver) {
     const codex = new FakeCodexDriver();
+    const transcriptIndex = new TranscriptPathIndex();
     const uniq = Math.random().toString(36).slice(2);
     const config = {
       ...resolveConfig({ positionals: [] }),
@@ -2165,11 +2947,13 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         launcher: () => "noop",
         engine: engine ?? new ChatEngine(fakeQuery),
         codex,
+        transcriptIndex,
         orchestrator,
       }),
       codex,
       config,
       orchestrator,
+      transcriptIndex,
     };
   }
 
@@ -2798,13 +3582,12 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
 
     codex.emitEvent("cx-1", { kind: "assistant_text", text: "side answer" });
     codex.emitEvent("cx-1", { kind: "result", ok: true });
-    await vi.waitFor(() =>
-      expect(
-        new WorkEventStore(config.workEvents)
-          .list()
-          .filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1"),
-      ).toHaveLength(2),
-    );
+    await vi.waitFor(() => {
+      const promptEvents = new WorkEventStore(config.workEvents)
+        .list()
+        .filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1");
+      expect(promptEvents, JSON.stringify(promptEvents, null, 2)).toHaveLength(2);
+    });
     const commentEvents = new WorkEventStore(config.workEvents).list();
     expect(
       commentEvents.filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1"),
@@ -2973,6 +3756,278 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(sessions.some((session) => session.sessionId === "cx-1")).toBe(true);
   });
 
+  it("uses the requested vendor for a new comment and locks replies to that thread vendor", async () => {
+    const claude = new FakeCodexDriver("claude");
+    const { app, codex, config } = appWithCodexSpy(claude);
+    const parentSessionId = "parent-comment-vendor";
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    fs.writeFileSync(
+      path.join(config.codexSessions, `rollout-${parentSessionId}.jsonl`),
+      [
+        {
+          type: "session_meta",
+          timestamp: new Date(Date.now() - 2_000).toISOString(),
+          payload: { id: parentSessionId, cwd: os.tmpdir() },
+        },
+        {
+          type: "response_item",
+          timestamp: new Date(Date.now() - 1_000).toISOString(),
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "parent answer" }],
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n"),
+    );
+
+    const first = await app.request("/comments/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        threadId: "comment-selected-vendor",
+        parentSessionId,
+        anchorKey: "assistant:0",
+        anchorText: "parent answer",
+        question: "review with Claude",
+        vendor: "claude",
+      }),
+    });
+    expect(first.status, await first.clone().text()).toBe(200);
+    expect(await first.json()).toMatchObject({
+      ok: true,
+      thread: {
+        id: "comment-selected-vendor",
+        vendor: "claude",
+        parentSessionId,
+      },
+    });
+    expect(claude.starts).toHaveLength(1);
+    expect(claude.starts[0]).toMatchObject({
+      clientSessionId: "comment-selected-vendor",
+      cwd: os.tmpdir(),
+    });
+    expect(codex.starts).toHaveLength(0);
+
+    const reply = await app.request("/comments/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        threadId: "comment-selected-vendor",
+        parentSessionId,
+        anchorKey: "assistant:0",
+        anchorText: "parent answer",
+        question: "continue on the existing thread",
+        vendor: "codex",
+      }),
+    });
+    expect(reply.status, await reply.clone().text()).toBe(200);
+    expect(await reply.json()).toMatchObject({
+      ok: true,
+      thread: { id: "comment-selected-vendor", vendor: "claude" },
+    });
+    expect(claude.sends).toContainEqual({
+      sessionId: "cx-1",
+      turn: { text: "continue on the existing thread" },
+    });
+    expect(codex.sends).toHaveLength(0);
+  });
+
+  it("loads comment history from the path index and advertises changed history on reconnect", async () => {
+    const { app, config, transcriptIndex } = appWithCodexSpy();
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    const parentFile = path.join(config.codexSessions, "rollout-comment-index-parent.jsonl");
+    const commentFile = path.join(config.codexSessions, "rollout-cx-1.jsonl");
+    const codexTranscript = (id: string, user: string, assistant: string) =>
+      [
+        {
+          timestamp: new Date(Date.now() - 3_000).toISOString(),
+          type: "session_meta",
+          payload: { id, cwd: os.tmpdir() },
+        },
+        {
+          timestamp: new Date(Date.now() - 2_000).toISOString(),
+          type: "response_item",
+          payload: { type: "message", role: "user", content: [{ type: "input_text", text: user }] },
+        },
+        {
+          timestamp: new Date(Date.now() - 1_000).toISOString(),
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: assistant }],
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n");
+    fs.writeFileSync(
+      parentFile,
+      codexTranscript("comment-index-parent", "main task", "main answer"),
+    );
+    fs.writeFileSync(commentFile, codexTranscript("cx-1", "side question", "first side answer"));
+
+    await app.request("/");
+    const created = await app.request("/comments/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        threadId: "comment-index-thread",
+        parentSessionId: "comment-index-parent",
+        anchorKey: "assistant:1",
+        anchorText: "main answer",
+        question: "side question",
+      }),
+    });
+    expect(created.status).toBe(200);
+
+    const replaceVendor = vi.spyOn(transcriptIndex, "replaceVendor");
+    const getPath = vi.spyOn(transcriptIndex, "get");
+    replaceVendor.mockClear();
+    getPath.mockClear();
+
+    const firstStream = await app.request("/chat/live-stream");
+    const firstReader = (firstStream.body as ReadableStream<Uint8Array>).getReader();
+    const firstText = await readSseUntil(firstReader, (text) =>
+      text.includes('"kind":"comment_index"'),
+    );
+    await firstReader.cancel().catch(() => {});
+    const firstIndex = sseJsonMessages(firstText).find(
+      (message) => message.kind === "comment_index",
+    ) as
+      | {
+          epoch: string;
+          comments: Array<{ thread: { id: string }; historyVersion: string }>;
+        }
+      | undefined;
+    const firstEntry = firstIndex?.comments.find(
+      (entry) => entry.thread.id === "comment-index-thread",
+    );
+    expect(firstEntry?.historyVersion).toBeTruthy();
+
+    fs.appendFileSync(
+      commentFile,
+      `\n${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "recovered after reconnect" }],
+        },
+      })}`,
+    );
+
+    const reconnect = await app.request("/chat/live-stream", {
+      headers: { "last-event-id": "1" },
+    });
+    const reconnectReader = (reconnect.body as ReadableStream<Uint8Array>).getReader();
+    const reconnectText = await readSseUntil(reconnectReader, (text) =>
+      text.includes('"kind":"comment_index"'),
+    );
+    await reconnectReader.cancel().catch(() => {});
+    const reconnectIndex = sseJsonMessages(reconnectText).find(
+      (message) => message.kind === "comment_index",
+    ) as
+      | {
+          epoch: string;
+          comments: Array<{ thread: { id: string }; historyVersion: string }>;
+        }
+      | undefined;
+    const reconnectEntry = reconnectIndex?.comments.find(
+      (entry) => entry.thread.id === "comment-index-thread",
+    );
+    expect(reconnectIndex?.epoch).toBe(firstIndex?.epoch);
+    expect(reconnectEntry?.historyVersion).not.toBe(firstEntry?.historyVersion);
+
+    const history = (await (
+      await app.request("/comments/messages?id=comment-index-thread")
+    ).json()) as {
+      epoch: string;
+      historyVersion: string;
+      messages: Array<{ role: string; text: string }>;
+    };
+    expect(history.epoch).toBe(firstIndex?.epoch);
+    expect(history.historyVersion).toBe(reconnectEntry?.historyVersion);
+    expect(history.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        text: "recovered after reconnect",
+        tools: [],
+      }),
+    );
+    const recentPage = (await (
+      await app.request("/comments/messages?id=comment-index-thread&paged=1&limit=1")
+    ).json()) as {
+      historyVersion: string;
+      messages: Array<{ role: string; text: string; historyOrdinal?: number }>;
+      page: { before: number; hasMore: boolean; total: number; version: string };
+    };
+    expect(recentPage.historyVersion).toBe(reconnectEntry?.historyVersion);
+    expect(recentPage.messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        text: "recovered after reconnect",
+        historyOrdinal: 2,
+      }),
+    ]);
+    expect(recentPage.page).toEqual({
+      before: 2,
+      hasMore: true,
+      total: 3,
+      version: recentPage.historyVersion,
+    });
+    const earlierPage = (await (
+      await app.request(
+        `/comments/messages?id=comment-index-thread&paged=1&limit=2&before=${recentPage.page.before}`,
+      )
+    ).json()) as {
+      messages: Array<{
+        role: string;
+        text: string;
+        historyId?: string;
+        historyOrdinal?: number;
+        historyIndex?: number;
+      }>;
+      page: { before: number; hasMore: boolean; total: number; version: string };
+    };
+    expect(earlierPage.messages).toEqual([
+      expect.objectContaining({ role: "user", text: "side question", historyOrdinal: 0 }),
+      expect.objectContaining({ role: "assistant", text: "first side answer", historyOrdinal: 1 }),
+    ]);
+    expect(earlierPage.page).toEqual({
+      before: 0,
+      hasMore: false,
+      total: 3,
+      version: recentPage.historyVersion,
+    });
+    const pinnedCommentId = earlierPage.messages[1]?.historyId;
+    expect(pinnedCommentId).toMatch(/^m_/);
+    const pinnedWindow = (await (
+      await app.request(
+        `/comments/messages?id=comment-index-thread&around=${encodeURIComponent(pinnedCommentId ?? "")}&radius=1`,
+      )
+    ).json()) as {
+      historyVersion: string;
+      messages: Array<{ text: string; historyId?: string }>;
+      window: { historyId: string; center: number; start: number; end: number; version: string };
+    };
+    expect(pinnedWindow.messages).toHaveLength(3);
+    expect(pinnedWindow.messages[1]?.historyId).toBe(pinnedCommentId);
+    expect(pinnedWindow.window).toMatchObject({
+      historyId: pinnedCommentId,
+      center: 1,
+      start: 0,
+      end: 3,
+      version: pinnedWindow.historyVersion,
+    });
+    expect(getPath).toHaveBeenCalledWith("codex", "cx-1");
+    expect(replaceVendor).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       name: "assistant selection",
@@ -3097,6 +4152,190 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(await res.json()).toMatchObject({ ok: true, session: "fake-1" });
   });
 
+  it("accepts a new session before the provider is ready and completes it over SSE", async () => {
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const delayedQuery = (() => {
+      async function* events() {
+        await providerGate;
+        yield { type: "system", subtype: "init", session_id: "async-session-1" };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ready",
+          session_id: "async-session-1",
+        };
+      }
+      return events();
+    }) as unknown as QueryFn;
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      engine: new ChatEngine(delayedQuery),
+    });
+    const live = await app.request("/chat/live-stream");
+    const reader = live.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) throw new Error("missing SSE response body");
+
+    const accepted = await app.request(`/chat/new?cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "respond-async",
+        "x-attend-client-session-id": "client-new-1",
+      },
+      body: JSON.stringify({
+        text: "start without blocking the request",
+        clientSessionId: "client-new-1",
+      }),
+    });
+    expect(accepted.status).toBe(202);
+    const receipt = (await accepted.json()) as Record<string, unknown>;
+    expect(receipt).toMatchObject({
+      ok: true,
+      accepted: true,
+      clientSessionId: "client-new-1",
+    });
+    expect(receipt.operationId).toEqual(expect.any(String));
+
+    releaseProvider();
+    const text = await readSseUntil(
+      reader,
+      (value) =>
+        sseJsonMessages(value).some(
+          (message) =>
+            message.kind === "session_operation" && message.operationId === receipt.operationId,
+        ),
+      3_000,
+    );
+    const operation = sseJsonMessages(text).find(
+      (message) =>
+        message.kind === "session_operation" && message.operationId === receipt.operationId,
+    );
+    expect(operation).toMatchObject({
+      kind: "session_operation",
+      operation: "new",
+      status: "completed",
+      clientSessionId: "client-new-1",
+      result: {
+        ok: true,
+        session: "async-session-1",
+        clientSessionId: "client-new-1",
+      },
+    });
+    await reader.cancel();
+  });
+
+  it("accepts a fork before the provider is ready and completes it over SSE", async () => {
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const delayedQuery = (() => {
+      async function* events() {
+        await providerGate;
+        yield { type: "system", subtype: "init", session_id: "async-fork-1" };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "ready",
+          session_id: "async-fork-1",
+        };
+      }
+      return events();
+    }) as unknown as QueryFn;
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      engine: new ChatEngine(delayedQuery),
+    });
+    const live = await app.request("/chat/live-stream");
+    const reader = live.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) throw new Error("missing SSE response body");
+
+    const accepted = await app.request(`/chat/fork?session=parent-1&cwd=${tmp}&vendor=claude`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        prefer: "respond-async",
+        "x-attend-client-session-id": "client-fork-1",
+      },
+      body: JSON.stringify({
+        text: "branch without blocking the request",
+        clientSessionId: "client-fork-1",
+        parentVendor: "claude",
+      }),
+    });
+    expect(accepted.status).toBe(202);
+    const receipt = (await accepted.json()) as Record<string, unknown>;
+    expect(receipt).toMatchObject({
+      ok: true,
+      accepted: true,
+      clientSessionId: "client-fork-1",
+    });
+
+    releaseProvider();
+    const text = await readSseUntil(
+      reader,
+      (value) =>
+        sseJsonMessages(value).some(
+          (message) =>
+            message.kind === "session_operation" && message.operationId === receipt.operationId,
+        ),
+      3_000,
+    );
+    expect(
+      sseJsonMessages(text).find(
+        (message) =>
+          message.kind === "session_operation" && message.operationId === receipt.operationId,
+      ),
+    ).toMatchObject({
+      kind: "session_operation",
+      operation: "fork",
+      status: "completed",
+      clientSessionId: "client-fork-1",
+      result: {
+        ok: true,
+        session: "async-fork-1",
+        clientSessionId: "client-fork-1",
+        parentSessionId: "parent-1",
+      },
+    });
+    await reader.cancel();
+  });
+
+  it("returns a passphrase-redacted tab title for a newly focused session", async () => {
+    const passphrase = `attend-secret-${Date.now()}`;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-title-root-"));
+    const cwd = path.join(root, passphrase);
+    fs.mkdirSync(cwd);
+    try {
+      const config = resolveConfig({
+        positionals: [root],
+        e2eePassphrase: passphrase,
+      });
+      const { app } = appWithSpy(config);
+      const res = await app.request(`/chat/new?cwd=${encodeURIComponent(cwd)}&vendor=claude`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-attend-e2ee-internal": "1",
+        },
+        body: JSON.stringify({ text: "hello" }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        ok: true,
+        session: "fake-1",
+        cwd,
+        tabTitle: "protected",
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an unavailable vendor server-side with the same startup guidance", async () => {
     const message =
       "Claude CLI 2.0.99 is too old. Attend requires 2.1.0 or newer. Update Claude Code, then restart Attend.";
@@ -3184,7 +4423,12 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       body: JSON.stringify({ text: "unsupported objective", goal: true }),
     });
     expect(cursor.status).toBe(400);
-    expect(await cursor.json()).toMatchObject({ error: "Cursor does not support Goal" });
+    expect(await cursor.json()).toMatchObject({
+      code: "capability_unavailable",
+      vendor: "cursor",
+      capability: "goal",
+      fallback: null,
+    });
   });
 
   it("records a successful in-browser new session as the most recent directory", async () => {
@@ -3682,7 +4926,10 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(cursorResponse.status).toBe(400);
     expect(await cursorResponse.json()).toMatchObject({
       ok: false,
-      error: "Cursor does not support Goal",
+      code: "capability_unavailable",
+      vendor: "cursor",
+      capability: "goal",
+      fallback: null,
     });
   });
 
@@ -4003,6 +5250,36 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     ]);
     expect(codex.sends).toEqual([]);
     expect(codex.activeSessions()).toEqual(["cx-1"]);
+  });
+
+  it("does not offer queued messages as steer for a vendor without native steer", async () => {
+    const cursor = new FakeCodexDriver("cursor");
+    cursor.active = [{ sessionId: "cu-1", startedAt: Date.now() }];
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), { cursor });
+    const queued = await app.request(
+      `/chat/queue?session=cu-1&cwd=${encodeURIComponent(os.tmpdir())}&vendor=cursor`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "this must remain a normal queued turn" }),
+      },
+    );
+    const queuedBody = (await queued.json()) as { item: { id: string }; steerable: boolean };
+    expect(queuedBody.steerable).toBe(false);
+
+    const sent = await app.request(
+      `/chat/queue/send?session=cu-1&item=${encodeURIComponent(queuedBody.item.id)}`,
+      { method: "POST" },
+    );
+    expect(sent.status).toBe(409);
+    expect(await sent.json()).toMatchObject({
+      code: "capability_unavailable",
+      vendor: "cursor",
+      capability: "steer",
+      fallback: null,
+    });
+    expect(cursor.steers).toEqual([]);
+    expect(cursor.sends).toEqual([]);
   });
 
   it("restores a queued message when active-turn guidance is rejected", async () => {
@@ -4590,6 +5867,86 @@ describe("startServer port rollover", () => {
 });
 
 describe("live-stream daemon analysis broadcast", () => {
+  it("refreshes the authoritative index as soon as a daemon id is observed", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const codexSessions = fs.mkdtempSync(path.join(os.tmpdir(), `attend-daemon-index-${uniq}-`));
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      codexSessions,
+      claudeProjects: path.join(os.tmpdir(), `attend-daemon-claude-${uniq}`),
+      workEvents: path.join(os.tmpdir(), `attend-daemon-events-${uniq}.sqlite3`),
+    };
+    let finishSeed!: (id: string | null) => void;
+    const analyzer: SessionAnalyzer = {
+      vendor: "codex",
+      spawn: (_cwd, onSessionId) => {
+        fs.writeFileSync(
+          path.join(codexSessions, "rollout-daemon-race.jsonl"),
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            type: "session_meta",
+            payload: { id: "daemon-race", cwd: os.tmpdir() },
+          }),
+        );
+        onSessionId?.("daemon-race");
+        return new Promise((resolve) => {
+          finishSeed = resolve;
+        });
+      },
+      analyze: async () => null,
+    };
+    const orchestrator = new DaemonOrchestrator(
+      new DaemonRegistry(path.join(os.tmpdir(), `attend-daemon-registry-${uniq}.json`)),
+      new AnalysisCache(path.join(os.tmpdir(), `attend-daemon-analysis-${uniq}.json`)),
+      [analyzer],
+    );
+    const app = createApp(config, {
+      launcher: () => "noop",
+      engine: new ChatEngine(fakeQuery),
+      orchestrator,
+    });
+    const res = await app.request("/chat/live-stream");
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+
+    try {
+      const handshake = await readSseUntil(reader, (text) =>
+        sseJsonMessages(text).some(
+          (message) => message.kind === "session_index" && message.pending === false,
+        ),
+      );
+      const firstIndex = sseJsonMessages(handshake).find(
+        (message) => message.kind === "session_index" && message.pending === false,
+      );
+      const firstRevision = Number(firstIndex?.revision) || 0;
+
+      const pendingSpawn = orchestrator.ensureDaemon("task-race", "codex", os.tmpdir());
+      expect(orchestrator.isDaemon("daemon-race")).toBe(true);
+
+      const refreshed = await readSseUntil(reader, (text) =>
+        sseJsonMessages(text).some(
+          (message) => message.kind === "session_index" && Number(message.revision) > firstRevision,
+        ),
+      );
+      const indexes = sseJsonMessages(refreshed).filter(
+        (message) => message.kind === "session_index" && Number(message.revision) > firstRevision,
+      );
+      expect(indexes.length).toBeGreaterThan(0);
+      for (const index of indexes) {
+        expect(index.hiddenSessionIds).toContain("daemon-race");
+        expect(index.sessions).not.toEqual(
+          expect.arrayContaining([expect.objectContaining({ sessionId: "daemon-race" })]),
+        );
+      }
+
+      finishSeed("daemon-race");
+      await expect(pendingSpawn).resolves.toBe("daemon-race");
+    } finally {
+      await reader.cancel().catch(() => {});
+      fs.rmSync(codexSessions, { recursive: true, force: true });
+      fs.rmSync(config.workEvents, { force: true });
+    }
+  });
+
   it("pushes the cached daemon verdict over the live bus when a turn ends", async () => {
     const uniq = Math.random().toString(36).slice(2);
     const verdict = {

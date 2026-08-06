@@ -13,6 +13,9 @@ import type { SessionAnalyzer } from "./analyzer/index.js";
 export class DaemonOrchestrator {
   private readonly analyzers = new Map<string, SessionAnalyzer>();
   private readonly spawning = new Map<string, Promise<string | null>>();
+  private readonly registrationListeners = new Set<
+    (taskId: string, daemonId: string, vendor: string, cwd: string) => void
+  >();
   private readonly analyzing = new Set<string>();
   private readonly analyzeAgain = new Map<string, { cwd: string; uiContext: string }>();
   private readonly prompting = new Set<string>();
@@ -42,6 +45,42 @@ export class DaemonOrchestrator {
     return this.registry.daemonIds();
   }
 
+  /**
+   * Follow a task session whose provider id rolled mid-session — Claude /clear resets the
+   * conversation and the SDK reinitializes with a fresh session id (and a fresh transcript).
+   * Move the daemon pairing + cached verdict to the new id so the SAME daemon keeps analyzing
+   * the continued session. Without this, the rolled id has no daemon (`hasDaemon` → false), so
+   * `onTurnEnd` short-circuits and analysis silently stops after a /clear.
+   *
+   * Only the durable + closure-safe state is migrated. `spawning` is intentionally left alone:
+   * its cleanup closure captured the old id, and a rollover on an established session (the only
+   * time /clear happens) is never mid-spawn — so a spawn race is skipped rather than corrupted.
+   */
+  rekeyTask(oldTaskId: string, newTaskId: string): boolean {
+    if (!oldTaskId || !newTaskId || oldTaskId === newTaskId) return false;
+    if (this.spawning.has(oldTaskId)) return false;
+    if (!this.registry.rename(oldTaskId, newTaskId)) return false;
+    this.cache.move(oldTaskId, newTaskId);
+    const moveMapEntry = <V>(m: Map<string, V>) => {
+      if (!m.has(oldTaskId)) return;
+      const value = m.get(oldTaskId) as V;
+      m.delete(oldTaskId);
+      m.set(newTaskId, value);
+    };
+    moveMapEntry(this.analysisEpoch);
+    moveMapEntry(this.analyzeAgain);
+    if (this.analyzing.delete(oldTaskId)) this.analyzing.add(newTaskId);
+    if (this.prompting.delete(oldTaskId)) this.prompting.add(newTaskId);
+    return true;
+  }
+
+  onDaemonRegistered(
+    listener: (taskId: string, daemonId: string, vendor: string, cwd: string) => void,
+  ): () => void {
+    this.registrationListeners.add(listener);
+    return () => this.registrationListeners.delete(listener);
+  }
+
   analysis(taskId: string): Analysis | null {
     return this.cache.get(taskId);
   }
@@ -58,17 +97,36 @@ export class DaemonOrchestrator {
    *  (idempotent). No-op for vendors without an analyzer (e.g. Codex stub). */
   ensureDaemon(taskId: string, vendor: string, cwd: string): Promise<string | null> {
     this.collaboration?.ensureSession(vendor, taskId, cwd);
+    // Once the provider id is observed it is registered immediately for
+    // filtering, while callers still await the full spawn/seed lifecycle.
+    const inflight = this.spawning.get(taskId);
+    if (inflight) return inflight;
     const existing = this.registry.get(taskId);
     if (existing) return Promise.resolve(existing.daemonId);
     const analyzer = this.analyzers.get(vendor);
     if (!analyzer) return Promise.resolve(null);
-    const inflight = this.spawning.get(taskId);
-    if (inflight) return inflight;
+    let observedId: string | null = null;
+    const register = (daemonId: string): boolean => {
+      // A daemon must be a separate provider session. Refuse a broken adapter
+      // (or test fake) that echoes the task id, otherwise the real task would be
+      // hidden and its remaining events suppressed as daemon traffic.
+      if (!daemonId || daemonId === taskId || observedId) return false;
+      observedId = daemonId;
+      this.registry.set(taskId, { daemonId, cwd, vendor });
+      for (const listener of this.registrationListeners) {
+        try {
+          listener(taskId, daemonId, vendor, cwd);
+        } catch {
+          // Filtering is already durable; a failed observer cannot undo it.
+        }
+      }
+      return true;
+    };
     const p = analyzer
-      .spawn(cwd)
+      .spawn(cwd, register)
       .then((daemonId) => {
-        if (daemonId) this.registry.set(taskId, { daemonId, cwd, vendor });
-        return daemonId;
+        if (daemonId) register(daemonId);
+        return observedId;
       })
       .finally(() => this.spawning.delete(taskId));
     this.spawning.set(taskId, p);
@@ -81,11 +139,10 @@ export class DaemonOrchestrator {
    * the heuristic fallback). Coalesces concurrent turn-ends for the same task.
    */
   async analyzeTask(taskId: string, cwd: string, uiContext = ""): Promise<Analysis | null> {
-    // wait out an in-flight spawn so the very first turn-end still analyzes
-    if (!this.registry.has(taskId)) {
-      const spawning = this.spawning.get(taskId);
-      if (spawning) await spawning;
-    }
+    // Registration is deliberately earlier than seed completion so scanners can
+    // hide the daemon. Do not resume it until that original spawn has settled.
+    const spawning = this.spawning.get(taskId);
+    if (spawning) await spawning;
     const entry = this.registry.get(taskId);
     if (!entry) return null;
     if (this.analyzing.has(taskId)) {

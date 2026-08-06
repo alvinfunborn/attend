@@ -1,9 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import {
-  MAX_PENDING_TURNS_PER_ANALYSIS,
-  projectCollaborationTurns,
-} from "../../core/collaboration.js";
+import { MAX_PENDING_TURNS_PER_ANALYSIS } from "../../core/collaboration.js";
 import {
   parseAnalysis,
   parseAvoidancePrompt,
@@ -12,12 +9,11 @@ import {
 import type { TranscriptPathWriter } from "../../core/vendor/transcript-index.js";
 import { toUiEventsFromCodex } from "../codex/events.js";
 import type { CodexExecFn } from "../codex/exec.js";
-import { readCodexTranscript } from "../codex/transcript.js";
+import { type AnalyzerContextReader, readAnalyzerContextFile } from "./context.js";
 import {
   REQUEST_RULES,
   RESPONSE_SHAPE,
   avoidancePromptRequest,
-  condenseTranscript,
   requestPrompt,
 } from "./contract.js";
 import type { AnalyzerVerdict, SessionAnalyzer } from "./index.js";
@@ -54,9 +50,10 @@ export class CodexAnalyzer implements SessionAnalyzer {
     private readonly codexSessions: string,
     private readonly execFn: CodexExecFn | null,
     private readonly transcriptIndex?: TranscriptPathWriter,
+    private readonly contextReader?: AnalyzerContextReader,
   ) {}
 
-  async spawn(cwd: string): Promise<string | null> {
+  async spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null> {
     if (!this.execFn) return null;
     const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only" });
     let sessionId: string | null = null;
@@ -64,7 +61,9 @@ export class CodexAnalyzer implements SessionAnalyzer {
       handle.events,
       (ev) => {
         for (const u of toUiEventsFromCodex(ev)) {
-          if (u.kind === "session" && u.sessionId) sessionId = u.sessionId;
+          if (u.kind !== "session" || !u.sessionId) continue;
+          if (sessionId !== u.sessionId) onSessionId?.(u.sessionId);
+          sessionId = u.sessionId;
         }
       },
       () => handle.kill(),
@@ -81,12 +80,13 @@ export class CodexAnalyzer implements SessionAnalyzer {
     uiContext = "",
   ): Promise<AnalyzerVerdict | null> {
     if (!this.execFn) return null;
-    const file = this.findRollout(taskId);
+    const file = await this.findRollout(taskId);
     // Same rationale as ClaudeAnalyzer: keep the real opening goal available to
     // the condense step so long sessions don't collapse to their final PR/admin step.
-    const messages = file ? readCodexTranscript(file, Number.POSITIVE_INFINITY) : [];
-    const transcript = condenseTranscript(messages);
-    const observedTurns = projectCollaborationTurns("codex", taskId, messages, analysisFromAt);
+    const context = file
+      ? await this.readContext(file, taskId, analysisFromAt)
+      : { transcript: "", observedTurns: [] };
+    const { transcript, observedTurns } = context;
     const pendingTurns = observedTurns
       .filter((turn) => !knownTurnIds.has(turn.turnId))
       .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
@@ -120,10 +120,8 @@ export class CodexAnalyzer implements SessionAnalyzer {
     uiContext = "",
   ): Promise<string | null> {
     if (!this.execFn) return null;
-    const file = this.findRollout(taskId);
-    const transcript = file
-      ? condenseTranscript(readCodexTranscript(file, Number.POSITIVE_INFINITY))
-      : "";
+    const file = await this.findRollout(taskId);
+    const transcript = file ? (await this.readContext(file, taskId)).transcript : "";
     const handle = this.execFn({
       cwd,
       prompt: avoidancePromptRequest(transcript, uiContext),
@@ -142,30 +140,37 @@ export class CodexAnalyzer implements SessionAnalyzer {
   }
 
   /** Resolve from the scanner-owned index; recursively discover only on a cold miss. */
-  private findRollout(sessionId: string): string | null {
+  private async findRollout(sessionId: string): Promise<string | null> {
     const indexed = this.transcriptIndex?.get(this.vendor, sessionId);
     if (indexed) return indexed;
-    const discovered = this.findRolloutIn(this.codexSessions, sessionId);
+    const discovered = await this.findRolloutIn(this.codexSessions, sessionId);
     if (discovered) this.transcriptIndex?.set(this.vendor, sessionId, discovered);
     return discovered;
   }
 
-  private findRolloutIn(dir: string, sessionId: string): string | null {
+  private async findRolloutIn(dir: string, sessionId: string): Promise<string | null> {
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
     } catch {
       return null;
     }
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
-        const hit = this.findRolloutIn(full, sessionId);
+        const hit = await this.findRolloutIn(full, sessionId);
         if (hit) return hit;
       } else if (e.isFile() && e.name.endsWith(".jsonl") && e.name.includes(sessionId)) {
         return full;
       }
     }
     return null;
+  }
+
+  private readContext(file: string, sessionId: string, analysisFromAt: number | null = null) {
+    return (
+      this.contextReader?.readAnalyzerContext(file, this.vendor, sessionId, analysisFromAt) ??
+      readAnalyzerContextFile(file, this.vendor, sessionId, analysisFromAt)
+    );
   }
 }

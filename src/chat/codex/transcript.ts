@@ -116,13 +116,11 @@ function applyItem(
   }
 }
 
-export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(file, "utf-8");
-  } catch {
-    return [];
-  }
+export function parseCodexTranscriptMessages(
+  raw: string,
+  limit = 200,
+  allowCompactedFallback = true,
+): TranscriptMsg[] {
   const msgs: TranscriptMsg[] = [];
   const toolById = new Map<string, ToolCall>();
 
@@ -140,6 +138,7 @@ export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] 
     if (o.type === "response_item") {
       applyItem(p, msgs, toolById, ts);
     } else if (
+      allowCompactedFallback &&
       o.type === "compacted" &&
       msgs.length === 0 &&
       Array.isArray(p.replacement_history)
@@ -151,4 +150,12 @@ export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] 
     }
   }
   return msgs.slice(-limit);
+}
+
+export function readCodexTranscript(file: string, limit = 200): TranscriptMsg[] {
+  try {
+    return parseCodexTranscriptMessages(fs.readFileSync(file, "utf-8"), limit);
+  } catch {
+    return [];
+  }
 }

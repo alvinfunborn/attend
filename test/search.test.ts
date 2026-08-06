@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { PersistentTranscriptSearchIndex } from "../src/chat/search-index.js";
 import { parseSearchQuery } from "../src/chat/search-query.js";
 import { searchSessions } from "../src/chat/search.js";
 import type { RawSession } from "../src/core/types.js";
@@ -140,6 +141,45 @@ describe("searchSessions", () => {
       expect(searchSessions([session({ path: file })], "cursor cold")).toHaveLength(1);
       expect(searchSessions([session({ path: file })], "cursor -cold")).toEqual([]);
     } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists parsed transcript text and incrementally replaces changed files", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-search-index-"));
+    const file = path.join(dir, "claude.jsonl");
+    const database = path.join(dir, "index.sqlite3");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ type: "user", message: { content: "durable first phrase" } }),
+    );
+    const indexedSession = session({ path: file, sessionId: "durable-search" });
+    const first = new PersistentTranscriptSearchIndex(database);
+    try {
+      expect(first.search([indexedSession], "durable first")).toHaveLength(1);
+    } finally {
+      first.close();
+    }
+
+    const hidden = `${file}.hidden`;
+    fs.renameSync(file, hidden);
+    const restored = new PersistentTranscriptSearchIndex(database);
+    try {
+      // The source file is unavailable, so this result can only come from the
+      // durable SQLite index created by the previous instance.
+      expect(restored.search([indexedSession], "durable first")).toHaveLength(1);
+      fs.renameSync(hidden, file);
+      fs.appendFileSync(
+        file,
+        `\n${JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "incremental replacement phrase" }] },
+        })}`,
+      );
+      expect(restored.search([indexedSession], "replacement phrase")).toHaveLength(1);
+    } finally {
+      restored.close();
+      if (fs.existsSync(hidden)) fs.renameSync(hidden, file);
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });

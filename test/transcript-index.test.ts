@@ -45,7 +45,7 @@ describe("TranscriptPathIndex", () => {
     expect(index.get("codex", "cx-1")).toBe(codex);
   });
 
-  it("invalidates a path after the transcript disappears", () => {
+  it("keeps hot lookups filesystem-free and invalidates through the scanner snapshot", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-transcript-index-stale-"));
     cleanup.push(dir);
     const file = path.join(dir, "gone.jsonl");
@@ -54,6 +54,8 @@ describe("TranscriptPathIndex", () => {
     index.set("codex", "gone", file);
     expect(index.get("codex", "gone")).toBe(file);
     fs.rmSync(file);
+    expect(index.get("codex", "gone")).toBe(file);
+    index.replaceVendor("codex", []);
     expect(index.get("codex", "gone")).toBeNull();
   });
 });

@@ -8,6 +8,10 @@ export interface ModelConfiguration {
 export interface ModelOption {
   value: string;
   label: string;
+  /** The concrete model id this alias resolves to, when the vendor advertises
+   * one. Lets the UI map a pinned resolved id (e.g. a CLI default) back to the
+   * alias that carries its effort/speed metadata. */
+  resolvedModel?: string;
   /** per-model reasoning levels in the exact order advertised by the vendor */
   efforts?: string[];
   /** the model's own default reasoning level, when known */

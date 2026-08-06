@@ -153,6 +153,51 @@ function cursorJsonlParser(
 ): IncrementalJsonlParser<CursorSessionState> {
   return {
     create: (file) => createCursorState(file, cwdForFile(file)),
+    restore: (file, checkpoint) => {
+      if (!checkpoint || typeof checkpoint !== "object") return null;
+      const saved = checkpoint as {
+        session?: RawSession;
+        previousTs?: number | null;
+        lastMessage?: TranscriptMsg | null;
+        lastMessageChars?: number;
+        lastAssistantActivityIndex?: number;
+      };
+      if (!saved.session || typeof saved.session !== "object") return null;
+      const state = createCursorState(file, saved.session.cwd ?? cwdForFile(file));
+      state.session = { ...saved.session, path: file, vendor: "cursor" };
+      state.previousTs =
+        saved.previousTs === null ||
+        (typeof saved.previousTs === "number" && Number.isFinite(saved.previousTs))
+          ? saved.previousTs
+          : null;
+      if (saved.lastMessage && typeof saved.lastMessage === "object") {
+        const message: TranscriptMsg = {
+          ...saved.lastMessage,
+          tools: Array.isArray(saved.lastMessage.tools) ? saved.lastMessage.tools : [],
+        };
+        state.transcript.messages.push(message);
+        state.messageChars.set(
+          message,
+          typeof saved.lastMessageChars === "number" ? saved.lastMessageChars : message.text.length,
+        );
+        if (message.role === "assistant" && typeof saved.lastAssistantActivityIndex === "number") {
+          state.assistantActivityIndexes.set(message, saved.lastAssistantActivityIndex);
+        }
+      }
+      return state;
+    },
+    serialize: (state) => {
+      const lastMessage = state.transcript.messages.at(-1) ?? null;
+      return {
+        session: state.session,
+        previousTs: state.previousTs,
+        lastMessage,
+        lastMessageChars: lastMessage ? state.messageChars.get(lastMessage) : undefined,
+        lastAssistantActivityIndex: lastMessage
+          ? state.assistantActivityIndexes.get(lastMessage)
+          : undefined,
+      };
+    },
     append: appendCursorLine,
     snapshot: (state, _file, mtimeMs) => {
       if (state.session.firstTs !== null) return state.session;

@@ -47,6 +47,37 @@ export const REQUEST_RULES = `- "brief" is the best glance label for a crowded s
 - "probe" is a DIFFERENT lane from "nextStep": where "nextStep" moves forward, "probe" pauses to scrutinise THIS latest turn — a message asking the assistant to explain a choice, justify a claim, show evidence/a diff before acting, recheck a questionable assumption, or investigate a gap you noticed in its work. Same format as "nextStep" (session's dominant language, ≤30 words, imperative, ready to send with no placeholders).
 - "probe" must cite something SPECIFIC in this turn (the actual assumption, claim, command, or gap), never a generic "explain more". Leave it an empty string when the turn contains nothing that genuinely warrants questioning — do NOT manufacture scrutiny. "probe" is independent of "nextStep": either, both, or neither may be present.`;
 
+/**
+ * Distinctive, stable fragments of the daemon's OWN prompts. `isLikelyDaemonSession`
+ * (server.ts) uses these as a last-resort filter to hide a daemon transcript that somehow
+ * escaped the registry (historical / partially-written state). They MUST stay in lockstep
+ * with the SEED (analyzer adapters) and the prompt builders below — `contract.test.ts`
+ * asserts each builder's output still contains its marker so this heuristic can never
+ * silently drift out of date again (it previously did: the checks matched neither the
+ * current analyze prompt nor its reply line, leaving only the seed/title branch working).
+ */
+export const DAEMON_PROMPT_MARKERS = {
+  seedPrefix: "You are the *attend daemon* for a single coding session.",
+  analyzePrefix: "The session advanced. Analyze using these current rules",
+  analyzeReply: "Reply with this JSON object only:",
+  avoidancePrefix:
+    "This session has been flagged by local telemetry as repeatedly reopened without progress.",
+} as const;
+
+/** True when a session's first prompt (title) or last prompt matches a daemon's own
+ *  prompt shape. Pure + colocated with the prompts so the two cannot drift apart. */
+export function looksLikeDaemonPrompt(title: string, lastPrompt: string): boolean {
+  const t = String(title ?? "");
+  const p = String(lastPrompt ?? "");
+  return (
+    t.startsWith(DAEMON_PROMPT_MARKERS.seedPrefix) ||
+    p.startsWith(DAEMON_PROMPT_MARKERS.seedPrefix) ||
+    p.startsWith(DAEMON_PROMPT_MARKERS.analyzePrefix) ||
+    p.includes(DAEMON_PROMPT_MARKERS.analyzeReply) ||
+    p.startsWith(DAEMON_PROMPT_MARKERS.avoidancePrefix)
+  );
+}
+
 /** The per-turn analyze prompt. Identical across vendors. */
 export function requestPrompt(
   transcript: string,

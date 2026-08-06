@@ -1,6 +1,8 @@
 import type { RawSession } from "../types.js";
+import { AntigravitySource } from "./antigravity.js";
 import { ClaudeSource } from "./claude.js";
 import { CodexSource } from "./codex.js";
+import { CopilotSource } from "./copilot.js";
 import { CursorSource } from "./cursor.js";
 import type { ScanCache } from "./scan-cache.js";
 import type { TranscriptPathWriter } from "./transcript-index.js";
@@ -12,6 +14,8 @@ export interface SourceCaches {
   codex?: ScanCache;
   cursor?: ScanCache;
   cursorCaptured?: ScanCache;
+  antigravity?: ScanCache;
+  copilot?: ScanCache;
 }
 
 /**
@@ -28,6 +32,10 @@ export interface SessionSourceConfig {
   codexSessions: string;
   cursorProjects: string;
   cursorSessions: string;
+  antigravityBrain: string;
+  antigravityCapturedSessions: string;
+  copilotSessions: string;
+  copilotCapturedSessions: string;
 }
 
 export function buildSources(
@@ -45,6 +53,18 @@ export function buildSources(
       caches.cursorCaptured,
       transcriptIndex,
     ),
+    new AntigravitySource(
+      config.antigravityBrain,
+      config.antigravityCapturedSessions,
+      caches.antigravity,
+      transcriptIndex,
+    ),
+    new CopilotSource(
+      config.copilotSessions,
+      config.copilotCapturedSessions,
+      caches.copilot,
+      transcriptIndex,
+    ),
   ];
 }
 
@@ -56,3 +76,5 @@ export function collectSessions(config: SessionSourceConfig): RawSession[] {
 export { ClaudeSource } from "./claude.js";
 export { CodexSource } from "./codex.js";
 export { CursorSource } from "./cursor.js";
+export { AntigravitySource } from "./antigravity.js";
+export { CopilotSource } from "./copilot.js";

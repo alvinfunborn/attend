@@ -18,6 +18,28 @@ const view: ConsoleView = {
 };
 
 describe("renderConsole", () => {
+  it("marks a cold session index and consumes it through the encrypted live bus", () => {
+    const html = renderConsole({
+      ...view,
+      sessionsPending: true,
+      sessionIndexEpoch: "server-a",
+      sessionIndexRevision: 0,
+    });
+
+    expect(html).toContain("window.__SESSIONS_PENDING__ = true;");
+    expect(html).toContain('window.__SESSION_INDEX_EPOCH__ = "server-a";');
+    expect(html).toContain("window.__SESSION_INDEX_REVISION__ = 0;");
+    expect(html).toContain(
+      "if(SESSIONS_PENDING&&!filterQ&&!tagSearchQ) return 'Indexing sessions…';",
+    );
+    expect(html).toContain("SESSIONS_PENDING = view.sessionsPending === true;");
+    expect(html).toContain("message.kind==='session_index'");
+    expect(html).toContain("hydrateSessionIndex(message);");
+    expect(html).toContain("return E2EE.enabled ? e2eeDecrypt(data)");
+    expect(html).not.toContain("fetch('/sessions'");
+    expect(html).not.toContain("pollSessionsUntilReady");
+  });
+
   it("uses a warm-paper elevation hierarchy for light-mode surfaces", () => {
     const html = renderConsole(view);
 
@@ -25,11 +47,25 @@ describe("renderConsole", () => {
     expect(html).toContain("--code-bg: #e8e4da; --input-bg: #fffdf8;");
   });
 
-  it("pins sidebar sessions from a title-row control and sorts them first", () => {
+  it("pins sidebar sessions first while keeping their relative order fixed", () => {
     const html = renderConsole(view);
     expect(html).toContain("var pinButton=el('button','it-pin'+(pinned?' on':'')");
-    expect(html).toContain("pinButton.title=pinned?'Unpin session':'Pin session to top'");
-    expect(html).toContain("saveVaultUiState({sessionPins:patch});");
+    expect(html).toContain(
+      "pinButton.title=pinned?'Unpin session · drag card to reorder':'Pin session to top'",
+    );
+    expect(html).toContain("saveVaultUiState({sessionPins:patch})");
+    expect(html).toContain("if(ap!==bp) return ap-bp;");
+    expect(html).toContain("return aid<bid ? -1 : aid>bid ? 1 : 0;");
+    expect(html).toContain("bindSessionPinOrderDrop();");
+    expect(html).toContain("reorderPinnedSession(sourceId,position.targetId,position.after)");
+    expect(html).toContain(".session-panel .item.session-pinned {");
+    expect(html).toContain(
+      ".session-pinned .it-pin.on { border: 0; border-radius: 0; background: transparent; box-shadow: none; }",
+    );
+    expect(html).toContain(
+      ".headbtn.head-pin svg { width: 0.7rem; height: 0.7rem; stroke-width: 1.75; }",
+    );
+    expect(html).toContain(".session-pin-drop-placeholder {");
     expect(html).toContain(
       "return compareSessionPins(a,b)||(sessionSortTs(b)||0)-(sessionSortTs(a)||0);",
     );
@@ -165,9 +201,20 @@ describe("renderConsole", () => {
     expect(html).toContain("function commentContextBeforeAnchor(targetSession)");
     expect(html).toContain("var history=anchor?historyBeforeMsg(anchor):null;");
     expect(html).toContain("var context=commentContextBeforeAnchor(targetSession);");
+    expect(html).toContain("function commentRunConfig(thread,targetSession)");
     expect(html).toContain(
-      "model:targetSession.model||undefined,effort:targetSession.effort||undefined,speed:targetSession.speed||undefined",
+      "vendor:commentConfig.vendor,model:commentConfig.model||undefined,effort:commentConfig.effort||undefined,speed:commentConfig.speed||undefined",
     );
+    expect(html).toContain("function syncOpenCommentHistory(thread,force)");
+    expect(html).toContain("function commentHistoryUrl(threadId,before)");
+    expect(html).toContain("function commentPinHistoryUrl(threadId,historyId)");
+    expect(html).toContain("function loadEarlierCommentHistory(thread)");
+    expect(html).toContain("function loadPinnedCommentWindow(thread,pin)");
+    expect(html).toContain("function commentHistoryLoader(threadId)");
+    expect(html).toContain("'&paged=1&limit=60'");
+    expect(html).toContain("commentHistoryLoadedVersions[threadId]=responseVersion;");
+    expect(html).toContain("commentHistoryLoadedVersions[thread.id]===knownVersion");
+    expect(html).toContain("responseEpoch!==COMMENT_INDEX_EPOCH");
     expect(html).toContain("if(onCommentBusEvent(message)) return;");
     expect(html).toContain("status=el('div','msg assistant thinking')");
     expect(html).toContain(
@@ -207,10 +254,14 @@ describe("renderConsole", () => {
     expect(html).toContain("quote+(instruction?'\\n\\n@ comment\\n'+instruction:'')");
     expect(html).not.toContain("if(!note||!referenceState)");
     expect(html).toContain("if(!String(message.text||'').trim()) commentMsgOrdinal++;");
-    expect(html).toContain("else appendCommentMessage(message.role,message.text||'');");
+    expect(html).toContain(
+      "else appendCommentMessage(message.role,message.text||'',message.historyOrdinal,message.historyId,message.historyIndex);",
+    );
     expect(html).toContain("if(!delta) return true;");
     const appendComment = html.slice(
-      html.indexOf("function appendCommentMessage(role,text)"),
+      html.indexOf(
+        "function appendCommentMessage(role,text,historyOrdinal,historyId,historyIndex)",
+      ),
       html.indexOf("function cacheOpenCommentMessages()"),
     );
     expect(appendComment).not.toContain("el('button','msg-pin')");
@@ -328,6 +379,12 @@ describe("renderConsole", () => {
   it("forks completed edits but sends the latest message again after a user-stopped turn", () => {
     const html = renderConsole(view);
     expect(html).toContain("function editAndForkFromMessage(msgEl, bubble)");
+    expect(html).toContain("function loadCompleteTranscriptForFork(s)");
+    expect(html).toContain(
+      "var historyId=String(msgEl.getAttribute('data-history-id')||''),idx=-1;",
+    );
+    expect(html).toContain("Loading earlier history for this fork…");
+    expect(html).toContain("loadCompleteTranscriptForFork(target).then(function(history)");
     expect(html).toContain("function editUserMessage(msgEl, bubble)");
     expect(html).toContain("function canResendStoppedLatest(msgEl)");
     expect(html).toContain("var stopInFlight=!!(cur && stopRequested && cur._pendingStopRequest);");
@@ -557,6 +614,15 @@ describe("renderConsole", () => {
     expect(html).toContain(
       "card.onclick=function(ev){ ev.preventDefault(); openImagePreview(href, att.name||'image'); };",
     );
+    expect(html).toContain(".msg .attcard.image { flex-direction: column;");
+    expect(html).toContain("cursor: zoom-in;");
+    expect(html).toContain("card.setAttribute('aria-label', 'Open '+(att.name||'image'));");
+    expect(html).not.toContain("card.title='Open '+(att.name||'attachment');");
+    expect(html).not.toContain("name.title=att.name||'image';");
+    expect(html).toContain(
+      ".imgpreview img { width: 100%; height: 100%; max-width: 100%; max-height: 100%; }",
+    );
+    expect(html).toContain(".imgpreview img[hidden], .imgpreview-html[hidden] { display: none; }");
     expect(html).not.toContain("card.download=att.name||'attachment';");
     expect(html).toContain('id="imgPreview"');
     expect(html).toContain('id="imgPreviewViewport"');
@@ -626,7 +692,14 @@ describe("renderConsole", () => {
       "var preserveRecentOrder=options.source==='status'||options.source==='engagement';",
     );
     expect(html).toContain(
-      "if(!preserveRecentOrder){\n      syncActivitySortTs(s, next.sortTs!=null ? next.sortTs : next.lastTs);",
+      "if(!preserveRecentOrder && !deferLiveActivity){\n      syncActivitySortTs(s, next.sortTs!=null ? next.sortTs : next.lastTs);",
+    );
+    expect(html).toContain(
+      "if(preserveLiveActivity) deferSessionActivity(existing,indexedSession);",
+    );
+    expect(html).toContain("function commitDeferredSessionActivity(s)");
+    expect(html).toContain(
+      "if(commitDeferredSessionActivity(s)){ requestSessionReorder(); scheduleSidebarRender(); }",
     );
     expect(html).toContain("syncActivitySortTs(s, s.lastTs);");
     expect(html).toContain("syncActivityLastTs(s, found.lastTs);");
@@ -645,11 +718,20 @@ describe("renderConsole", () => {
     const html = renderConsole(view);
     expect(html).toContain("var source=new EventSource('/chat/live-stream');");
     expect(html).toContain("function onBusSessionEvent(message)");
+    expect(html).toContain("function applySessionIndex(message)");
+    expect(html).toContain("message.kind==='session_index'");
+    expect(html).toContain("function applyCommentIndex(message)");
+    expect(html).toContain("message.kind==='comment_index'");
+    expect(html).toContain("drainCommentOrphanEvents(saved);");
+    expect(html).toContain("epochChanged||!expected||loaded!==expected");
+    expect(html).toContain("epoch===SESSION_INDEX_EPOCH");
+    expect(html).toContain("revision<SESSION_INDEX_REVISION");
+    expect(html).toContain("drainOrphanBusEvents(s);");
     expect(html).toContain("message.kind==='session_event'");
     expect(html).toContain("liveEventChain=liveEventChain.then(function()");
     expect(html).toContain("onEvent(ev, String(s.sessionId||''), emittedAt);");
     expect(html).toContain(
-      "if(ev.kind==='result'||ev.kind==='error') reconcileMissingTranscriptBaseline(s);",
+      "if(ev.kind==='result'||ev.kind==='error'){\n        reconcileMissingTranscriptBaseline(s);",
     );
     expect(html).toContain("cacheTranscriptAssistantText(s, ev.text)");
     expect(html).toContain("var orphanAnalysisMessages = {};");
@@ -754,6 +836,12 @@ describe("renderConsole", () => {
     expect(html).toContain("var transcriptBaselines = {};");
     expect(html).toContain("function hasTranscriptBaseline(s)");
     expect(html).toContain("function loadTranscriptBaseline(s, opts)");
+    expect(html).toContain("function loadEarlierTranscript(s)");
+    expect(html).toContain("function loadPinnedTranscriptWindow(s,pin)");
+    expect(html).toContain("function transcriptPinHistoryUrl(s,historyId)");
+    expect(html).toContain("function transcriptHistoryLoader(sessionId)");
+    expect(html).toContain("'session='+encodeURIComponent(id)");
+    expect(html).toContain("'&paged=1&limit=60'");
     expect(html).toContain("if(!opts.force && hasTranscriptBaseline(s))");
     expect(html).toContain("if(hasTranscriptBaseline(s)){");
     expect(html).toContain("var selectionGeneration=++transcriptSelectionGeneration;");
@@ -773,6 +861,7 @@ describe("renderConsole", () => {
     expect(refreshBody).toContain("loadTranscriptBaseline(s,{force:true,preserveSort:false})");
     expect(refreshBody).toContain("if(!before || !sameTranscript(before,next))");
     expect(refreshBody).not.toContain("select(cur");
+    expect(html).not.toContain("function warmTranscriptCache(s)");
   });
 
   it("projects composer drafts only after the composer loses focus", () => {
@@ -813,7 +902,7 @@ describe("renderConsole", () => {
       "consumeParentDraft:!openingTurn&&!!(firstTurn.text || firstTurn.attachments.length)",
     );
     expect(html).toContain(
-      "if(branch.pendingFork.consumeParentDraft) clearDraftForSession(parent);",
+      "if(branch.pendingFork&&branch.pendingFork.consumeParentDraft) clearDraftForSession(parent);",
     );
     expect(html).toContain("if(background && parent && cur===parent) syncOpenHeader();");
   });
@@ -1236,7 +1325,37 @@ describe("renderConsole", () => {
     expect(html).toContain("--item-selected-row-start: #e0e7ff;");
     expect(html).toContain("--item-selected-row-start: rgba(129,140,248,0.24);");
     expect(html).toContain("box-shadow: inset 3px 0 0 var(--item-selected-marker)");
-    expect(html).toContain("box-shadow: inset 0 0 0 2px var(--item-selected-card-ring)");
+    expect(html).toContain("--session-panel-selection-rail-size: 3px;");
+    expect(html).toContain("--session-panel-status-rail-size: 2px;");
+    expect(html).toContain("--session-panel-turn-rail-size: 3px;");
+    expect(html).toContain(
+      ".session-panel .item.active::before { background: var(--item-selected-marker); }",
+    );
+    expect(html).toContain(
+      "top: -1px;\n    bottom: -1px;\n    left: -1px;\n    width: var(--session-panel-selection-rail-size);",
+    );
+    expect(html).toContain("border-radius: var(--radius) 0 0 var(--radius);");
+    expect(html).toContain(
+      ".session-panel .session-read-progress { right: -1px; bottom: -1px; width: var(--session-panel-turn-rail-size);",
+    );
+    expect(html).not.toContain(
+      ".session-panel .item.active { border-left-color: var(--item-selected-marker);",
+    );
+    expect(html).not.toContain(".session-panel .item.session-status-generating { border-color:");
+    expect(html).not.toContain(".session-panel .item.session-status-unread { border-color:");
+    expect(html).toContain(".session-panel .item.session-status-unread::after {");
+    expect(html).toContain(".session-panel .item.session-status-generating::after {");
+    expect(html).toContain("@keyframes sessionAttentionRail");
+    expect(html).toContain("background-size: 200% 100%;");
+    expect(html).toContain("animation-delay: var(--session-attention-delay, 0ms);");
+    expect(html).toContain(
+      "@keyframes sessionAttentionRail { from { background-position: 100% 0; } to { background-position: 0% 0; } }",
+    );
+    expect(html).toContain("var SESSION_ATTENTION_RAIL_DURATION_MS=1450;");
+    expect(html).toContain(
+      "row.style.setProperty('--session-attention-delay','-'+Math.floor(elapsed%SESSION_ATTENTION_RAIL_DURATION_MS)+'ms');",
+    );
+    expect(html).not.toContain("background-position: -96px");
     expect(html).toContain(
       "var scrollbarW=messages ? Math.max(0,messages.offsetWidth-messages.clientWidth) : 0;",
     );
@@ -1252,6 +1371,25 @@ describe("renderConsole", () => {
     expect(html).toContain(
       ".toolrow > .toolc { width: fit-content; min-width: 0; max-width: calc(100% - var(--msg-float-actions-space)); }",
     );
+  });
+
+  it("keeps unchanged transcript panes in a bounded versioned LRU", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("var TRANSCRIPT_PANE_CACHE_MAX_ENTRIES = 4;");
+    expect(html).toContain("var TRANSCRIPT_PANE_CACHE_MAX_COST = 16 * 1024 * 1024;");
+    expect(html).toContain("var transcriptPaneCache = new Map();");
+    expect(html).toContain("function parkTranscriptPane(s)");
+    expect(html).toContain("function restoreTranscriptPane(s)");
+    expect(html).toContain("stamp:transcriptPaneStamp(s)");
+    expect(html).toContain("anchor:transcriptViewportAnchor()");
+    expect(html).toContain("if(record.stamp!==transcriptPaneStamp(s))");
+    expect(html).toContain("parkTranscriptPane(previousSelection);");
+    expect(html).toContain("var restoredPane=restoreTranscriptPane(s);");
+    expect(html).toContain(
+      "if(!restoredPane&&cached) renderPersistedAndPending(cached, s.sessionId, selectionScrollMode);",
+    );
+    expect(html).toContain("function transcriptVirtualModelFor(msgs,sessionId)");
+    expect(html).toContain(".msgs-pane[hidden] { display: none !important; }");
   });
 
   it("uses the status-dot colors for live generating and generated timing", () => {
@@ -1376,6 +1514,28 @@ describe("renderConsole", () => {
     );
   });
 
+  it("defines complete light and dark action palettes and binds primary actions to vendors", () => {
+    const html = renderConsole(view);
+    for (const vendor of ["claude", "codex", "cursor", "antigravity", "copilot"]) {
+      expect(html).toContain(`--vendor-${vendor}-action-bg:`);
+      expect(html).toContain(`--vendor-${vendor}-action-hover:`);
+      expect(html).toContain(`--vendor-${vendor}-action-fg:`);
+      expect(html).toContain(`--vendor-${vendor}-action-ring:`);
+      expect(html).toContain(
+        `[data-vendor="${vendor}"] { --vendor-action-bg: var(--vendor-${vendor}-action-bg);`,
+      );
+    }
+    expect(html).toContain(
+      "['newToggle','nbtn','scheduleNew'].forEach(function(id){ setActionVendor(byId(id),vendor); });",
+    );
+    expect(html).toContain("setActionVendor(b,vendor);");
+    expect(html).toContain("setActionVendor(forkButton,vendor);");
+    expect(html).toContain("setActionVendor(button,(thread&&thread.vendor)||(cur&&cur.vendor));");
+    expect(html).toContain(
+      ".foot button.send, .commentfoot button.send { height: 1.8rem; min-height: 1.8rem; background: var(--vendor-action-bg);",
+    );
+  });
+
   it("shows full model names when hovering truncated model selectors", () => {
     const html = renderConsole(view);
     expect(html).toContain("var isModel=sel.id==='nmodel'||sel.id==='rmodel';");
@@ -1491,7 +1651,7 @@ describe("renderConsole", () => {
     expect(html).not.toContain("Waiting on resources");
   });
 
-  it("renders and syncs the browser tab title from the active directory", () => {
+  it("uses the server-vetted focused session directory for the browser tab title", () => {
     const html = renderConsole({
       ...view,
       pageTitle: "Attend — demo <repo>",
@@ -1502,6 +1662,7 @@ describe("renderConsole", () => {
           title: "first",
           lastPrompt: null,
           cwd: "/tmp/demo-repo",
+          tabTitle: "safe-session-dir",
           project: "demo-repo",
           file: "/tmp/session.jsonl",
           ageDays: 0,
@@ -1522,6 +1683,8 @@ describe("renderConsole", () => {
       '<span class="brand-scope" title="Attend — demo &lt;repo&gt;">demo &lt;repo&gt;</span>',
     );
     expect(html).toContain('window.__PAGE_TITLE__ = "Attend — demo \\u003crepo>"');
+    expect(html).toContain("function titleDirLabel(s)");
+    expect(html).toContain("return String((s&&s.tabTitle)||'').trim();");
     expect(html).toContain("function syncPageTitle(s)");
     expect(html).toContain("document.title = label ? 'Attend — '+label : PAGE_TITLE;");
     expect(html).toContain("syncPageTitle(s);");
@@ -1570,6 +1733,44 @@ describe("renderConsole", () => {
     expect(html).not.toContain("latest · you");
     expect(html).not.toContain("latestPinJump");
     expect(html).not.toContain("latestpin-jump");
+  });
+
+  it("renders long transcripts incrementally instead of rebuilding on every stream delta", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function renderMarkdownCached(md)");
+    expect(html).toContain("var MARKDOWN_RENDER_CACHE_MAX_CHARS=2_000_000;");
+    expect(html).toContain("function appendStreamingBubbleText(bubble,delta)");
+    expect(html).toContain("streamingBubbleRaf=requestAnimationFrame(flushStreamingBubbleQueue)");
+    expect(html).toContain("function streamingStableBoundary(raw,start)");
+    expect(html).toContain("appendStreamingBubbleText(b,ev.text);");
+    expect(html).toContain("finalizeStreamingMessage(assistantEl);");
+    expect(html).toContain("if(createsMessage) bumpTranscriptVersion(s);");
+    expect(html).toContain("else patchTranscriptVirtualAssistantText(s,text);");
+    expect(html).toContain("function renderTranscriptVirtualTurn(turn,index,reusable)");
+    expect(html).toContain("data-turn-signature");
+    expect(html).toContain("recalculateTranscriptOffsetsFrom(state,firstChanged)");
+    expect(html).toContain("var liveAssistant=assistantEl&&assistantEl.isConnected");
+    expect(html).toContain("state.version===transcriptVersion(cur)");
+
+    const measureStart = html.indexOf("function measureTranscriptVirtualTurns");
+    const measureEnd = html.indexOf("function scheduleTranscriptVirtualMeasure", measureStart);
+    const measure = html.slice(measureStart, measureEnd);
+    expect(measure).not.toContain("renderPinTray()");
+    expect(measure).not.toContain("syncAllMessageCommentStates()");
+  });
+
+  it("uses one layout-stable anchor controller for Pin, YOU, First, and Latest", () => {
+    const html = renderConsole(view);
+    expect(html).toContain("function jumpToChatAnchor(anchor)");
+    expect(html).toContain("function resumePendingChatAnchor()");
+    expect(html).toContain("function expandChatAnchorWindow(jump)");
+    expect(html).toContain("jump.observer=new ResizeObserver");
+    expect(html).toContain("ensureTranscriptKeyVisible(key,true)");
+    expect(html).toContain("if(!jump.expanded) scheduleTranscriptVirtualWindow();");
+    expect(html).toContain("jumpToChatAnchor({key:pinTargetKey(pin),pin:pin});");
+    expect(html).toContain("jumpToChatAnchor({which:which});");
+    expect(html).toContain("jumpToChatAnchor({key:target.getAttribute('data-msg-key')});");
+    expect(html).toContain(".msg.anchor-arrived .bubble");
   });
 
   it("preserves regex character classes in the generated browser script", () => {
@@ -2186,7 +2387,7 @@ describe("renderConsole", () => {
     expect(html).toContain("btn.appendChild(el('span','gtagcount',String(count)));");
     expect(html).toContain(".gtagcount { margin-left: 0.32rem; font-size: 0.58rem;");
     expect(html).toContain(".gtag.deletable .gtagbtn { padding-right: 0.18rem; }");
-    expect(html).toContain("var manageable=def.deletable && !hidden;");
+    expect(html).toContain("var manageable=def.deletable;");
     expect(html).toContain("(manageable?' deletable':'')");
     expect(html).toContain("if(!sessionMatchesTagSearch(s)) return false;");
     expect(html).toContain("byId('tagSearch').addEventListener('input'");
@@ -2260,7 +2461,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function sessionEventNeedsSidebarRebuild(ev)");
     expect(html).toContain("if(sessionEventNeedsSidebarRebuild(ev)){");
     expect(html).toContain(
-      "if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered') sortSessions();",
+      "if(committedActivity || ev.kind==='user_turn_started' || ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered') requestSessionReorder();",
     );
     const start = html.indexOf("function onBusSessionEvent(message)");
     const end = html.indexOf("function onCommentBusEvent(message)", start);
@@ -2283,8 +2484,8 @@ describe("renderConsole", () => {
     expect(html).toContain('id="sessionTagPopover"');
     expect(html).toContain(".sessiontag-popover { position: fixed;");
     expect(html).toContain("var sessionTagPopoverState = null;");
-    expect(html).toContain("openSessionTagPopover(add,s,'header')");
-    expect(html).toContain("openSessionTagPopover(add,s,surface)");
+    expect(html).toContain("bindSessionTagAddButton(add,s,'header')");
+    expect(html).toContain("bindSessionTagAddButton(add,s,surface)");
     expect(html).not.toContain("item.appendChild(buildTagEditor(s))");
   });
 
@@ -2368,9 +2569,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function clearGlobalTagBindings(tag)");
     expect(html).toContain("fetch('/tags/clear-session-bindings'");
     expect(html).toContain("function deleteGlobalTag(tag)");
-    expect(html).toContain(
-      "window.setTimeout(function(){ (clearButton.hidden?byId('tagActionDelete'):clearButton).focus(); },0);",
-    );
+    expect(html).toContain("window.setTimeout(function(){ byId('tagActionDelete').focus(); },0);");
   });
 
   it("supports dragging global tags to reorder them", () => {
@@ -2393,7 +2592,7 @@ describe("renderConsole", () => {
     expect(html).toContain("setGlobalTagHidden(source,true);");
     expect(html).toContain("function setGlobalTagHidden(tag, shouldHide)");
     expect(html).toContain("saveVaultUiState({hiddenTags:nextHidden,pinnedTags:nextPinned})");
-    expect(html).toContain("var manageable=def.deletable && !hidden;");
+    expect(html).toContain("var manageable=def.deletable;");
     expect(html).not.toContain("gtagrestore");
     expect(html).toContain("function globalTagDragSource(ev)");
     expect(html).toContain("function showGlobalTagDropPreview(target, after)");
@@ -2474,11 +2673,29 @@ describe("renderConsole", () => {
     expect(html).not.toContain("vendor default");
     expect(html).not.toContain("function defaultModelOption(");
     expect(html).not.toContain("function defaultEffortOption(");
-    expect(html).toContain(
-      "return optionsWithDefault(dynamic, cliDefault('claude', 'model'), 'CLI default');",
-    );
+    // claudeModelOptions tags the CLI default in place when it is an advertised
+    // alias, and otherwise injects a distinct, resolved-id row labelled from its
+    // base alias — never a bare duplicate that would miss effort/speed metadata.
+    expect(html).toContain("var def = cliDefault('claude', 'model');");
+    expect(html).toContain("dynamic[i].label=dynamic[i].label+' (CLI default)';");
+    expect(html).toContain("var base=modelMetaFor('claude', def);");
     expect(html).toContain("label:(meta.effortLabels && meta.effortLabels[e]) || e");
     expect(html).toContain("if(vendor==='cursor') return cursorModelOptions();");
+  });
+
+  it("maps resolved/legacy model ids to their alias metadata without a regex", () => {
+    const html = renderConsole(view);
+    // modelMetaFor must fall back beyond exact value match so a stored/CLI-default
+    // id (claude-opus-4-8[1m]) or a legacy alias (opus, now opus[1m]) still finds
+    // the alias that carries effort/speed metadata.
+    expect(html).toContain("if(opt.resolvedModel===slug) return opt;");
+    expect(html).toContain("if(stripModelContextSuffix(opt.value)===bare) return opt;");
+    // The suffix strip must NOT use a regex literal: inside the SPA template
+    // literal a backslash escape is swallowed, corrupting the pattern. Guard that
+    // the by-hand implementation ships and the broken pattern never reappears.
+    expect(html).toContain("var open=v.lastIndexOf('[');");
+    expect(html).toContain("v.charAt(v.length-1)===']'");
+    expect(html).not.toContain("[[^]]*]$");
   });
 
   it("does not split URL paths into local file links", () => {
@@ -2517,7 +2734,10 @@ describe("renderConsole", () => {
       ".imgpreview-stage { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;",
     );
     expect(html).toContain(
-      ".imgpreview-html { display: flex; align-items: center; justify-content: center; max-width: 100%; max-height: 100%; }",
+      ".imgpreview-html { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;",
+    );
+    expect(html).toContain(
+      ".imgpreview-html > svg { width: 100% !important; height: 100% !important; max-width: 100% !important; max-height: 100% !important;",
     );
     expect(html).toContain(
       "node.onclick=function(ev){ if(isDiagramControlClick(ev)) return; openDiagramPreview(node); };",
@@ -2526,6 +2746,10 @@ describe("renderConsole", () => {
       "node.onkeydown=function(ev){ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); openDiagramPreview(node); } };",
     );
     expect(html).toContain('diagram[data-rendered="ok"] { cursor: zoom-in; }');
+    expect(html).toContain(
+      "node.setAttribute('aria-label', 'Open '+diagramPreviewName(node.getAttribute('data-diagram')));",
+    );
+    expect(html).not.toContain("node.title='Open diagram preview';");
     expect(html).toContain("enableDiagramPreview(node);");
     expect(html).not.toContain("function addDiagramOpenButton(node)");
     expect(html).not.toContain("diagram-open");
@@ -2534,7 +2758,12 @@ describe("renderConsole", () => {
   it("searches transcript content asynchronously from the sidebar box", () => {
     const html = renderConsole(view);
     expect(html).toContain("function scheduleContentSearch()");
-    expect(html).toContain("fetch('/search?q='+encodeURIComponent(q))");
+    expect(html).toContain("function contentSearchUrl(q)");
+    expect(html).toContain("'&start='+encodeURIComponent(String(bounds.start))");
+    expect(html).toContain("fetch(contentSearchUrl(q))");
+    expect(html).toContain(
+      "if(filterQ&&contentSearchLoading) return 'Searching session content…';",
+    );
     expect(html).toContain("function searchMatchRank(s)");
     expect(html).toContain("if(primaryFieldSearchHit(s)) return 3;");
     expect(html).toContain("return contentSearchHit(s) ? 1 : 0;");

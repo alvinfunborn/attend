@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   MIN_CLAUDE_CLI_VERSION,
   detectVendors,
+  hasStandaloneCliHelp,
   inspectVendorExecutables,
   isVendorId,
   parseCliVersion,
+  resolveAntigravityBin,
   resolveClaudeBin,
   resolveCodexBin,
+  resolveCopilotBin,
   resolveCursorBin,
 } from "../src/core/vendor/detect.js";
 
@@ -23,7 +26,7 @@ describe("detectVendors", () => {
     const claude = vendors.find((v) => v.vendor === "claude");
     const codex = vendors.find((v) => v.vendor === "codex");
     const cursor = vendors.find((v) => v.vendor === "cursor");
-    expect(claude).toEqual({
+    expect(claude).toMatchObject({
       vendor: "claude",
       available: true,
       chat: true,
@@ -49,8 +52,50 @@ describe("detectVendors", () => {
       () => true,
       noBundle,
       () => "2.1.12",
+      () => true,
     );
     expect(vendors.every((v) => v.available)).toBe(true);
+  });
+
+  it("rejects an agy command that resolves to the Antigravity Desktop launcher", () => {
+    const vendors = inspectVendorExecutables(
+      { antigravity: "/Applications/Antigravity.app/agy" },
+      () => "1.107.0",
+      (_executable, vendor) => vendor !== "antigravity",
+    );
+    expect(vendors.find((vendor) => vendor.vendor === "antigravity")).toMatchObject({
+      available: false,
+      issue: "wrong_command_surface",
+      message: expect.stringContaining("Desktop launcher"),
+    });
+  });
+
+  it("rejects an editor installer shim that shadows the standalone Copilot CLI", () => {
+    expect(
+      hasStandaloneCliHelp(
+        "Cannot find GitHub Copilot CLI\nInstall GitHub Copilot CLI? ['y/N']",
+        "copilot",
+      ),
+    ).toBe(false);
+    expect(
+      hasStandaloneCliHelp(
+        "Usage: copilot -p <prompt> --output-format=json --session-id <id> --resume=<id>",
+        "copilot",
+      ),
+    ).toBe(true);
+
+    const vendors = inspectVendorExecutables(
+      { copilot: "/editor/extensions/copilot" },
+      () => {
+        throw new Error("version probing should not run for the wrong command surface");
+      },
+      (_executable, vendor) => vendor !== "copilot",
+    );
+    expect(vendors.find((vendor) => vendor.vendor === "copilot")).toMatchObject({
+      available: false,
+      issue: "wrong_command_surface",
+      message: expect.stringContaining("installer shim"),
+    });
   });
 
   it("marks all unavailable when neither PATH nor the app-bundle resolve", () => {
@@ -62,6 +107,9 @@ describe("detectVendors", () => {
     expect(isVendorId("claude")).toBe(true);
     expect(isVendorId("codex")).toBe(true);
     expect(isVendorId("cursor")).toBe(true);
+    expect(isVendorId("antigravity")).toBe(true);
+    expect(isVendorId("gemini")).toBe(false);
+    expect(isVendorId("copilot")).toBe(true);
     expect(isVendorId("cursor-cli")).toBe(false);
   });
 
@@ -75,6 +123,13 @@ describe("detectVendors", () => {
       "/opt/bin/agent",
     );
     expect(resolveCursorBin(() => null)).toBeNull();
+  });
+
+  it("resolves Antigravity and Copilot from their official command names", () => {
+    const resolve = (command: string) =>
+      command === "agy" || command === "copilot" ? command : null;
+    expect(resolveAntigravityBin(resolve)).toBe("agy");
+    expect(resolveCopilotBin(resolve)).toBe("copilot");
   });
 
   it("resolves the concrete Claude executable for Agent SDK parity", () => {

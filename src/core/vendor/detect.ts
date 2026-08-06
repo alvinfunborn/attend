@@ -1,7 +1,10 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
+import { runMetadataCommand } from "./async-command.js";
+import { type VendorCapabilities, vendorCapabilities } from "./capabilities.js";
 
-export type VendorId = "claude" | "codex" | "cursor";
+export type VendorId = "claude" | "codex" | "cursor" | "antigravity" | "copilot";
 
 /**
  * Attend's supported system-CLI floor is the Claude Code 2.1 line. Patch
@@ -31,35 +34,50 @@ export interface VendorAvailability {
   /** minimum version required by Attend when that vendor has one */
   minimumVersion?: string;
   /** stable reason for an unavailable integration */
-  issue?: "not_installed" | "not_runnable" | "version_too_old";
+  issue?: "not_installed" | "not_runnable" | "version_too_old" | "wrong_command_surface";
   /** concise, English recovery guidance shown by the CLI and web UI */
   message?: string;
+  /** One authoritative feature/degradation matrix shared by server and browser. */
+  capabilities?: VendorCapabilities;
 }
 
-export type VendorExecutables = Record<VendorId, string | null>;
+export type VendorExecutables = Partial<Record<VendorId, string | null>>;
 
 /** Probe whether a command resolves on PATH. Injectable so tests never spawn. */
 export type CliProbe = (command: string) => boolean;
 export type CliVersionProbe = (executable: string) => string | null;
+export type CliSurfaceProbe = (executable: string, vendor: VendorId) => boolean;
 
 /** Resolve a PATH command to the concrete executable used by the current shell. */
 export function resolveOnPath(command: string): string | null {
-  const probe = process.platform === "win32" ? "where" : "which";
-  try {
-    const result = spawnSync(probe, [command], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (result.status !== 0) return null;
-    return (
-      String(result.stdout || "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .find(Boolean) ?? null
-    );
-  } catch {
-    return null;
+  const candidates: string[] = [];
+  const hasSeparator = command.includes("/") || command.includes("\\");
+  const bases = hasSeparator
+    ? [""]
+    : (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM")
+          .split(";")
+          .map((extension) => extension.toLowerCase())
+      : [""];
+  for (const base of bases) {
+    const plain = hasSeparator ? command : path.join(base, command);
+    if (process.platform === "win32" && path.extname(plain)) candidates.push(plain);
+    else for (const extension of extensions) candidates.push(`${plain}${extension}`);
   }
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(
+        candidate,
+        process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK,
+      );
+      return candidate;
+    } catch {
+      // Continue through PATH.
+    }
+  }
+  return null;
 }
 
 export function resolveClaudeBin(resolve: (command: string) => string | null = resolveOnPath) {
@@ -68,6 +86,14 @@ export function resolveClaudeBin(resolve: (command: string) => string | null = r
 
 export function resolveCursorBin(resolve: (command: string) => string | null = resolveOnPath) {
   return resolve("cursor-agent") ?? resolve("agent");
+}
+
+export function resolveAntigravityBin(resolve: (command: string) => string | null = resolveOnPath) {
+  return resolve("agy");
+}
+
+export function resolveCopilotBin(resolve: (command: string) => string | null = resolveOnPath) {
+  return resolve("copilot");
 }
 
 /** Default probe: `where` on Windows, `which` elsewhere. Resolves shims (claude.cmd). */
@@ -102,6 +128,38 @@ export function readCliVersion(executable: string): string | null {
     return parseCliVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
   } catch {
     return null;
+  }
+}
+
+export function hasStandaloneCliHelp(output: string, vendor: VendorId): boolean {
+  if (vendor === "antigravity") {
+    return (
+      output.includes("--conversation") && output.includes("--print") && /\bmodels\b/.test(output)
+    );
+  }
+  if (vendor === "copilot") {
+    return (
+      output.includes("--output-format") &&
+      output.includes("--session-id") &&
+      output.includes("--resume")
+    );
+  }
+  return true;
+}
+
+/** Reject desktop-app launchers/installers that shadow the standalone headless CLIs. */
+export function hasStandaloneCliSurface(executable: string, vendor: VendorId): boolean {
+  if (vendor !== "antigravity" && vendor !== "copilot") return true;
+  try {
+    const result = spawnSync(executable, ["--help"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    return result.status === 0 && hasStandaloneCliHelp(output, vendor);
+  } catch {
+    return false;
   }
 }
 
@@ -159,12 +217,16 @@ const VENDORS: readonly {
   // Cursor's headless CLI exposes the same process-per-turn primitives Attend
   // needs: stream-json output and --resume=<session id>.
   { vendor: "cursor", chat: true },
+  { vendor: "antigravity", chat: true },
+  { vendor: "copilot", chat: true },
 ];
 
 const VENDOR_LABELS: Record<VendorId, string> = {
   claude: "Claude Code",
   codex: "Codex CLI",
   cursor: "Cursor CLI",
+  antigravity: "Antigravity CLI",
+  copilot: "GitHub Copilot CLI",
 };
 
 const VENDOR_INSTALL_MESSAGES: Record<VendorId, string> = {
@@ -172,6 +234,9 @@ const VENDOR_INSTALL_MESSAGES: Record<VendorId, string> = {
   codex:
     "Codex CLI was not found. Install Codex CLI or the ChatGPT desktop app, then restart Attend.",
   cursor: "Cursor CLI was not found. Install Cursor CLI, then restart Attend.",
+  antigravity:
+    "Antigravity CLI was not found. Install the standalone Antigravity CLI, then restart Attend.",
+  copilot: "GitHub Copilot CLI was not found. Install Copilot CLI, then restart Attend.",
 };
 
 /**
@@ -182,14 +247,17 @@ const VENDOR_INSTALL_MESSAGES: Record<VendorId, string> = {
 export function inspectVendorExecutables(
   executables: VendorExecutables,
   versionProbe: CliVersionProbe = readCliVersion,
+  surfaceProbe: CliSurfaceProbe = hasStandaloneCliSurface,
 ): VendorAvailability[] {
   return VENDORS.map(({ vendor, chat }) => {
+    const capabilities = vendorCapabilities(vendor);
     const executable = executables[vendor];
     const minimumVersion = vendor === "claude" ? MIN_CLAUDE_CLI_VERSION : undefined;
     if (!executable) {
       return {
         vendor,
         chat,
+        capabilities,
         available: false,
         ...(minimumVersion ? { minimumVersion } : {}),
         issue: "not_installed" as const,
@@ -197,11 +265,25 @@ export function inspectVendorExecutables(
       };
     }
 
+    if (!surfaceProbe(executable, vendor)) {
+      return {
+        vendor,
+        chat,
+        capabilities,
+        available: false,
+        issue: "wrong_command_surface" as const,
+        message:
+          vendor === "copilot"
+            ? "The configured copilot command is an editor installer shim, not the standalone GitHub Copilot CLI. Install GitHub Copilot CLI and set ATTEND_COPILOT_BIN to that executable."
+            : "The configured agy command is the Antigravity Desktop launcher, not the standalone CLI. Install google-antigravity/antigravity-cli and set ATTEND_ANTIGRAVITY_BIN to that executable.",
+      };
+    }
     const version = versionProbe(executable);
     if (!version && minimumVersion) {
       return {
         vendor,
         chat,
+        capabilities,
         available: false,
         ...(minimumVersion ? { minimumVersion } : {}),
         issue: "not_runnable" as const,
@@ -218,6 +300,7 @@ export function inspectVendorExecutables(
       return {
         vendor,
         chat,
+        capabilities,
         available: false,
         version,
         minimumVersion,
@@ -229,11 +312,135 @@ export function inspectVendorExecutables(
     return {
       vendor,
       chat,
+      capabilities,
       available: true,
       ...(version ? { version } : {}),
       ...(minimumVersion ? { minimumVersion } : {}),
     };
   });
+}
+
+/**
+ * Startup-safe availability based only on the already-resolved executable
+ * paths. Version/help probes run asynchronously after the HTTP socket listens.
+ */
+export function configuredVendorAvailability(executables: VendorExecutables): VendorAvailability[] {
+  return VENDORS.map(({ vendor, chat }) => {
+    const capabilities = vendorCapabilities(vendor);
+    const executable = executables[vendor];
+    const minimumVersion = vendor === "claude" ? MIN_CLAUDE_CLI_VERSION : undefined;
+    if (!executable) {
+      return {
+        vendor,
+        chat,
+        capabilities,
+        available: false,
+        ...(minimumVersion ? { minimumVersion } : {}),
+        issue: "not_installed",
+        message: VENDOR_INSTALL_MESSAGES[vendor],
+      };
+    }
+    return {
+      vendor,
+      chat,
+      capabilities,
+      available: true,
+      ...(minimumVersion ? { minimumVersion } : {}),
+    };
+  });
+}
+
+async function readCliVersionAsync(executable: string): Promise<string | null> {
+  const result = await runMetadataCommand(executable, ["--version"], 5_000);
+  return result.status === 0
+    ? parseCliVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`)
+    : null;
+}
+
+async function hasStandaloneCliSurfaceAsync(
+  executable: string,
+  vendor: VendorId,
+): Promise<boolean> {
+  if (vendor !== "antigravity" && vendor !== "copilot") return true;
+  const result = await runMetadataCommand(executable, ["--help"], 5_000);
+  return (
+    result.status === 0 &&
+    hasStandaloneCliHelp(`${result.stdout ?? ""}\n${result.stderr ?? ""}`, vendor)
+  );
+}
+
+/** Fully inspect configured CLIs without blocking the caller's event loop. */
+export async function inspectVendorExecutablesAsync(
+  executables: VendorExecutables,
+): Promise<VendorAvailability[]> {
+  return Promise.all(
+    VENDORS.map(async ({ vendor, chat }): Promise<VendorAvailability> => {
+      const capabilities = vendorCapabilities(vendor);
+      const executable = executables[vendor];
+      const minimumVersion = vendor === "claude" ? MIN_CLAUDE_CLI_VERSION : undefined;
+      if (!executable) {
+        return {
+          vendor,
+          chat,
+          capabilities,
+          available: false,
+          ...(minimumVersion ? { minimumVersion } : {}),
+          issue: "not_installed",
+          message: VENDOR_INSTALL_MESSAGES[vendor],
+        };
+      }
+      if (!(await hasStandaloneCliSurfaceAsync(executable, vendor))) {
+        return {
+          vendor,
+          chat,
+          capabilities,
+          available: false,
+          issue: "wrong_command_surface",
+          message:
+            vendor === "copilot"
+              ? "The configured copilot command is an editor installer shim, not the standalone GitHub Copilot CLI. Install GitHub Copilot CLI and set ATTEND_COPILOT_BIN to that executable."
+              : "The configured agy command is the Antigravity Desktop launcher, not the standalone CLI. Install google-antigravity/antigravity-cli and set ATTEND_ANTIGRAVITY_BIN to that executable.",
+        };
+      }
+      const version = await readCliVersionAsync(executable);
+      if (!version && minimumVersion) {
+        return {
+          vendor,
+          chat,
+          capabilities,
+          available: false,
+          minimumVersion,
+          issue: "not_runnable",
+          message: `Attend could not run ${VENDOR_LABELS[vendor]}. Check its configured path or reinstall it, then restart Attend.`,
+        };
+      }
+      if (
+        version &&
+        vendor === "claude" &&
+        minimumVersion &&
+        compareCliVersions(version, minimumVersion) < 0
+      ) {
+        return {
+          vendor,
+          chat,
+          capabilities,
+          available: false,
+          version,
+          minimumVersion,
+          issue: "version_too_old",
+          message: `Claude CLI ${version} is too old. Attend requires ${minimumVersion} or newer. Update Claude Code, then restart Attend.`,
+        };
+      }
+      return {
+        vendor,
+        chat,
+        capabilities,
+        available: true,
+        ...(version ? { version } : {}),
+        ...(minimumVersion ? { minimumVersion } : {}),
+      };
+    }),
+  );
 }
 
 export function isVendorId(value: unknown): value is VendorId {
@@ -252,6 +459,7 @@ export function detectVendors(
   probe: CliProbe = onPath,
   exists: ExistsFn = fs.existsSync,
   versionProbe: CliVersionProbe = readCliVersion,
+  surfaceProbe: CliSurfaceProbe = hasStandaloneCliSurface,
 ): VendorAvailability[] {
   const cursorBin = probe("cursor-agent") ? "cursor-agent" : probe("agent") ? "agent" : null;
   return inspectVendorExecutables(
@@ -259,7 +467,10 @@ export function detectVendors(
       claude: probe("claude") ? "claude" : null,
       codex: resolveCodexBin(probe, exists),
       cursor: cursorBin,
+      antigravity: probe("agy") ? "agy" : null,
+      copilot: probe("copilot") ? "copilot" : null,
     },
     versionProbe,
+    surfaceProbe,
   );
 }

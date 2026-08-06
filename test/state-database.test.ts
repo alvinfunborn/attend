@@ -54,6 +54,41 @@ describe("SqliteDocument", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it("reuses normalized read snapshots and invalidates them on a local writer", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-state-db-cache-"));
+    const database = path.join(root, "attend.sqlite3");
+    let normalizations = 0;
+    const countingNormalize = (value: unknown): Record<string, number> => {
+      normalizations += 1;
+      return normalize(value);
+    };
+    const reader = new SqliteDocument(
+      database,
+      "shared",
+      path.join(root, "missing.json"),
+      countingNormalize,
+    );
+    const writer = new SqliteDocument(
+      database,
+      "shared",
+      path.join(root, "missing.json"),
+      normalize,
+    );
+    reader.read();
+    const afterFirstRead = normalizations;
+    for (let index = 0; index < 1_000; index += 1) reader.read();
+    expect(normalizations).toBe(afterFirstRead);
+
+    writer.update((value) => {
+      value.updated = 1;
+    });
+    expect(reader.read()).toEqual({ updated: 1 });
+    expect(normalizations).toBe(afterFirstRead + 1);
+    reader.close();
+    writer.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it("keeps independent document namespaces in one database", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-state-db-namespace-"));
     const database = path.join(root, "attend.sqlite3");

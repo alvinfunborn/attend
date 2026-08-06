@@ -74,7 +74,13 @@ function prepareInput(prompt: string, attachments: ChatAttachment[] = []): Prepa
 
 /** Cursor CLI headless invocation documented at docs.cursor.com/en/cli/headless. */
 export function buildCursorArgs(req: ProcessTurnRequest): string[] {
-  const args = ["--print", "--force", "--output-format", "stream-json", "--stream-partial-output"];
+  const args = ["--print"];
+  if (req.sandbox === "read-only") {
+    args.push("--mode", "ask", "--sandbox", "enabled", "--trust");
+  } else {
+    args.push("--force");
+  }
+  args.push("--output-format", "stream-json", "--stream-partial-output");
   if (req.resume) args.push(`--resume=${req.resume}`);
   if (req.model) args.push("--model", req.model);
   args.push(req.prompt);

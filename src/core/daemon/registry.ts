@@ -41,6 +41,24 @@ export class DaemonRegistry {
     });
   }
 
+  /**
+   * Move a task→daemon pairing to a new task id after the provider rolled the task
+   * session's id mid-session (e.g. Claude /clear reinitializes with a fresh id). The
+   * SAME daemon keeps analyzing the continued session. Returns whether an entry moved.
+   */
+  rename(oldTaskId: string, newTaskId: string): boolean {
+    if (!oldTaskId || !newTaskId || oldTaskId === newTaskId) return false;
+    let moved = false;
+    this.data.update((entries) => {
+      const entry = entries[oldTaskId];
+      if (!entry) return;
+      delete entries[oldTaskId];
+      entries[newTaskId] = entry;
+      moved = true;
+    });
+    return moved;
+  }
+
   /** Every daemon session id — used to filter daemons out of the listing. */
   daemonIds(): Set<string> {
     const ids = new Set<string>();

@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ModelConfiguration, ModelDefaults, ModelOption } from "../model-options.js";
+import { runMetadataCommand } from "./async-command.js";
 
 const CURSOR_STORAGE_KEY =
   "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
@@ -408,6 +410,58 @@ export function inspectCursorModels(
   );
   try {
     const state = JSON.parse(String(read.stdout ?? "")) as CursorIdeState;
+    const inspection = cursorModelOptionsFromState(state, cliModels);
+    if (inspection.models.length) return inspection;
+    return cliFallback(
+      cliModels,
+      "Cursor Desktop model settings could not be matched to the CLI catalog; showing the CLI catalog.",
+    );
+  } catch {
+    return cliFallback(
+      cliModels,
+      "Cursor Desktop settings could not be read; showing the CLI catalog.",
+    );
+  }
+}
+
+/** Non-blocking production catalog discovery. */
+export async function inspectCursorModelsAsync(
+  cursorBin: string | null,
+  stateDb = defaultCursorStateDbPath(),
+  timeoutMs = 15_000,
+): Promise<CursorModelInspection> {
+  if (!cursorBin) {
+    return {
+      models: [],
+      defaults: { model: "", effort: "", speed: "" },
+      warning: "Cursor CLI not found.",
+    };
+  }
+  const listed = await runMetadataCommand(cursorBin, ["models"], timeoutMs);
+  const cliModels = parseCursorCliModels(listed.stdout);
+  if (!cliModels.length) {
+    return {
+      models: [],
+      defaults: { model: "", effort: "", speed: "" },
+      warning: listed.stderr.trim() || "Cursor did not return a model catalog.",
+    };
+  }
+  try {
+    await access(stateDb);
+  } catch {
+    return cliFallback(
+      cliModels,
+      "Cursor Desktop settings were not found; showing the CLI catalog.",
+    );
+  }
+  const escapedKey = CURSOR_STORAGE_KEY.replace(/'/g, "''");
+  const read = await runMetadataCommand(
+    "sqlite3",
+    [stateDb, `select value from ItemTable where key='${escapedKey}';`],
+    5_000,
+  );
+  try {
+    const state = JSON.parse(read.stdout) as CursorIdeState;
     const inspection = cursorModelOptionsFromState(state, cliModels);
     if (inspection.models.length) return inspection;
     return cliFallback(

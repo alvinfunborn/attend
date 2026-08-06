@@ -132,6 +132,15 @@ export class DriverRuntime<Run extends DriverRun> {
 
   /** Register a known provider id and attach subscribers that arrived first. */
   index(sessionId: string, run: Run): void {
+    // A provider can roll a run's session id mid-stream: Claude `/clear` starts a fresh
+    // transcript and emits a new session_id, and Codex/process resumes can resolve to a
+    // different id than the one we resumed. Re-key the run — drop the stale key so the
+    // same run is never indexed under two ids at once. Leaving both would double-count it
+    // in activeSessions()/activeSessionStates() (two tabs generating from one live run)
+    // and orphan the old key forever, since turn-end/idle only reference run.sessionId.
+    if (run.sessionId && run.sessionId !== sessionId && this.runs.get(run.sessionId) === run) {
+      this.runs.delete(run.sessionId);
+    }
     run.sessionId = sessionId;
     this.runs.set(sessionId, run);
     const waiting = this.pending.get(sessionId);

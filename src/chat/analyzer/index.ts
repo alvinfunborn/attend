@@ -21,7 +21,7 @@ export interface SessionAnalyzer {
    * it sees the same context). Returns its session id, or null if this vendor
    * can't spawn one yet (→ no daemon; the session keeps the heuristic fallback).
    */
-  spawn(cwd: string): Promise<string | null>;
+  spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null>;
   /**
    * Run one analysis round against the daemon for task `taskId` and return the
    * parsed verdict, or null when unsupported / unparseable. The analyzer owns its

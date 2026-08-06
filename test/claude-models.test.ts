@@ -33,6 +33,14 @@ describe("inspectClaudeModels", () => {
         supportedEffortLevels: ["low", "high", "max"],
       } as ModelInfo & { resolvedModel: string },
       {
+        value: "opus",
+        resolvedModel: "claude-opus-4-8",
+        displayName: "Opus",
+        description: "opus alias",
+        supportsEffort: true,
+        supportedEffortLevels: ["low", "high"],
+      } as ModelInfo & { resolvedModel: string },
+      {
         value: "future-model",
         displayName: "Future Model",
         description: "new vendor model",
@@ -54,6 +62,12 @@ describe("inspectClaudeModels", () => {
       ),
     ).resolves.toEqual({
       models: [
+        {
+          value: "opus",
+          label: "Opus",
+          resolvedModel: "claude-opus-4-8",
+          efforts: ["low", "high"],
+        },
         {
           value: "future-model",
           label: "Future Model",

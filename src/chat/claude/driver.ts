@@ -5,6 +5,7 @@ import path from "node:path";
 import type {
   Options,
   PermissionMode,
+  SDKMessage,
   SDKUserMessage,
   query,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -165,9 +166,49 @@ export interface ClaudeRun extends DriverRun {
   interrupt: (() => Promise<unknown>) | null;
   awaitingQuestionToolUseId: string | null;
   stallTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * Live background tasks that can wake the model again (subagents / teammates /
+   * workflows / MCP monitors), keyed by task id. Maintained from the SDK's
+   * `background_tasks_changed` signal (REPLACE semantics), with fire-and-forget `shell`
+   * tasks (detached `run_in_background` bash) filtered out — those never resume the turn.
+   * Non-empty means the turn may end while resuming work is still in flight, so the
+   * terminal result is deferred and the turn stays active until the real result lands.
+   */
+  backgroundTaskIds: Set<string>;
+  /**
+   * True when the most recent `result` only ended the turn because work was pushed to
+   * the background (`terminal_reason: 'background_requested'`) or background tasks are
+   * still in flight. Such a result is suppressed so the turn stays active until the
+   * real, background-drained result arrives.
+   */
+  resultDeferred: boolean;
 }
 
 const STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Ceiling for a turn whose main stream has gone silent while model-resuming background
+ * work (subagents / teammates / workflows / MCP monitors) is still tracked. Every stream
+ * message — including the SDK's periodic `task_progress` — re-arms it, so a live subagent
+ * that keeps checking in never trips it; only a dead or never-drained background set does.
+ * Deliberately generous: this is a safety net against a wedged turn, not a routine timeout.
+ */
+const BACKGROUND_STALL_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Background task types that never wake the model again. `shell` is a detached
+ * `run_in_background` bash — a tunnel, dev server, or file watcher — that outlives the
+ * turn without ever resuming it. Counting it as in-flight background work would defer the
+ * turn's terminal `result` and disable the stall watchdog for as long as the process runs
+ * (forever, for a tunnel), pinning the session to "generating". Subagents/teammates/
+ * workflows are kept so the turn still follows them; unknown types are kept too (a task we
+ * can't classify might resume the model). See `BackgroundTaskSummary.type` in the SDK.
+ */
+const FIRE_AND_FORGET_TASK_TYPES = new Set(["shell"]);
+
+function isModelResumingTask(taskType: unknown): boolean {
+  return typeof taskType !== "string" || !FIRE_AND_FORGET_TASK_TYPES.has(taskType);
+}
 
 function isTurnEvent(event: UiEvent): boolean {
   return (
@@ -193,6 +234,7 @@ export class ClaudeSdkDriver implements ChatDriver {
     private readonly queryFn: QueryFn,
     private readonly stallTimeoutMs: number = STALL_TIMEOUT_MS,
     idleTtlMs = SESSION_IDLE_TTL_MS,
+    private readonly backgroundStallTimeoutMs: number = BACKGROUND_STALL_TIMEOUT_MS,
   ) {
     this.idle = new IdleSessionTimers(idleTtlMs);
   }
@@ -255,6 +297,8 @@ export class ClaudeSdkDriver implements ChatDriver {
       interrupt: null,
       awaitingQuestionToolUseId: null,
       stallTimer: null,
+      backgroundTaskIds: new Set(),
+      resultDeferred: false,
     };
     if (run.sessionId) this.runtime.index(run.sessionId, run);
     this.scheduleStall(run);
@@ -297,6 +341,8 @@ export class ClaudeSdkDriver implements ChatDriver {
             });
           }
           for await (const message of stream) {
+            this.observeBackground(run, message);
+            this.scheduleStall(run);
             const events = toUiEventsFromClaude(message);
             const knownFailure = events.reduce<ReturnType<typeof classifyClaudeError>>(
               (known, event) =>
@@ -381,6 +427,9 @@ export class ClaudeSdkDriver implements ChatDriver {
     } catch {
       return false;
     }
+    // Interrupt tears down background work too; force this terminal result through.
+    run.backgroundTaskIds.clear();
+    run.resultDeferred = false;
     this.emit(run, { kind: "result", ok: false, text: "interrupted" });
     return true;
   }
@@ -389,7 +438,40 @@ export class ClaudeSdkDriver implements ChatDriver {
     return this.runtime.subscribe(sessionId, listener);
   }
 
+  /**
+   * Track in-process background work from the SDK's own signals so a turn that ends
+   * only because a subagent/teammate is running in the background is not mistaken for
+   * the session going idle. Uses `background_tasks_changed` (REPLACE semantics) as the
+   * authoritative in-flight set and the result's `terminal_reason` as a direct hint.
+   */
+  private observeBackground(run: ClaudeRun, message: SDKMessage): void {
+    if (message.type === "system" && message.subtype === "background_tasks_changed") {
+      const tasks =
+        (message as { tasks?: Array<{ task_id?: string; task_type?: string }> }).tasks ?? [];
+      // Track only background work that can wake the model again. A detached `shell` task
+      // (run_in_background bash: tunnel, dev server, watcher) never resumes the turn, so
+      // counting it would defer the terminal result and disable the stall watchdog for the
+      // life of that process — pinning the session to "generating". REPLACE semantics.
+      run.backgroundTaskIds = new Set(
+        tasks
+          .filter((task) => isModelResumingTask(task.task_type))
+          .map((task) => task.task_id)
+          .filter((id): id is string => typeof id === "string"),
+      );
+      return;
+    }
+    if (message.type === "result") {
+      const terminalReason = (message as { terminal_reason?: string }).terminal_reason;
+      run.resultDeferred =
+        terminalReason === "background_requested" || run.backgroundTaskIds.size > 0;
+    }
+  }
+
   private emit(run: ClaudeRun, event: UiEvent): boolean {
+    // The model's turn ended, but only to hand off to background work that will wake it
+    // again. Swallow the intermediate result so the turn stays active (no turn-end, no
+    // idle) until the real, background-drained result lands.
+    if (event.kind === "result" && run.resultDeferred) return false;
     if (run.awaitingQuestionToolUseId) {
       if (event.kind === "tool_result" && event.id === run.awaitingQuestionToolUseId) {
         if (event.isError) return false;
@@ -432,7 +514,16 @@ export class ClaudeSdkDriver implements ChatDriver {
       run.stallTimer = null;
     }
     if (run.done || !run.turnActive || this.stallTimeoutMs <= 0) return;
-    const timer = setTimeout(() => void this.onStall(run), this.stallTimeoutMs);
+    // In-flight model-resuming background work (subagents/teammates/workflows) is a
+    // legitimate quiet period on the main stream, and a live one keeps re-arming this
+    // timer via `task_progress`. Rather than disabling the watchdog entirely while such
+    // work is tracked — which let a never-draining set pin the turn to "generating"
+    // forever — fall back to a much longer ceiling: a slow-but-live subagent resets it,
+    // only a dead or never-cleared background set trips it.
+    const timeoutMs =
+      run.backgroundTaskIds.size > 0 ? this.backgroundStallTimeoutMs : this.stallTimeoutMs;
+    if (timeoutMs <= 0) return;
+    const timer = setTimeout(() => void this.onStall(run), timeoutMs);
     (timer as unknown as { unref?: () => void }).unref?.();
     run.stallTimer = timer;
   }
@@ -440,13 +531,20 @@ export class ClaudeSdkDriver implements ChatDriver {
   private async onStall(run: ClaudeRun): Promise<void> {
     run.stallTimer = null;
     if (run.done || !run.turnActive) return;
-    if (!run.interrupt) return;
     try {
+      if (!run.interrupt) throw new Error("no interrupt handle");
       await withTimeout(run.interrupt(), 5_000, "Claude interrupt timed out");
-      this.emit(run, { kind: "result", ok: false, text: "stalled" });
     } catch {
-      this.scheduleStall(run);
+      // The interrupt hung, timed out, or was never wired up. Rescheduling and waiting
+      // again is exactly what pins a wedged turn to "generating" forever, so fall through
+      // and force the turn to end regardless — a stuck live-state is worse than tearing
+      // down a stream that is most likely already dead.
     }
+    // Interrupt tears down background work too; force this terminal result through so the
+    // turn ends, the daemon re-analyzes, and the UI stops showing "generating".
+    run.backgroundTaskIds.clear();
+    run.resultDeferred = false;
+    this.emit(run, { kind: "result", ok: false, text: "stalled" });
   }
 }
 

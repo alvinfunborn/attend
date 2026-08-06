@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 
-export type LaunchVendor = "claude" | "codex" | "cursor";
+export type LaunchVendor = "claude" | "codex" | "cursor" | "antigravity" | "copilot";
 export type LaunchAction = "resume" | "fork" | "new";
 
 export interface LaunchOpts {
@@ -32,14 +32,18 @@ export function buildCommand(
   if (action === "resume") {
     if (vendor === "claude") return { file: "claude", args: ["--resume", id] };
     if (vendor === "codex") return { file: "codex", args: ["resume", id] };
-    return { file: "cursor-agent", args: [`--resume=${id}`] };
+    if (vendor === "cursor") return { file: "cursor-agent", args: [`--resume=${id}`] };
+    if (vendor === "antigravity") return { file: "agy", args: ["--conversation", id] };
+    return { file: "copilot", args: [`--resume=${id}`] };
   }
   if (action === "fork") {
     if (vendor === "claude") return { file: "claude", args: ["--resume", id, "--fork-session"] };
     if (vendor === "codex") return { file: "codex", args: ["fork", id] };
-    throw new Error(
-      "Cursor supports interactive /fork, but its headless CLI does not expose a fork command",
-    );
+    if (vendor === "cursor")
+      throw new Error(
+        "Cursor supports interactive /fork, but its headless CLI does not expose a fork command",
+      );
+    throw new Error(`${vendor} CLI does not expose a native fork command`);
   }
 
   const model = optionValue("model", opts.model);
@@ -61,6 +65,26 @@ export function buildCommand(
     return {
       file: "cursor-agent",
       args: [...(model ? ["--model", model] : []), ...(prompt ? [prompt] : [])],
+    };
+  }
+  if (vendor === "antigravity") {
+    return {
+      file: "agy",
+      args: [
+        ...(model ? ["--model", model] : []),
+        ...(effort ? ["--effort", effort] : []),
+        ...(prompt ? ["--prompt-interactive", prompt] : []),
+      ],
+    };
+  }
+  if (vendor === "copilot") {
+    return {
+      file: "copilot",
+      args: [
+        ...(model ? ["--model", model] : []),
+        ...(effort ? ["--reasoning-effort", effort] : []),
+        ...(prompt ? ["--interactive", prompt] : []),
+      ],
     };
   }
   return {

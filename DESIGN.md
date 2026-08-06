@@ -337,3 +337,190 @@ Both drafts are scoped to the latest completed assistant turn. An accepted `user
 `queued_turn_started` clears them in the client and persisted analysis cache. The orchestrator also
 bumps an analysis epoch, so a verdict that began before that user turn but finishes afterward is
 discarded instead of repopulating stale drafts. The next turn-end produces the next usable pair.
+
+## v2.10: Cursor daemon completion + Antigravity/Copilot CLI vendors (2026-07-26)
+
+Cursor already had a transcript source and process chat driver, but production never registered a
+Cursor `SessionAnalyzer`, so product-created Cursor sessions could not actually receive daemon
+verdicts. Cursor now uses the shared `ProcessAnalyzer`; its daemon process runs with Cursor's native
+read-only `--mode ask --sandbox enabled` flags instead of normal chat's `--force`.
+
+Antigravity CLI and GitHub Copilot CLI are now full vendor entries: executable detection/configuration,
+terminal new/resume commands, in-browser process drivers, native + Attend-captured transcript
+sources, search/history readers, and same-vendor analyzer daemons. Antigravity consumes its documented
+`stream-json` events and `--conversation`; Copilot consumes prompt-mode JSONL and assigns a UUID with
+`--session-id` before the first turn so Attend has a stable browser identity. Neither headless CLI
+exposes a native fork command, so the existing transcript-seeded branch path is used. The normalized
+session and daemon contracts remain vendor-neutral.
+
+The server publishes one capability contract for all five vendors and the browser consumes it
+instead of maintaining provider-name checks. Antigravity and Copilot model catalogs come from their
+own CLI commands; defaults come from their local settings. Process-CLI attachments are implemented
+by materializing temporary files and supplying paths. Capabilities with no headless primitive have
+stable degradation behavior: Cursor/Antigravity/Copilot forks create transcript-seeded sessions,
+interactive questions are answered in the next user turn, and speed selection is hidden. Goal and
+mid-turn steering have no semantically equivalent fallback: their controls are absent and dedicated
+APIs return `capability_unavailable`. The normal next-turn message queue remains available, but is
+not presented as steering.
+Terminal `/launch?action=fork` returns `capability_unavailable` plus the same fallback text rather
+than surfacing a generic internal error.
+
+Antigravity integration targets the standalone `agy` binary. Attend validates its help surface
+(`--conversation`, `--print`, and `models`) and rejects the identically named Antigravity Desktop
+launcher with `wrong_command_surface`. Native trajectories are read from the provider-owned
+`~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl` location;
+the `.gemini` directory name is an upstream compatibility path, not a Gemini CLI vendor integration.
+
+## v2.11: restart-persistent session indexing (2026-07-28)
+
+Session discovery still re-lists provider directories, but parsed transcript snapshots now survive
+Attend restarts. Each vendor-owned `ScanCache` persists file identity/mtime/size plus its normalized
+`RawSession` under `~/.attend/scan-cache.json`. Unchanged files therefore need only listing/stat work
+after restart. Transient parser state is deliberately not serialized: the first changed JSONL after
+a restart is parsed from byte zero, then subsequent appends resume the existing in-process
+incremental parser. Version-mismatched or malformed snapshots are rejected as a whole.
+
+A genuinely uncached production boot no longer parses all provider history in the initial `/`
+request. It returns the console shell with `sessionsPending`, schedules the first scan off the
+request stack, then publishes the completed session-derived snapshot as a `session_index` message on
+the existing `/chat/live-stream` SSE bus. The browser shows an indexing state until that authoritative
+revision arrives, then refreshes sessions, known directories, tags, and throughput without discarding
+optimistic or scheduled cards.
+
+The index has a per-process epoch plus a monotonic revision. Every SSE connection sends the current
+authoritative index after replaying buffered edge events, so completion immediately before the first
+connection or while the browser is disconnected cannot be lost; replayed session events that precede
+their session metadata are retained and drained after hydration. A new epoch also makes a restarted
+server's revision zero newer than the previous process's higher revision. E2EE uses the same stream
+and decrypts `session_index` through the existing ordered event chain. There is no `/sessions` poll
+or parallel refresh transport. Warm boots and injected test apps keep synchronous first-read
+semantics; once running, the in-memory session snapshot refreshes after five seconds.
+
+CommentPanel uses the same indexing and reconnect model. `/comments/messages` resolves the hidden
+provider transcript through the scanner-owned `TranscriptPathIndex`, falling back to one fresh scan
+only when a just-created provider session has not reached the index. The unified SSE stream sends an
+authoritative `comment_index` after replayed edge events on every first connection and reconnect.
+Each entry includes complete thread metadata plus an opaque history version derived from the indexed
+transcript identity and queued turns. An open panel performs one history read only when that version
+changes; reopening the same loaded version stays in the browser cache. A new server epoch forces a
+resync, replayed events received before thread metadata are drained after hydration, and request
+epoch/version checks prevent a late response from an old connection from overwriting newer history.
+
+## v2.12: on-demand transcript history (2026-07-29)
+
+The unified SSE bus remains the sole live-state authority, but it deliberately carries indexes,
+versions, and edge events rather than bulk transcript bodies. Sending full history on every first
+connection or reconnect would make one large chat penalize every connected browser. `session_index`
+and `comment_index` therefore tell the client what exists and whether an already-open history is
+stale; the client fetches history only when the user opens that chat or CommentPanel.
+
+Both `/chat/messages` and `/comments/messages` now resolve provider files through
+`TranscriptPathIndex` and share one file-versioned `TranscriptHistoryCache`. A cold read starts with
+the final 2 MiB of the JSONL and expands backward only until the bounded display tail is complete,
+with a hard 32 MiB read ceiling for sparse or pathological transcripts. It yields between expansions
+so live SSE delivery is not starved. Parsed tails are retained in a 64-entry / 48 MiB LRU and
+invalidated by file identity, mtime, or size. The display contract is up to the most recent 200
+normalized messages inside that bounded tail; the HTTP paging contract returns 60 at a time (maximum
+80) with an opaque version and `before` cursor. Legacy non-paged `/chat/messages` callers still
+receive the prior array response.
+
+The browser no longer warms unopened sessions in the background. Selecting a chat or opening a
+CommentPanel fetches only its recent page; an explicit loader or a trusted scroll near the top
+prepends the previous page while preserving the visible scroll anchor. Server-provided history
+ordinals keep message keys stable as older pages are inserted. Browser transcript retention is also
+bounded by 80 keys / approximately 48 MiB instead of an unbounded object cache. The main chat's
+existing DOM windowing still caps mounted blocks for a loaded long conversation; paging now prevents
+the browser from downloading and parsing the rest before it is requested.
+
+Pins use a separate stable history identity rather than relying on the page-relative DOM ordinal.
+The history cache derives a content/timestamp identity for each normalized message and tool call;
+new Pins persist that `historyId`, while a legacy Pin is upgraded only when its saved text still
+matches the rendered block (so a shifted ordinal can never be migrated to the wrong message).
+`/chat/messages` and `/comments/messages` accept `around=<historyId>&radius=20` and return one
+versioned window containing the target plus roughly 20 normalized messages on each side (radius is
+capped at 40). The browser merges that window by snapshot index and jumps through the stable ID,
+without downloading intervening pages. If the file version changed, it refreshes the recent page
+and retries the direct lookup once instead of mixing two transcript versions. Lookup remains inside
+the deliberately bounded 200-message display snapshot; a Pin that has aged beyond that retention
+limit reports that it is no longer available.
+
+## v3.0: bounded main thread and durable background indexes (2026-07-30)
+
+The first implementation of restart-persistent indexing reduced cold parsing, but it did not enforce
+the actual performance boundary: provider directory scans, CLI model discovery, large transcript
+parsing, analyzer context construction, search backfills, and session-view projection could still
+run on the server event loop. A new session could therefore display an empty shell while unrelated
+history or model work held up the request. This section supersedes the execution details in v2.11
+and v2.12 while preserving their index/version and on-demand-history contracts.
+
+**The server event loop is now a control plane.** HTTP/SSE handlers may validate input, read an
+already-published snapshot, enqueue work, and serialize bounded responses. They must not enumerate
+provider trees, synchronously probe the filesystem, invoke a vendor CLI, parse a full transcript,
+build a search index, or train/score the alignment model. The production graph has dedicated workers
+for session discovery, paged history, full analyzer context, FTS search, alignment, and work-prompt
+indexing. Analyzer context intentionally has its own worker rather than sharing the interactive
+history worker: one multi-megabyte daemon analysis cannot delay the history page the user just
+opened. Workers are restartable and their clients reject or retry in-flight work when a worker dies.
+
+**Session discovery is a durable, multi-process index.** `SessionIndex` owns the provider scans and
+publishes immutable snapshots with an epoch and monotonic revision. Normalized sessions, transcript
+locations, scan checkpoints, and lease/fencing state live in SQLite WAL storage. Only the current
+lease holder scans; an expired or dead owner can be taken over without allowing the old owner to
+publish a stale result. JSONL checkpoints track file identity and byte offsets, so an unchanged file
+is not parsed again and an append reads only its tail, including after restart. The UI can always
+render the last durable snapshot while a refresh is pending or a provider is unavailable.
+
+**Discovery data is stale-while-revalidate.** Vendor availability and model catalogs are cached
+snapshots. Cursor, Codex, Antigravity, Copilot, and other CLI queries run asynchronously with
+deduplicated refreshes, bounded timeouts, and the last good value retained on failure. Opening the
+new-session composer never waits for a CLI process. A new or fork request reserves a stable client
+session ID immediately, returns `202 Accepted` with an operation receipt, and creates the optimistic
+card with the typed prompt before provider work begins. Completion reconciles that card to the
+provider session without replacing its UI identity or losing the prompt.
+
+**Projection and transport are bounded too.** The initial page is a compact static shell served from
+versioned `/assets/console-v3.*` resources. Authoritative `session_index` and `comment_index`
+snapshots are pre-serialized once per revision and reused by concurrent HTTP/SSE readers; SSE carries
+compact version/control messages rather than duplicated transcript bodies. Building a large
+`SessionView` collection is cooperative and yields every bounded batch, with dirty-revision replay so
+an update that lands during projection is not dropped. A 5,000-session projection plus 20 concurrent
+snapshot reads is regression-tested with both event-loop lag and cached-route p95 below 50 ms.
+
+**Observability is part of the boundary.** `/debug/performance` exposes route latency, event-loop lag,
+session-index epoch/revision/pending age, session count, scan cache hits, parsed files/bytes, worker
+errors, model-refresh state, alignment readiness, and transport mode. Large-history tests assert
+incremental bytes read rather than only checking final correctness; worker-boundary tests reject
+synchronous history/scanning regressions; worker-exit tests cover automatic recovery. These budgets
+turn “new session feels slow” from an anecdote into a specific queue, worker, or provider latency
+that can be identified without moving heavy work back onto the request path.
+
+## v3.1: session-id rollover follow (`/clear`) (2026-08-06)
+
+`/clear` is not an ordinary message: the Claude Agent SDK resets the conversation and re-initializes
+with a *fresh* `session_id` (and a fresh transcript file) mid-turn. Attend treated the new id as a
+brand-new session, so one chat split into two — and both showed "generating" — because the id change
+was mishandled at three layers. This section records the fix, which stays inside the existing
+vendor-neutral seams rather than special-casing `/clear` in the Claude adapter.
+
+**Runtime (all vendors).** `DriverRuntime.index()` is the single choke point every adapter — Claude,
+Codex, and the process CLIs — routes provider ids through. It used to add the new id as a second map
+key without removing the old one, so a single live run was indexed under both ids and double-counted
+in `activeSessions()`/`activeSessionStates()` (two tabs "generating" from one run) while the stale key
+was orphaned forever. It now re-keys: on a mid-stream id change it drops the previous key so a run is
+always indexed under exactly one id. This is the correct altitude for the invariant — one fix covers
+every present and future vendor that can roll an id.
+
+**Browser tab.** A product-created session keeps a stable `clientSessionId` across the roll, and the
+live bus preserves it. The console now *follows* the rolled id: when the same client identity reports
+a new provider id, the tab rebinds to it (dropping the pre-clear id from its identity, so the old
+transcript surfaces as its own historical card) and folds away any duplicate the disk scan already
+produced — instead of stranding on the dead id while the conversation silently reappears as a second
+tab. A plain scanned/resumed session has no client handle, so its roll is (correctly) a distinct
+session; the runtime fix still guarantees only the live one shows "generating".
+
+**Analyzer daemon.** The daemon registry is keyed by task id, so a rolled id had no daemon
+(`hasDaemon` → false) and turn-end analysis silently stopped after `/clear`. The server watches the
+per-client provider id and re-keys the daemon pairing (and cached verdict) to the new id, so the same
+daemon keeps analyzing the continued session. Separately, the last-resort daemon-transcript filter’s
+prompt markers had drifted out of sync with the analyzer contract; they now live beside the prompts
+and are asserted by a test so they cannot silently go stale again.

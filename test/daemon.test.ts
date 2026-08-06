@@ -113,9 +113,10 @@ function make(codexExec: CodexExecFn | null = fakeCodexExec) {
   const uniq = Math.random().toString(36).slice(2);
   const reg = path.join(os.tmpdir(), `attend-daemons-${uniq}.json`);
   const cache = path.join(os.tmpdir(), `attend-analysis-${uniq}.json`);
+  const emptyTranscriptRoot = path.join(os.tmpdir(), `attend-no-transcripts-${uniq}`);
   const orch = new DaemonOrchestrator(new DaemonRegistry(reg), new AnalysisCache(cache), [
-    new ClaudeAnalyzer(os.tmpdir(), fakeQuery),
-    new CodexAnalyzer(os.tmpdir(), codexExec),
+    new ClaudeAnalyzer(emptyTranscriptRoot, fakeQuery),
+    new CodexAnalyzer(emptyTranscriptRoot, codexExec),
   ]);
   return { orch, reg, cache };
 }
@@ -142,6 +143,70 @@ describe("DaemonOrchestrator", () => {
     expect(orch.hasDaemon("task-1")).toBe(true);
     expect(orch.isDaemon("daemon-1")).toBe(true);
     expect(orch.daemonIds().has("daemon-1")).toBe(true);
+  });
+
+  it("registers the provider id before seed completion but waits before analysis", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const reg = path.join(os.tmpdir(), `attend-daemons-early-${uniq}.json`);
+    const cache = path.join(os.tmpdir(), `attend-analysis-early-${uniq}.json`);
+    cleanup.push(reg, cache);
+    let finishSpawn!: (id: string | null) => void;
+    let analyzeCalls = 0;
+    const analyzer: SessionAnalyzer = {
+      vendor: "early",
+      spawn: (_cwd, onSessionId) => {
+        onSessionId?.("daemon-early");
+        return new Promise((resolve) => {
+          finishSpawn = resolve;
+        });
+      },
+      analyze: async () => {
+        analyzeCalls += 1;
+        return null;
+      },
+    };
+    const orch = new DaemonOrchestrator(new DaemonRegistry(reg), new AnalysisCache(cache), [
+      analyzer,
+    ]);
+    const registrations: string[] = [];
+    orch.onDaemonRegistered((_taskId, daemonId) => registrations.push(daemonId));
+
+    const pendingSpawn = orch.ensureDaemon("task-early", "early", os.tmpdir());
+    const duplicate = orch.ensureDaemon("task-early", "early", os.tmpdir());
+    const pendingAnalysis = orch.analyzeTask("task-early", os.tmpdir());
+    await Promise.resolve();
+
+    expect(orch.isDaemon("daemon-early")).toBe(true);
+    expect(registrations).toEqual(["daemon-early"]);
+    expect(duplicate).toBe(pendingSpawn);
+    expect(analyzeCalls).toBe(0);
+
+    finishSpawn("daemon-early");
+    await expect(pendingSpawn).resolves.toBe("daemon-early");
+    await expect(pendingAnalysis).resolves.toBeNull();
+    expect(analyzeCalls).toBe(1);
+  });
+
+  it("never hides a task as its own daemon when an adapter echoes the task id", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const reg = path.join(os.tmpdir(), `attend-daemons-self-${uniq}.json`);
+    const cache = path.join(os.tmpdir(), `attend-analysis-self-${uniq}.json`);
+    cleanup.push(reg, cache);
+    const analyzer: SessionAnalyzer = {
+      vendor: "self",
+      spawn: async (_cwd, onSessionId) => {
+        onSessionId?.("task-self");
+        return "task-self";
+      },
+      analyze: async () => null,
+    };
+    const orch = new DaemonOrchestrator(new DaemonRegistry(reg), new AnalysisCache(cache), [
+      analyzer,
+    ]);
+
+    await expect(orch.ensureDaemon("task-self", "self", os.tmpdir())).resolves.toBeNull();
+    expect(orch.isDaemon("task-self")).toBe(false);
+    expect(orch.hasDaemon("task-self")).toBe(false);
   });
 
   it("re-analyzes on turn-end and caches the parsed verdict", async () => {
@@ -271,6 +336,33 @@ describe("DaemonOrchestrator", () => {
     expect(a?.brief).toBe("codex task");
     expect(a?.state).toBe("continue_ready");
     expect(a?.priority).toBe(6);
+  });
+
+  it("reports a Codex daemon id before its seed turn completes", async () => {
+    let finishSeed!: () => void;
+    const seedGate = new Promise<void>((resolve) => {
+      finishSeed = resolve;
+    });
+    const exec: CodexExecFn = () => ({
+      events: (async function* () {
+        yield { type: "thread.started", thread_id: "cx-daemon-early" };
+        await seedGate;
+        yield { type: "turn.completed" };
+      })(),
+      kill: () => {},
+    });
+    const analyzer = new CodexAnalyzer(os.tmpdir(), exec);
+    let reportId!: (id: string) => void;
+    const reported = new Promise<string>((resolve) => {
+      reportId = resolve;
+    });
+    const spawned = analyzer.spawn(os.tmpdir(), (id) => {
+      reportId(id);
+    });
+
+    await expect(reported).resolves.toBe("cx-daemon-early");
+    finishSeed();
+    await expect(spawned).resolves.toBe("cx-daemon-early");
   });
 
   it("uses the scanner-owned transcript index without searching the configured Codex root", async () => {
@@ -477,5 +569,37 @@ describe("DaemonOrchestrator", () => {
     expect(prompt).toContain("User: B");
     // ...alongside the question that gives it meaning, even though it is buried under filler.
     expect(prompt).toContain("Redis 外部缓存");
+  });
+
+  it("re-keys a task's daemon + verdict when the provider rolls its id mid-session (/clear)", async () => {
+    const { orch, reg, cache } = make();
+    cleanup.push(reg, cache);
+    // Establish a daemon and a cached verdict under the pre-clear id.
+    await orch.ensureDaemon("task-before", "claude", os.tmpdir());
+    const first = await orch.analyzeTask("task-before", os.tmpdir());
+    expect(first?.brief).toBe("refactor parser");
+    expect(orch.hasDaemon("task-before")).toBe(true);
+
+    // /clear rolls the task session's provider id. Follow it.
+    expect(orch.rekeyTask("task-before", "task-after")).toBe(true);
+
+    // The pairing + cached verdict moved to the new id; the old id is gone.
+    expect(orch.hasDaemon("task-before")).toBe(false);
+    expect(orch.hasDaemon("task-after")).toBe(true);
+    expect(orch.analysis("task-after")?.brief).toBe("refactor parser");
+    expect(orch.analysis("task-before")).toBeNull();
+    // The daemon session id itself is unchanged, so it stays filtered out of the list.
+    expect(orch.isDaemon("daemon-1")).toBe(true);
+
+    // The continued session keeps getting analysis — the SAME daemon answers a resume.
+    const again = await orch.analyzeTask("task-after", os.tmpdir());
+    expect(again?.brief).toBe("refactor parser");
+  });
+
+  it("rekeyTask is a no-op for a task that has no daemon", () => {
+    const { orch, reg, cache } = make();
+    cleanup.push(reg, cache);
+    expect(orch.rekeyTask("unknown", "unknown-2")).toBe(false);
+    expect(orch.hasDaemon("unknown-2")).toBe(false);
   });
 });

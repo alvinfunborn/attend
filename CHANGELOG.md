@@ -2,6 +2,47 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.0 — 2026-08-06
+
+### Added
+
+- Cursor CLI, Antigravity CLI (`agy`), and GitHub Copilot CLI are now first-class in-browser
+  vendors alongside Claude Code and Codex/ChatGPT (five total): start, continue, and branch
+  sessions, each with its own transcript source, live model catalog, and same-vendor analyzer
+  daemon. The server publishes one capability contract for all five vendors and the browser
+  consumes it instead of hard-coding provider-name checks.
+- Full-text search across every session, backed by a durable FTS index built off the request path.
+- On-demand, paged transcript history: `session_index` and `comment_index` carry only authoritative
+  metadata plus an opaque history version, so the browser fetches transcript bodies only when a chat
+  or comment panel is opened, pages older messages on demand, and jumps to a pinned message by a
+  stable history id rather than a page-relative position.
+- Restart-persistent session indexing: each vendor's scan cache persists parse results across
+  restarts, and a genuinely uncached first scan is deferred behind the rendered shell and delivered
+  as an authoritative `session_index` revision on the unified live SSE bus.
+- A `/debug/performance` page reporting route latency, event-loop lag, session-index progress and
+  scan bytes, worker errors, and background model-refresh state — without reading transcript bodies
+  on the request path.
+
+### Changed
+
+- Bounded main thread: session discovery, paged history, analyzer context construction, search
+  backfills, alignment scoring, and work-prompt indexing run in dedicated background workers, so a
+  single large parse or analysis can no longer stall the request the user is waiting on.
+- Analyzer daemons are vendor-routed: Cursor, Antigravity, and Copilot share the process analyzer
+  after their native JSONL is normalized; Cursor daemons run in native read-only `ask` mode with
+  sandboxing enabled. Cursor/Antigravity/Copilot branches are transcript-seeded new sessions because
+  those headless CLIs expose no native fork; Claude and Codex keep native forks.
+
+### Fixed
+
+- `/clear` — and any provider that rolls a live session's id mid-turn — no longer splits one chat
+  into two tabs that both show "generating". The shared session runtime re-keys the live run to the
+  new id instead of indexing it under both; the browser tab follows the rolled id via its stable
+  client identity rather than stranding on the pre-clear id and spawning a second card; and the
+  analyzer daemon re-attaches to the new id so the continued session keeps receiving verdicts.
+- The last-resort daemon-transcript filter now matches the current analyzer prompts (its markers had
+  drifted out of sync), and is covered by a test so it cannot silently go stale again.
+
 ## 1.2.3 — 2026-07-24
 
 ### Fixed

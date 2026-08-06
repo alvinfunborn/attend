@@ -10,6 +10,7 @@ const ENV_KEYS = [
   "ATTEND_VAULTS",
   "ATTEND_PORT",
   "ATTEND_HOST",
+  "ATTEND_E2EE_PASSPHRASE",
   "ATTEND_CLAUDE_PROJECTS",
   "ATTEND_CLAUDE_BIN",
   "ATTEND_CODEX_SESSIONS",
@@ -18,6 +19,13 @@ const ENV_KEYS = [
   "ATTEND_CURSOR_PROJECTS",
   "ATTEND_CURSOR_STATE_DB",
   "ATTEND_CURSOR_BIN",
+  "ATTEND_ANTIGRAVITY_BRAIN",
+  "ATTEND_ANTIGRAVITY_CAPTURED_SESSIONS",
+  "ATTEND_ANTIGRAVITY_BIN",
+  "ATTEND_COPILOT_SESSIONS",
+  "ATTEND_COPILOT_CAPTURED_SESSIONS",
+  "ATTEND_COPILOT_BIN",
+  "ATTEND_SESSION_INDEX",
   "ATTEND_TAGS",
   "ATTEND_ENGAGEMENT",
 ];
@@ -58,6 +66,16 @@ describe("resolveConfig precedence", () => {
     const c = resolveConfig({ positionals: ["foo", "bar"] });
     expect(c.scopeRoots).toEqual([path.resolve("bar"), path.resolve("foo")]);
     expect(c.scopeId).toBe(scopeIdForRoots(c.scopeRoots));
+  });
+
+  it("never treats a duplicated e2ee passphrase as a positional scope root", () => {
+    const root = path.join(os.tmpdir(), "attend-safe-scope");
+    const c = resolveConfig({
+      positionals: ["do-not-project-this-secret", root],
+      e2eePassphrase: "do-not-project-this-secret",
+    });
+    expect(c.scopeRoots).toEqual([path.resolve(root)]);
+    expect(c.scopeRoots.join("\n")).not.toContain("do-not-project-this-secret");
   });
 
   it("canonicalizes duplicate, descendant, and symlinked scope roots", () => {
@@ -138,6 +156,22 @@ describe("resolveConfig precedence", () => {
     expect(config.cursorSessions).toBe(path.resolve("/tmp/attend-cursor-sessions"));
   });
 
+  it("allows overriding Antigravity and Copilot CLI transcript locations", () => {
+    process.env.ATTEND_ANTIGRAVITY_BIN = "/opt/bin/agy";
+    process.env.ATTEND_ANTIGRAVITY_BRAIN = "/tmp/antigravity-brain";
+    process.env.ATTEND_ANTIGRAVITY_CAPTURED_SESSIONS = "/tmp/antigravity-captured";
+    process.env.ATTEND_COPILOT_BIN = "/opt/bin/copilot";
+    process.env.ATTEND_COPILOT_SESSIONS = "/tmp/copilot-native";
+    process.env.ATTEND_COPILOT_CAPTURED_SESSIONS = "/tmp/copilot-captured";
+    const config = resolveConfig({ positionals: [] });
+    expect(config.antigravityBin).toBe("/opt/bin/agy");
+    expect(config.antigravityBrain).toBe(path.resolve("/tmp/antigravity-brain"));
+    expect(config.antigravityCapturedSessions).toBe(path.resolve("/tmp/antigravity-captured"));
+    expect(config.copilotBin).toBe("/opt/bin/copilot");
+    expect(config.copilotSessions).toBe(path.resolve("/tmp/copilot-native"));
+    expect(config.copilotCapturedSessions).toBe(path.resolve("/tmp/copilot-captured"));
+  });
+
   it("keeps tags global when the session list is directory-scoped", () => {
     const root = path.join(os.tmpdir(), "attend-vault-tags");
     const c = resolveConfig({ positionals: [root] });
@@ -152,6 +186,7 @@ describe("resolveConfig precedence", () => {
     expect(c.uiState).toBe(path.join(os.homedir(), ".attend", "ui-state.json"));
     expect(c.chatQueue).toBe(path.join(os.homedir(), ".attend", "chat-queues.json"));
     expect(c.workEvents).toBe(path.join(os.homedir(), ".attend", "attend.sqlite3"));
+    expect(c.sessionIndex).toBe(path.join(os.homedir(), ".attend", "index-v3.sqlite3"));
     expect(c.daemonRegistry).toBe(path.join(os.homedir(), ".attend", "daemons.json"));
     expect(c.analysisCache).toBe(path.join(os.homedir(), ".attend", "analysis.json"));
   });

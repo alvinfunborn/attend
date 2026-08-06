@@ -5,7 +5,13 @@ import path from "node:path";
 import { normalizeScopeRoots, scopeIdForRoots } from "./core/scope.js";
 import { defaultCodexModelsCachePath } from "./core/vendor/codex-models.js";
 import { defaultCursorStateDbPath } from "./core/vendor/cursor-models.js";
-import { resolveClaudeBin, resolveCodexBin, resolveCursorBin } from "./core/vendor/detect.js";
+import {
+  resolveAntigravityBin,
+  resolveClaudeBin,
+  resolveCodexBin,
+  resolveCopilotBin,
+  resolveCursorBin,
+} from "./core/vendor/detect.js";
 
 export interface AttendConfig {
   /**
@@ -24,6 +30,14 @@ export interface AttendConfig {
   cursorProjects: string;
   /** Attend-captured Cursor CLI stream-json transcripts (compatibility fallback). */
   cursorSessions: string;
+  /** ~/.gemini/antigravity-cli/brain (native Antigravity conversation trajectories). */
+  antigravityBrain: string;
+  /** Attend-captured Antigravity CLI stream-json transcripts. */
+  antigravityCapturedSessions: string;
+  /** ~/.copilot/session-state (native GitHub Copilot CLI sessions). */
+  copilotSessions: string;
+  /** Attend-captured Copilot CLI JSONL transcripts. */
+  copilotCapturedSessions: string;
   /** Cursor Desktop's local model-picker state database. */
   cursorStateDb: string;
   /** ~/.codex/models_cache.json */
@@ -35,6 +49,10 @@ export interface AttendConfig {
   codexBin: string | null;
   /** resolved `cursor-agent` binary, or null when it is not installed. */
   cursorBin: string | null;
+  /** resolved standalone `agy` binary, or null when it is not installed. */
+  antigravityBin: string | null;
+  /** resolved `copilot` binary, or null when it is not installed. */
+  copilotBin: string | null;
   /** Explicit memory files; when empty, per-project memory is auto-discovered. */
   memorySources: string[];
   port: number;
@@ -42,6 +60,12 @@ export interface AttendConfig {
   /** Open the browser on start. */
   open: boolean;
   scanDepth: number;
+  /** persisted per-source session scan cache, so restarts skip re-reading the
+   *  (often multi-GB) immutable transcript history on the first request. */
+  scanCache: string;
+  /** Shared v3 session catalog. A background indexer owns synchronous provider
+   *  scans and publishes compact snapshots through this SQLite database. */
+  sessionIndex: string;
   /** task→daemon pairing file (which sessions are hidden analyzer daemons). */
   daemonRegistry: string;
   /** per-task daemon analysis cache (brief/priority/eta/reason). */
@@ -84,6 +108,10 @@ interface ConfigFile {
   codexSessions?: string;
   cursorProjects?: string;
   cursorSessions?: string;
+  antigravityBrain?: string;
+  antigravityCapturedSessions?: string;
+  copilotSessions?: string;
+  copilotCapturedSessions?: string;
   cursorStateDb?: string;
   codexModelsCache?: string;
   memorySources?: string[];
@@ -101,6 +129,10 @@ function platformDefaults(): AttendConfig {
     codexSessions: path.join(home, ".codex", "sessions"),
     cursorProjects: path.join(home, ".cursor", "projects"),
     cursorSessions: path.join(attendHome, "cursor-sessions"),
+    antigravityBrain: path.join(home, ".gemini", "antigravity-cli", "brain"),
+    antigravityCapturedSessions: path.join(attendHome, "antigravity-sessions"),
+    copilotSessions: path.join(home, ".copilot", "session-state"),
+    copilotCapturedSessions: path.join(attendHome, "copilot-sessions"),
     cursorStateDb: defaultCursorStateDbPath(),
     codexModelsCache: defaultCodexModelsCachePath(),
     // Match the user's terminal: the Agent SDK is only an adapter around this
@@ -109,11 +141,15 @@ function platformDefaults(): AttendConfig {
     claudeBin: resolveClaudeBin(),
     codexBin: resolveCodexBin(),
     cursorBin: resolveCursorBin(),
+    antigravityBin: resolveAntigravityBin(),
+    copilotBin: resolveCopilotBin(),
     memorySources: [],
     port: 5050,
     host: "127.0.0.1",
     open: true,
     scanDepth: 8,
+    scanCache: path.join(attendHome, "scan-cache.json"),
+    sessionIndex: path.join(attendHome, "index-v3.sqlite3"),
     daemonRegistry: path.join(attendHome, "daemons.json"),
     analysisCache: path.join(attendHome, "analysis.json"),
     overrides: path.join(attendHome, "overrides.json"),
@@ -172,13 +208,22 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
   const defaults = platformDefaults();
   const file = readConfigFile(cli.config);
   const env = process.env;
+  const e2eePassphrase =
+    cli.e2eePassphrase ?? env.ATTEND_E2EE_PASSPHRASE ?? defaults.e2eePassphrase;
 
   // The positional dir args (or ATTEND_VAULTS / config `vaultRoots`) scope the
   // listing to sessions under those dirs. Empty when none given → list everything.
-  const scopeRootsInput =
+  const rawScopeRootsInput =
     cli.positionals.length > 0
       ? cli.positionals
       : (splitPaths(env.ATTEND_VAULTS) ?? file.vaultRoots ?? defaults.scopeRoots);
+  // Defensive boundary for wrappers that accidentally duplicate an option value
+  // into the positional argv list. A passphrase must never become a scope label,
+  // filesystem path, startup log entry, or browser title.
+  const phrase = e2eePassphrase?.trim() ?? "";
+  const scopeRootsInput = phrase
+    ? rawScopeRootsInput.filter((root) => root.trim() !== phrase)
+    : rawScopeRootsInput;
   const scopeRoots = normalizeScopeRoots(scopeRootsInput);
 
   const port = Number(cli.port ?? env.ATTEND_PORT ?? file.port ?? defaults.port);
@@ -198,6 +243,22 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     cursorSessions: path.resolve(
       env.ATTEND_CURSOR_SESSIONS ?? file.cursorSessions ?? defaults.cursorSessions,
     ),
+    antigravityBrain: path.resolve(
+      env.ATTEND_ANTIGRAVITY_BRAIN ?? file.antigravityBrain ?? defaults.antigravityBrain,
+    ),
+    antigravityCapturedSessions: path.resolve(
+      env.ATTEND_ANTIGRAVITY_CAPTURED_SESSIONS ??
+        file.antigravityCapturedSessions ??
+        defaults.antigravityCapturedSessions,
+    ),
+    copilotSessions: path.resolve(
+      env.ATTEND_COPILOT_SESSIONS ?? file.copilotSessions ?? defaults.copilotSessions,
+    ),
+    copilotCapturedSessions: path.resolve(
+      env.ATTEND_COPILOT_CAPTURED_SESSIONS ??
+        file.copilotCapturedSessions ??
+        defaults.copilotCapturedSessions,
+    ),
     cursorStateDb: path.resolve(
       env.ATTEND_CURSOR_STATE_DB ?? file.cursorStateDb ?? defaults.cursorStateDb,
     ),
@@ -207,11 +268,15 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     claudeBin: env.ATTEND_CLAUDE_BIN ?? defaults.claudeBin,
     codexBin: env.ATTEND_CODEX_BIN ?? defaults.codexBin,
     cursorBin: env.ATTEND_CURSOR_BIN ?? defaults.cursorBin,
+    antigravityBin: env.ATTEND_ANTIGRAVITY_BIN ?? defaults.antigravityBin,
+    copilotBin: env.ATTEND_COPILOT_BIN ?? defaults.copilotBin,
     memorySources: (file.memorySources ?? defaults.memorySources).map((p) => path.resolve(p)),
     port: Number.isFinite(port) ? port : defaults.port,
     host: cli.host ?? env.ATTEND_HOST ?? file.host ?? defaults.host,
     open: cli.noOpen ? false : defaults.open,
     scanDepth: defaults.scanDepth,
+    scanCache: path.resolve(env.ATTEND_SCAN_CACHE ?? defaults.scanCache),
+    sessionIndex: path.resolve(env.ATTEND_SESSION_INDEX ?? defaults.sessionIndex),
     daemonRegistry: path.resolve(env.ATTEND_DAEMON_REGISTRY ?? defaults.daemonRegistry),
     analysisCache: path.resolve(env.ATTEND_ANALYSIS_CACHE ?? defaults.analysisCache),
     overrides: path.resolve(env.ATTEND_OVERRIDES ?? defaults.overrides),
@@ -223,7 +288,7 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     workEvents: path.resolve(defaults.workEvents),
     recentDays: intOr(env.ATTEND_RECENT_DAYS, defaults.recentDays),
     maxSessions: intOr(env.ATTEND_MAX_SESSIONS, defaults.maxSessions),
-    e2eePassphrase: cli.e2eePassphrase ?? env.ATTEND_E2EE_PASSPHRASE ?? defaults.e2eePassphrase,
+    e2eePassphrase,
   };
 }
 

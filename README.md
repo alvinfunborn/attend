@@ -1,6 +1,7 @@
 # attend
 
-A local attention-management console for AI coding tasks. Current integrations: Claude Code, Codex/ChatGPT, and Cursor CLI.
+A local attention-management console for AI coding tasks. Current integrations: Claude Code,
+Codex/ChatGPT, Cursor CLI, Antigravity CLI, and GitHub Copilot CLI.
 
 [中文 README](README.zh-CN.md)
 
@@ -19,9 +20,9 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 
 - Organize sessions across projects with tags, search, and Focus views, while distinguishing work
   that is generating, unread, waiting for follow-up, or handled.
-- Start or continue Claude Code, Codex/ChatGPT, and Cursor CLI sessions in the browser, with
-  attachments, interactive questions, stopping, recoverable provider-limit errors, and durable
-  message queues.
+- Start or continue Claude Code, Codex/ChatGPT, Cursor CLI, Antigravity CLI, and GitHub Copilot CLI
+  sessions in the browser, with attachments, stopping, recoverable provider-limit errors, and
+  durable message queues.
 - Keep shortcuts, notes, todos, and Goals beside the composer; pin messages and use `@` to carry
   selected context into the next turn, or start a focused comment from a message or text selection.
 - Fork sessions, comment on a response, or promote a side discussion into its own task without
@@ -84,11 +85,18 @@ sessions may use local heuristics instead.
 Requirements:
 
 - Node.js `>= 22.13`
-- At least one supported CLI installed: Claude Code, Codex/ChatGPT, or Cursor CLI (`cursor-agent`)
+- At least one supported CLI installed: Claude Code, Codex/ChatGPT, Cursor CLI (`cursor-agent`),
+  standalone Antigravity CLI (`agy`), or GitHub Copilot CLI (`copilot`)
 
 Attend detects those system CLIs at startup and only shows vendors it can actually run. If none are
 available, the picker shows every vendor with installation guidance. Claude Code must be
 `2.1.0` or newer; an older version is disabled with an explicit update message.
+
+Every in-browser session gets an analyzer daemon from the same provider. Cursor daemons run in
+native read-only `ask` mode with sandboxing enabled; Antigravity and Copilot daemons use their
+headless/JSONL interfaces. Claude and Codex support native forks. Cursor, Antigravity, and Copilot
+branches are created as new sessions seeded with the visible parent transcript because those
+headless CLIs do not expose a native fork command.
 
 ### Claude authentication
 
@@ -182,6 +190,10 @@ npm run demo:readme
 ```
 
 It serves the demo at `http://127.0.0.1:5099` without reading or modifying your real Attend state.
+
+For local performance diagnostics, open `/debug/performance` on the running Attend server. It
+reports route latency, event-loop lag, session-index progress and scan bytes, worker errors, and
+background model-refresh state without reading transcript bodies on the request path.
 
 Checks:
 

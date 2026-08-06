@@ -105,6 +105,70 @@ describe("ChatEngine", () => {
     expect(received.some(({ event }) => event.kind === "result")).toBe(true);
   });
 
+  it("keeps the turn active across a background subagent and ends only on the drained result", async () => {
+    const query = ((_args: unknown) =>
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-bg" };
+        yield {
+          type: "assistant",
+          session_id: "sess-bg",
+          message: { content: [{ type: "text", text: "spawning investigation" }] },
+        };
+        // A background subagent/teammate registers; the turn's result only defers to it.
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-bg",
+          tasks: [{ task_id: "t1", task_type: "subagent", description: "Map refund logic" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "will wait for the investigation",
+          terminal_reason: "background_requested",
+          session_id: "sess-bg",
+        };
+        // The subagent settles: background drains, the agent wakes and finishes for real.
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-bg",
+          tasks: [],
+        };
+        yield {
+          type: "assistant",
+          session_id: "sess-bg",
+          message: { content: [{ type: "text", text: "final answer" }] },
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "done",
+          terminal_reason: "completed",
+          session_id: "sess-bg",
+        };
+      })()) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const turnEnds: string[] = [];
+    engine.onTurnEnd((id) => turnEnds.push(id));
+    const received: UiEvent[] = [];
+    engine.onEvent((_id, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "investigate" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The turn ends exactly once — at the final drained result, never the deferred one.
+    expect(turnEnds).toEqual(["sess-bg"]);
+    // The post-background wake output is delivered; it would be dropped if the turn had
+    // already been marked finished (turnActive false suppresses turn events).
+    expect(received).toContainEqual({ kind: "assistant_text", text: "final answer" });
+    // Only the real result reaches the bus; the background-deferred one is swallowed.
+    expect(received.filter((event) => event.kind === "result")).toEqual([
+      { kind: "result", ok: true, text: "done" },
+    ]);
+  });
+
   it("starts a run, resolves the session id, and does not replay finished-turn buffer to late subscribers", async () => {
     const engine = new ChatEngine(fakeQuery);
     const id = await engine.start({ cwd: ".", firstText: "hello" });
@@ -123,6 +187,43 @@ describe("ChatEngine", () => {
   it("send returns false for an unknown session", () => {
     const engine = new ChatEngine(fakeQuery);
     expect(engine.send("nope", { text: "x" })).toBe(false);
+  });
+
+  it("re-keys a run when the provider rolls its session id mid-stream (Claude /clear)", async () => {
+    // `/clear` resets the conversation and makes the SDK re-init with a fresh session id.
+    // The run must move to the new id, never end up indexed under both — otherwise it is
+    // double-counted as two active sessions and both tabs light up "generating" at once.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const query = ((_args: unknown) =>
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-before" };
+        yield {
+          type: "assistant",
+          session_id: "sess-before",
+          message: { content: [{ type: "text", text: "before clear" }] },
+        };
+        // /clear rollover: a second init with a new id arrives mid-turn.
+        yield { type: "system", subtype: "init", session_id: "sess-after" };
+        // Keep the turn active so we can observe the live run's identity.
+        await gate;
+      })()) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const first = await engine.start({ cwd: ".", firstText: "/clear go" });
+    expect(first).toBe("sess-before");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The run followed the rolled id: only the new id is live, the old key is gone.
+    expect(engine.activeSessions()).toEqual(["sess-after"]);
+    expect(engine.activeSessionStates().map((s) => s.sessionId)).toEqual(["sess-after"]);
+    expect(engine.get("sess-before")).toBeUndefined();
+    expect(engine.get("sess-after")).toBeDefined();
+
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 
   it("steers a Claude turn through its live input stream", async () => {
@@ -821,9 +922,10 @@ describe("ChatEngine", () => {
     engine.subscribe(id, (ev) => got.push(ev));
     expect(engine.activeSessions()).toContain(id);
 
-    await new Promise((r) => setTimeout(r, 80)); // past the watchdog
-
-    expect(engine.activeSessions()).toHaveLength(0); // turnActive cleared server-side
+    await vi.waitFor(() => expect(engine.activeSessions()).toHaveLength(0), {
+      timeout: 1_000,
+      interval: 5,
+    }); // turnActive cleared server-side after the watchdog
     expect(ended).toEqual(["sess-stall"]); // daemon turn-end still fires
     expect(interrupted).toBe(true); // orphaned query torn down
     expect(got).toContainEqual({ kind: "result", ok: false, text: "stalled" });
@@ -857,9 +959,10 @@ describe("ChatEngine", () => {
     const id = await engine.start({ cwd: ".", firstText: "go" });
     engine.subscribe(id, (ev) => got.push(ev));
 
-    await new Promise((r) => setTimeout(r, 140));
-
-    expect(engine.activeSessions()).toHaveLength(0);
+    await vi.waitFor(() => expect(engine.activeSessions()).toHaveLength(0), {
+      timeout: 1_000,
+      interval: 5,
+    });
     // The genuine result closed the turn; the watchdog never manufactured one.
     expect(got.filter((e) => e.kind === "result")).toEqual([
       { kind: "result", ok: true, text: "ok" },
@@ -877,5 +980,232 @@ describe("ChatEngine", () => {
     // finished → not generating (startedAt may linger but the client ignores it
     // unless turnActive, so assert the fields that matter)
     expect(sync).toMatchObject({ kind: "sync", turnActive: false });
+  });
+
+  it("ends the turn when the only background task is a fire-and-forget shell (tunnel)", async () => {
+    // The stuck-"generating" bug: the model launches a detached background shell (an SSH
+    // tunnel / dev server), finishes its answer, but the SDK stream stays open because that
+    // process is still alive. A `shell` task must not defer the terminal result, or the
+    // turn would pin to "generating" for the life of the tunnel.
+    const shellQuery = ((_args: unknown) => {
+      const it = (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-shell" };
+        yield {
+          type: "assistant",
+          session_id: "sess-shell",
+          message: { content: [{ type: "text", text: "prod tunnel is up on 13306" }] },
+        };
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-shell",
+          tasks: [{ task_id: "sh1", task_type: "shell", description: "ssh -L 13306 prod tunnel" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "done",
+          terminal_reason: "completed",
+          session_id: "sess-shell",
+        };
+        await new Promise(() => {}); // the tunnel keeps the SDK stream open indefinitely
+      })() as AsyncGenerator<unknown> & { interrupt: () => Promise<void> };
+      it.interrupt = async () => {};
+      return it;
+    }) as unknown as QueryFn;
+
+    // Large stall window so only the fix (not the watchdog) can end the turn.
+    const engine = new ChatEngine(shellQuery, 60_000);
+    const turnEnds: string[] = [];
+    engine.onTurnEnd((id) => turnEnds.push(id));
+    const received: UiEvent[] = [];
+    engine.onEvent((_id, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "set up the tunnel" });
+    try {
+      await vi.waitFor(() => expect(engine.activeSessions()).toHaveLength(0), {
+        timeout: 1_000,
+        interval: 5,
+      });
+      expect(turnEnds).toEqual(["sess-shell"]);
+      expect(received.filter((e) => e.kind === "result")).toEqual([
+        { kind: "result", ok: true, text: "done" },
+      ]);
+    } finally {
+      engine.shutdown();
+    }
+  });
+
+  it("keeps a live subagent's turn active while it keeps checking in (background ceiling reset)", async () => {
+    // A subagent legitimately leaves the main stream quiet, but a live one emits
+    // task_progress that must re-arm the (longer) background ceiling — so the turn ends on
+    // the real drained result, never a synthetic stall. Gaps (25ms) stay under the ceiling.
+    const subagentQuery = ((_args: unknown) => {
+      async function* gen() {
+        yield { type: "system", subtype: "init", session_id: "sess-sub-live" };
+        yield {
+          type: "assistant",
+          session_id: "sess-sub-live",
+          message: { content: [{ type: "text", text: "delegating to a subagent" }] },
+        };
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-sub-live",
+          tasks: [{ task_id: "sub1", task_type: "subagent", description: "investigate" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "waiting on the subagent",
+          terminal_reason: "background_requested",
+          session_id: "sess-sub-live",
+        };
+        for (let i = 0; i < 4; i++) {
+          await new Promise((r) => setTimeout(r, 25));
+          yield {
+            type: "system",
+            subtype: "task_progress",
+            session_id: "sess-sub-live",
+            task_id: "sub1",
+            description: "still working",
+            usage: { total_tokens: 10, tool_uses: 1, duration_ms: 25 },
+          };
+        }
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-sub-live",
+          tasks: [],
+        };
+        yield {
+          type: "assistant",
+          session_id: "sess-sub-live",
+          message: { content: [{ type: "text", text: "final answer" }] },
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "done",
+          terminal_reason: "completed",
+          session_id: "sess-sub-live",
+        };
+      }
+      return gen();
+    }) as unknown as QueryFn;
+
+    // Normal stall large; background ceiling 40ms — it must not fire while progress flows.
+    const engine = new ChatEngine(subagentQuery, 10_000, undefined, 40);
+    const turnEnds: string[] = [];
+    engine.onTurnEnd((id) => turnEnds.push(id));
+    const received: UiEvent[] = [];
+    engine.onEvent((_id, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "investigate" });
+    await vi.waitFor(() => expect(engine.activeSessions()).toHaveLength(0), {
+      timeout: 2_000,
+      interval: 5,
+    });
+    // Ended once, on the genuine drained result — the watchdog never manufactured a stall.
+    expect(turnEnds).toEqual(["sess-sub-live"]);
+    expect(received).toContainEqual({ kind: "assistant_text", text: "final answer" });
+    expect(received.filter((e) => e.kind === "result")).toEqual([
+      { kind: "result", ok: true, text: "done" },
+    ]);
+  });
+
+  it("finalizes a turn whose background subagent set never drains (background ceiling)", async () => {
+    // The subagent registers and the result defers to it, but the drain signal never comes
+    // (subagent died, or the SDK dropped the clearing background_tasks_changed). The longer
+    // background ceiling must still end the turn instead of pinning "generating" forever.
+    let interrupted = false;
+    const stuckSubagent = ((_args: unknown) => {
+      const it = (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-sub-stuck" };
+        yield {
+          type: "assistant",
+          session_id: "sess-sub-stuck",
+          message: { content: [{ type: "text", text: "delegating" }] },
+        };
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-sub-stuck",
+          tasks: [{ task_id: "sub1", task_type: "subagent", description: "investigate" }],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "waiting on the subagent",
+          terminal_reason: "background_requested",
+          session_id: "sess-sub-stuck",
+        };
+        await new Promise(() => {}); // never drains, never wakes, never closes
+      })() as AsyncGenerator<unknown> & { interrupt: () => Promise<void> };
+      it.interrupt = async () => {
+        interrupted = true;
+      };
+      return it;
+    }) as unknown as QueryFn;
+
+    // Normal stall large (must not be what fires); background ceiling short (40ms).
+    const engine = new ChatEngine(stuckSubagent, 60_000, undefined, 40);
+    const ended: string[] = [];
+    engine.onTurnEnd((sid) => ended.push(sid));
+    const got: UiEvent[] = [];
+    const id = await engine.start({ cwd: ".", firstText: "investigate" });
+    engine.subscribe(id, (ev) => got.push(ev));
+    expect(engine.activeSessions()).toContain(id);
+
+    try {
+      await vi.waitFor(() => expect(engine.activeSessions()).toHaveLength(0), {
+        timeout: 2_000,
+        interval: 5,
+      });
+      expect(ended).toEqual(["sess-sub-stuck"]);
+      expect(interrupted).toBe(true);
+      expect(got).toContainEqual({ kind: "result", ok: false, text: "stalled" });
+    } finally {
+      engine.shutdown();
+    }
+  });
+
+  it("forces the turn to end when the stall interrupt itself hangs", async () => {
+    // Gap B: if interrupt() never resolves, the old watchdog just rescheduled and waited
+    // again — pinning "generating" forever. It must force the turn to end anyway.
+    vi.useFakeTimers();
+    try {
+      const hangingInterrupt = ((_args: unknown) => {
+        const it = (async function* () {
+          yield { type: "system", subtype: "init", session_id: "sess-hang" };
+          yield {
+            type: "assistant",
+            session_id: "sess-hang",
+            message: { content: [{ type: "text", text: "answer" }] },
+          };
+          await new Promise(() => {}); // no result, never closes
+        })() as AsyncGenerator<unknown> & { interrupt: () => Promise<void> };
+        it.interrupt = () => new Promise<void>(() => {}); // interrupt never resolves
+        return it;
+      }) as unknown as QueryFn;
+
+      const engine = new ChatEngine(hangingInterrupt, 30); // 30ms watchdog
+      const ended: string[] = [];
+      engine.onTurnEnd((sid) => ended.push(sid));
+      const got: UiEvent[] = [];
+      const id = await engine.start({ cwd: ".", firstText: "go" });
+      engine.subscribe(id, (ev) => got.push(ev));
+      expect(engine.activeSessions()).toContain(id);
+
+      await vi.advanceTimersByTimeAsync(30); // watchdog fires → onStall → interrupt hangs
+      expect(engine.activeSessions()).toContain(id); // still active: interrupt not yet timed out
+      await vi.advanceTimersByTimeAsync(5_000); // the 5s interrupt timeout elapses
+      expect(engine.activeSessions()).toHaveLength(0); // forced to end regardless
+      expect(ended).toEqual(["sess-hang"]);
+      expect(got).toContainEqual({ kind: "result", ok: false, text: "stalled" });
+      engine.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

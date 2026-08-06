@@ -9,13 +9,19 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import { ClaudeAnalyzer } from "./chat/analyzer/claude.js";
 import { CodexAnalyzer } from "./chat/analyzer/codex.js";
-import { condenseUiContext } from "./chat/analyzer/contract.js";
+import { WorkerAnalyzerContext } from "./chat/analyzer/context-worker-client.js";
+import type { AnalyzerContextReader } from "./chat/analyzer/context.js";
+import { condenseUiContext, looksLikeDaemonPrompt } from "./chat/analyzer/contract.js";
+import { ProcessAnalyzer } from "./chat/analyzer/process.js";
+import { makeAntigravityExec } from "./chat/antigravity/exec.js";
+import { readAntigravityTranscript } from "./chat/antigravity/transcript.js";
 import { ClaudeSdkDriver, type QueryFn } from "./chat/claude/driver.js";
 import { claudeQueryForExecutable } from "./chat/claude/query.js";
 import { CodexAppServerClient } from "./chat/codex/app-server/client.js";
 import { CodexAppServerDriver } from "./chat/codex/app-server/driver.js";
 import { makeCodexExec } from "./chat/codex/exec.js";
-import { readCodexTranscript } from "./chat/codex/transcript.js";
+import { makeCopilotExec } from "./chat/copilot/exec.js";
+import { readCopilotTranscript } from "./chat/copilot/transcript.js";
 import { classifyCursorError } from "./chat/cursor/errors.js";
 import { makeCursorExec } from "./chat/cursor/exec.js";
 import { readCursorTranscript } from "./chat/cursor/transcript.js";
@@ -31,21 +37,27 @@ import type {
   SessionSpeed,
 } from "./chat/driver.js";
 import type { UiEvent } from "./chat/events.js";
+import type { TranscriptHistoryReader } from "./chat/history-cache.js";
+import { WorkerTranscriptHistory } from "./chat/history-worker-client.js";
 import { ProcessChatDriver } from "./chat/process/driver.js";
+import { classifyAntigravityError, classifyCopilotError } from "./chat/process/errors.js";
 import { ChatQueueStore, type QueuedChatTurn } from "./chat/queue.js";
 import { ChatDriverRegistry } from "./chat/registry.js";
-import { searchSessions } from "./chat/search.js";
-import { type TranscriptMsg, readClaudeTranscript } from "./chat/transcript.js";
+import type { SessionSearch } from "./chat/search-service.js";
+import { WorkerSessionSearch } from "./chat/search-worker-client.js";
+import type { TranscriptMsg } from "./chat/transcript.js";
 import { type AttendConfig, isLoopbackHost } from "./config.js";
-import { type AlignmentModel, buildAlignmentModel, scoreAlignment } from "./core/alignment.js";
+import type { AlignmentModelReader } from "./core/alignment-model.js";
+import { WorkerAlignmentModel } from "./core/alignment-model.js";
+import { type AlignmentModel, scoreAlignment } from "./core/alignment.js";
 import { CollaborationStore } from "./core/collaboration.js";
 import { type Analysis, AnalysisCache, type AnalysisState } from "./core/daemon/cache.js";
 import { OverrideStore } from "./core/daemon/overrides.js";
 import { DaemonRegistry } from "./core/daemon/registry.js";
 import { EngagementStore } from "./core/engagement.js";
 import { type LaunchAction, type LaunchVendor, launchSession, revealPath } from "./core/launch.js";
-import { discoverMemorySources, loadMemoryDocs } from "./core/memory.js";
 import type { ModelDefaults, ModelOption } from "./core/model-options.js";
+import { RuntimePerformanceMonitor } from "./core/performance.js";
 import {
   avoidanceEvidence,
   avoidanceEvidenceData,
@@ -84,37 +96,57 @@ import {
   VaultUiStateStore,
 } from "./core/ui-state.js";
 import {
+  capabilityUnavailable,
+  nativeCapability,
+  vendorCapabilities,
+} from "./core/vendor/capabilities.js";
+import {
   type ClaudeModelCatalogInspection,
   inspectClaudeModels,
 } from "./core/vendor/claude-models.js";
 import { inspectCodexDefaults } from "./core/vendor/codex-defaults.js";
 import {
   type CodexModelCacheInspection,
-  inspectCodexModelCache,
-  inspectCodexModels,
+  inspectCodexModelCacheAsync,
+  inspectCodexModelsAsync,
 } from "./core/vendor/codex-models.js";
 import {
   type CursorModelInspection,
-  inspectCursorModels,
+  inspectCursorModelsAsync,
   resolveCursorModelConfiguration,
 } from "./core/vendor/cursor-models.js";
 import {
   type VendorAvailability,
   type VendorId,
-  inspectVendorExecutables,
+  configuredVendorAvailability,
+  inspectVendorExecutablesAsync,
   isVendorId,
 } from "./core/vendor/detect.js";
-import { buildSources } from "./core/vendor/index.js";
-import { ScanCache } from "./core/vendor/scan-cache.js";
+import {
+  type ProcessCliModelInspection,
+  inspectAntigravityModels,
+  inspectCopilotModels,
+} from "./core/vendor/process-cli-models.js";
+import {
+  type SessionIndex,
+  type SessionIndexSnapshot,
+  WorkerSessionIndex,
+} from "./core/vendor/session-index.js";
 import { TranscriptPathIndex, type TranscriptPathWriter } from "./core/vendor/transcript-index.js";
+import { type WorkPromptIndex, WorkerWorkPromptIndex } from "./core/work-prompt-index.js";
 import { migrateWorkspaceState } from "./core/workspace-state-migration.js";
 
 const LIVE_SNAPSHOT_INTERVAL_MS = 60_000;
 const SCHEDULE_TICK_INTERVAL_MS = 15_000;
-const WORK_PROMPT_SYNC_LOCK_TIMEOUT_MS = 100;
-import { WorkEventStore, WorkEventStoreBusyError } from "./core/work-events.js";
+import { WorkEventStore } from "./core/work-events.js";
 import { buildWorkStats, trailingPromptActivity } from "./core/work-stats.js";
-import { type ConsoleView, type SessionView, renderConsole } from "./ui/console.js";
+import {
+  type ConsoleView,
+  type SessionView,
+  consoleAsset,
+  renderConsole,
+  renderConsoleShell,
+} from "./ui/console.js";
 
 const DAY_MS = 86_400_000;
 const EXTERNAL_ACTIVE_STALE_MS = 2 * 60 * 60 * 1000;
@@ -126,7 +158,13 @@ interface AppScheduleRuntime {
   runNow(id: string): Promise<ScheduledItem | null>;
 }
 
+interface AppBackgroundRuntime {
+  close(): void;
+}
+
 const appScheduleRuntimes = new WeakMap<Hono, AppScheduleRuntime>();
+const appPerformanceMonitors = new WeakMap<Hono, RuntimePerformanceMonitor>();
+const appBackgroundRuntimes = new WeakMap<Hono, AppBackgroundRuntime>();
 const IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const EXCEL_MEDIA_BY_EXT: ReadonlyMap<string, FileAttachmentMediaType> = new Map([
   ["xls", "application/vnd.ms-excel"],
@@ -138,17 +176,19 @@ const EXCEL_MEDIA_BY_EXT: ReadonlyMap<string, FileAttachmentMediaType> = new Map
   ["xlam", "application/vnd.ms-excel.addin.macroEnabled.12"],
 ] as Array<[string, FileAttachmentMediaType]>);
 
-let changelogCache: string | undefined;
+const changelogCache = fs.readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 function changelogMarkdown(): string {
-  if (changelogCache === undefined) {
-    changelogCache = fs.readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-  }
   return changelogCache;
 }
 const EXCEL_MEDIA_TYPES = new Set<string>(EXCEL_MEDIA_BY_EXT.values());
 const PROVIDER_FORK_TRANSCRIPT_LIMIT = 60;
 const PROVIDER_FORK_CONTEXT_LIMIT = 24_000;
 const PROVIDER_FORK_MSG_LIMIT = 2_000;
+const CHAT_HISTORY_LIMIT = 200;
+const CHAT_HISTORY_PAGE_SIZE = 60;
+const CHAT_HISTORY_PAGE_MAX = 80;
+const CHAT_HISTORY_AROUND_RADIUS = 20;
+const CHAT_HISTORY_AROUND_MAX_RADIUS = 40;
 const COMMENT_CONTEXT_MESSAGE_LIMIT = 16;
 const PIN_REFERENCE_LIMIT = 8;
 const PIN_REFERENCE_CONTEXT_LIMIT = 32_000;
@@ -163,14 +203,17 @@ const browserAssetFiles = {
     "dist/browser/pako.umd.min.js",
   ),
 } as const;
-const browserAssetCache = new Map<string, string>();
+const browserAssetCache = new Map<string, Promise<string>>();
 
-function browserAsset(name: keyof typeof browserAssetFiles): string {
+function browserAsset(name: keyof typeof browserAssetFiles): Promise<string> {
   const cached = browserAssetCache.get(name);
   if (cached !== undefined) return cached;
-  const contents = fs.readFileSync(browserAssetFiles[name], "utf8");
-  browserAssetCache.set(name, contents);
-  return contents;
+  const load = fs.promises.readFile(browserAssetFiles[name], "utf8").catch((error) => {
+    if (browserAssetCache.get(name) === load) browserAssetCache.delete(name);
+    throw error;
+  });
+  browserAssetCache.set(name, load);
+  return load;
 }
 
 interface E2eeBox {
@@ -284,20 +327,24 @@ function flattenCombinedScopeTags(tags: TagStore, scopeRoots: string[], scopeId:
   if (combinedTags.length) tags.setSessionTags(combinedKey, []);
 }
 
-function readSessionTranscript(s: RawSession | null): TranscriptMsg[] {
-  if (!s?.path || !s.path.endsWith(".jsonl") || !fs.existsSync(s.path)) return [];
-  const read = transcriptReader(s.vendor);
-  return read(s.path, PROVIDER_FORK_TRANSCRIPT_LIMIT);
-}
-
-function transcriptReader(vendor: string | undefined) {
-  if (vendor === "codex") return readCodexTranscript;
-  if (vendor === "cursor") return readCursorTranscript;
-  return readClaudeTranscript;
-}
-
 function chatVendor(value: string | undefined): VendorId {
   return isVendorId(value) ? value : "claude";
+}
+
+function vendorSupportsGoal(vendor: string): boolean {
+  return isVendorId(vendor) && nativeCapability(vendor, "goal");
+}
+
+function unsupportedGoalMessage(vendor: string): string {
+  return isVendorId(vendor)
+    ? capabilityUnavailable(vendor, "goal").error
+    : `${vendor} does not support Goal`;
+}
+
+function unsupportedGoalPayload(vendor: string) {
+  return isVendorId(vendor)
+    ? capabilityUnavailable(vendor, "goal")
+    : { ok: false as const, error: unsupportedGoalMessage(vendor) };
 }
 
 function oneLine(text: string): string {
@@ -328,13 +375,21 @@ function transcriptContext(msgs: TranscriptMsg[]): string {
   return out.trim();
 }
 
-function providerForkPrompt(
+async function providerForkPrompt(
+  history: TranscriptHistoryReader,
   parent: RawSession | null,
   text: string,
   attachments: ChatAttachment[],
-): string {
+): Promise<string> {
   const parentVendor = parent?.vendor ?? "another provider";
-  return contextForkPrompt(parentVendor, readSessionTranscript(parent), text, attachments);
+  const messages = parent?.path
+    ? ((
+        await history
+          .read(parent.path, parent.vendor, PROVIDER_FORK_TRANSCRIPT_LIMIT)
+          .catch(() => null)
+      )?.messages ?? [])
+    : [];
+  return contextForkPrompt(parentVendor, messages, text, attachments);
 }
 
 function contextForkPrompt(
@@ -475,6 +530,30 @@ function visibleCommentTranscript(messages: TranscriptMsg[]): TranscriptMsg[] {
   });
 }
 
+interface HistoryAddressable {
+  historyId?: string;
+  tools?: Array<{ historyId?: string }>;
+}
+
+function targetedHistoryWindow<T extends HistoryAddressable>(
+  messages: T[],
+  targetId: string,
+  requestedRadius: string | undefined,
+): { messages: T[]; center: number; start: number; end: number } | null {
+  const center = messages.findIndex(
+    (message) =>
+      message.historyId === targetId || message.tools?.some((tool) => tool.historyId === targetId),
+  );
+  if (center < 0) return null;
+  const parsedRadius = Number(requestedRadius);
+  const radius = Number.isFinite(parsedRadius)
+    ? Math.max(1, Math.min(CHAT_HISTORY_AROUND_MAX_RADIUS, Math.floor(parsedRadius)))
+    : CHAT_HISTORY_AROUND_RADIUS;
+  const start = Math.max(0, center - radius);
+  const end = Math.min(messages.length, center + radius + 1);
+  return { messages: messages.slice(start, end), center, start, end };
+}
+
 function parseForkContextMessages(raw: unknown): TranscriptMsg[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -529,9 +608,20 @@ function scopeTagList(
   return tags.list().filter((tag) => wanted.has(tag));
 }
 
-function consolePageTitle(scopeRoots: string[]): string {
+function redactPageTitleLabel(label: string, passphrase?: string | null): string {
+  const phrase = passphrase?.trim() ?? "";
+  return phrase && label.includes(phrase) ? label.replaceAll(phrase, "protected") : label;
+}
+
+function sessionTabTitle(cwd: string | null | undefined, passphrase?: string | null): string {
+  if (!cwd) return "";
+  return redactPageTitleLabel(path.basename(cwd) || cwd, passphrase);
+}
+
+function consolePageTitle(scopeRoots: string[], passphrase?: string | null): string {
   const roots = scopeRoots.length ? scopeRoots : [process.cwd()];
-  const first = roots[0] ? path.basename(roots[0]) || roots[0] : "console";
+  const rawFirst = roots[0] ? path.basename(roots[0]) || roots[0] : "console";
+  const first = redactPageTitleLabel(rawFirst, passphrase);
   return roots.length === 1 ? `Attend — ${first}` : `Attend — ${first} +${roots.length - 1}`;
 }
 
@@ -651,15 +741,6 @@ export function withinScope(cwd: string | null, roots: string[]): boolean {
   return roots.some((root) => pathWithinScope(cwd, root));
 }
 
-function canonicalFile(file: string): string {
-  const resolved = path.resolve(file);
-  try {
-    return fs.realpathSync.native(resolved);
-  } catch {
-    return resolved;
-  }
-}
-
 interface SessionStatusAccess {
   get(sessionId: string, cwd: string | null): SessionStatusRecord | null;
   set(
@@ -687,21 +768,6 @@ function createSessionStatusAccess(globalFile: string, databaseFile: string): Se
   };
 }
 
-/** Memoize an expensive scan so browser refreshes don't re-read every JSONL. */
-function ttlCache<T>(ttlMs: number, fn: () => T): () => T {
-  let stamp = 0;
-  let value: T;
-  let primed = false;
-  return () => {
-    const now = Date.now();
-    if (primed && now - stamp < ttlMs) return value;
-    value = fn();
-    stamp = now;
-    primed = true;
-    return value;
-  };
-}
-
 /** Injectable so tests can assert wiring without spawning terminals or hitting the SDK. */
 export interface AppDeps {
   launcher: (
@@ -724,28 +790,56 @@ export interface AppDeps {
   codex?: ChatDriver;
   /** Cursor chat backend (driven via `cursor-agent --print`). */
   cursor?: ChatDriver;
+  /** Antigravity CLI chat backend (driven via headless stream-json). */
+  antigravity?: ChatDriver;
+  /** GitHub Copilot CLI chat backend (driven via prompt-mode JSONL). */
+  copilot?: ChatDriver;
   /** Effective Codex model catalog. Injectable so tests never spawn the CLI. */
-  codexModelCatalog?: () => CodexModelCacheInspection;
+  codexModelCatalog?: () => CodexModelCacheInspection | Promise<CodexModelCacheInspection>;
   /** Effective Claude model catalog. Injectable so tests never spawn the SDK subprocess. */
   claudeModelCatalog?: () => Promise<ClaudeModelCatalogInspection>;
   /** Effective Codex model/effort defaults from the CLI config engine. */
   codexModelDefaults?: () => Promise<ModelDefaults>;
   /** Cursor account catalog intersected with Cursor Desktop's enabled models. */
-  cursorModelCatalog?: () => CursorModelInspection;
+  cursorModelCatalog?: () => CursorModelInspection | Promise<CursorModelInspection>;
+  /** Model catalogs/defaults owned by the standalone Antigravity and Copilot CLIs. */
+  antigravityModelCatalog?: () => ProcessCliModelInspection | Promise<ProcessCliModelInspection>;
+  copilotModelCatalog?: () => ProcessCliModelInspection | Promise<ProcessCliModelInspection>;
   /** Startup snapshot of the exact configured local vendor CLIs. */
   vendorAvailability?: VendorAvailability[];
+  /** Non-blocking version/help inspection that refines the startup snapshot. */
+  vendorAvailabilityCatalog?: () => Promise<VendorAvailability[]>;
   /** Scanner-owned transcript lookup shared with analyzers. */
   transcriptIndex?: TranscriptPathWriter;
+  /** File-versioned bounded history cache shared by Chat and CommentPanel. */
+  transcriptHistory?: TranscriptHistoryReader;
+  /** Dedicated full-transcript analyzer context worker. */
+  analyzerContext?: AnalyzerContextReader & { close?(): void };
+  /** Background full-transcript search service. */
+  sessionSearch?: SessionSearch;
+  /** Worker-owned memory TF-IDF model. */
+  alignmentModel?: AlignmentModelReader;
+  /** Worker-owned transcript activity → work-event materializer. */
+  workPromptIndex?: WorkPromptIndex;
+  /** Background session catalog. Tests can inject a deterministic in-memory
+   *  implementation; every runtime fallback is worker-backed. */
+  sessionIndex?: SessionIndex;
+  /** Compatibility switch for self-contained HTML fixtures. Runtime callers
+   *  use the compact shell + snapshot transport unless explicitly disabled. */
+  compactTransport?: boolean;
   orchestrator: DaemonOrchestrator;
 }
 
 function createDefaultAppDeps(config: AttendConfig): AppDeps {
-  const { claudeBin, codexBin, cursorBin } = config;
-  const vendorAvailability = inspectVendorExecutables({
+  const { claudeBin, codexBin, cursorBin, antigravityBin, copilotBin } = config;
+  const executables = {
     claude: claudeBin,
     codex: codexBin,
     cursor: cursorBin,
-  });
+    antigravity: antigravityBin,
+    copilot: copilotBin,
+  };
+  const vendorAvailability = configuredVendorAvailability(executables);
   const available = (vendor: VendorId): boolean =>
     vendorAvailability.find((status) => status.vendor === vendor)?.available === true;
   const claudeUnavailable =
@@ -757,8 +851,20 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
   const claudeQuery =
     available("claude") && claudeBin ? claudeQueryForExecutable(claudeBin) : unavailableClaudeQuery;
   const transcriptIndex = new TranscriptPathIndex();
+  const sessionIndex = new WorkerSessionIndex(config, transcriptIndex);
+  const transcriptHistory = new WorkerTranscriptHistory();
+  const analyzerContext = new WorkerAnalyzerContext();
   return {
     launcher: launchSession,
+    sessionIndex,
+    transcriptHistory,
+    analyzerContext,
+    sessionSearch: new WorkerSessionSearch(config.sessionIndex),
+    alignmentModel: new WorkerAlignmentModel({
+      sources: config.memorySources,
+      claudeProjects: config.claudeProjects,
+    }),
+    workPromptIndex: new WorkerWorkPromptIndex(config.workEvents),
     engine: new ClaudeSdkDriver(claudeQuery),
     codex: new CodexAppServerDriver(new CodexAppServerClient(codexBin ?? "codex")),
     cursor: new ProcessChatDriver(
@@ -768,15 +874,35 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
       "cursor",
       classifyCursorError,
     ),
+    antigravity: new ProcessChatDriver(
+      makeAntigravityExec(antigravityBin ?? "agy", config.antigravityCapturedSessions),
+      "danger-full-access",
+      () => null,
+      "antigravity",
+      classifyAntigravityError,
+    ),
+    copilot: new ProcessChatDriver(
+      makeCopilotExec(copilotBin ?? "copilot", config.copilotCapturedSessions),
+      "danger-full-access",
+      () => null,
+      "copilot",
+      classifyCopilotError,
+    ),
     ...(available("codex")
       ? {
-          codexModelCatalog: () => inspectCodexModels(codexBin, config.codexModelsCache),
+          codexModelCatalog: () => inspectCodexModelsAsync(codexBin, config.codexModelsCache),
           codexModelDefaults: () =>
             inspectCodexDefaults(codexBin, config.scopeRoots[0] ?? process.cwd()),
         }
       : {}),
     ...(available("cursor")
-      ? { cursorModelCatalog: () => inspectCursorModels(cursorBin, config.cursorStateDb) }
+      ? { cursorModelCatalog: () => inspectCursorModelsAsync(cursorBin, config.cursorStateDb) }
+      : {}),
+    ...(available("antigravity") && antigravityBin
+      ? { antigravityModelCatalog: () => inspectAntigravityModels(antigravityBin) }
+      : {}),
+    ...(available("copilot") && copilotBin
+      ? { copilotModelCatalog: () => inspectCopilotModels(copilotBin) }
       : {}),
     ...(available("claude") && claudeBin
       ? {
@@ -790,16 +916,67 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
         }
       : {}),
     vendorAvailability,
+    vendorAvailabilityCatalog: () => inspectVendorExecutablesAsync(executables),
     transcriptIndex,
     orchestrator: new DaemonOrchestrator(
       new DaemonRegistry(config.daemonRegistry, config.workEvents),
       new AnalysisCache(config.analysisCache, config.workEvents),
       [
         ...(available("claude")
-          ? [new ClaudeAnalyzer(config.claudeProjects, claudeQuery, transcriptIndex)]
+          ? [
+              new ClaudeAnalyzer(
+                config.claudeProjects,
+                claudeQuery,
+                transcriptIndex,
+                analyzerContext,
+              ),
+            ]
           : []),
         ...(available("codex") && codexBin
-          ? [new CodexAnalyzer(config.codexSessions, makeCodexExec(codexBin), transcriptIndex)]
+          ? [
+              new CodexAnalyzer(
+                config.codexSessions,
+                makeCodexExec(codexBin),
+                transcriptIndex,
+                analyzerContext,
+              ),
+            ]
+          : []),
+        ...(available("cursor") && cursorBin
+          ? [
+              new ProcessAnalyzer(
+                "cursor",
+                config.cursorSessions,
+                makeCursorExec(cursorBin, config.cursorSessions),
+                readCursorTranscript,
+                transcriptIndex,
+                analyzerContext,
+              ),
+            ]
+          : []),
+        ...(available("antigravity") && antigravityBin
+          ? [
+              new ProcessAnalyzer(
+                "antigravity",
+                config.antigravityCapturedSessions,
+                makeAntigravityExec(antigravityBin, config.antigravityCapturedSessions),
+                readAntigravityTranscript,
+                transcriptIndex,
+                analyzerContext,
+              ),
+            ]
+          : []),
+        ...(available("copilot") && copilotBin
+          ? [
+              new ProcessAnalyzer(
+                "copilot",
+                config.copilotCapturedSessions,
+                makeCopilotExec(copilotBin, config.copilotCapturedSessions),
+                readCopilotTranscript,
+                transcriptIndex,
+                analyzerContext,
+              ),
+            ]
           : []),
       ],
       new CollaborationStore(config.workEvents),
@@ -832,7 +1009,6 @@ function knownDirs(
     if (prev === undefined || ts > prev) lastTouch.set(d, ts);
   }
   return [...lastTouch.entries()]
-    .filter(([d]) => fs.existsSync(d))
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([d]) => d);
 }
@@ -856,12 +1032,8 @@ export function defaultNewSessionDir(
  * primary filter, but historical/partial state can leave a daemon transcript
  * unregistered; hide those too by their standing seed / follow-up prompt shape. */
 function isLikelyDaemonSession(s: RawSession): boolean {
-  const title = String(s.title ?? "");
-  const lastPrompt = String(s.lastPrompt ?? "");
-  if (title.startsWith("You are the *attend daemon* for a single coding session.")) return true;
-  if (lastPrompt.startsWith("The session advanced. Session context:")) return true;
-  if (lastPrompt.includes("Reply with the JSON object only.")) return true;
-  return false;
+  // Markers live with the prompts (analyzer/contract) so this can't drift again.
+  return looksLikeDaemonPrompt(String(s.title ?? ""), String(s.lastPrompt ?? ""));
 }
 
 /**
@@ -871,7 +1043,16 @@ function isLikelyDaemonSession(s: RawSession): boolean {
  * otherwise we return the first candidate so callers can surface a clear
  * "directory not found" on the intended absolute path.
  */
-function resolveProjectDir(input: string, scopeRoots: string[]): string | null {
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.promises.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveProjectDir(input: string, scopeRoots: string[]): Promise<string | null> {
   const raw = input.trim();
   if (!raw) return null;
   const roots = scopeRoots.length > 0 ? scopeRoots : [process.cwd()];
@@ -880,7 +1061,7 @@ function resolveProjectDir(input: string, scopeRoots: string[]): string | null {
   else if (path.isAbsolute(raw) || /^[A-Za-z]:[\\/]/.test(raw)) candidates.push(path.resolve(raw));
   else for (const root of roots) candidates.push(path.resolve(root, raw));
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (await pathExists(candidate)) return candidate;
   }
   return candidates[0] ?? null;
 }
@@ -906,14 +1087,24 @@ function resolveDirCandidates(input: string, scopeRoots: string[]): string[] {
   return roots.map((root) => path.resolve(root, raw));
 }
 
-function completionSearch(
+async function isDirectoryAsync(target: string): Promise<boolean> {
+  try {
+    return (await fs.promises.stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function completionSearchAsync(
   input: string,
   scopeRoots: string[],
-): { bases: string[]; prefix: string } {
+): Promise<{ bases: string[]; prefix: string }> {
   const raw = input.trim();
   if (!raw) return { bases: resolveDirCandidates("", scopeRoots), prefix: "" };
   if (raw === "~") return { bases: [os.homedir()], prefix: "" };
-  const exactDirectories = resolveDirCandidates(raw, scopeRoots).filter(isDirectory);
+  const candidates = resolveDirCandidates(raw, scopeRoots);
+  const exactChecks = await Promise.all(candidates.map(isDirectoryAsync));
+  const exactDirectories = candidates.filter((_, index) => exactChecks[index]);
   if (exactDirectories.length > 0) return { bases: exactDirectories, prefix: "" };
   const trailing = /[\\/]$/.test(raw);
   const splitAt = Math.max(raw.lastIndexOf("/"), raw.lastIndexOf("\\"));
@@ -922,33 +1113,23 @@ function completionSearch(
   return { bases: resolveDirCandidates(baseInput, scopeRoots), prefix };
 }
 
-function isDirectory(target: string): boolean {
-  try {
-    return fs.statSync(target).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function direntIsDirectory(base: string, entry: fs.Dirent): boolean {
-  if (entry.isDirectory()) return true;
-  if (!entry.isSymbolicLink()) return false;
-  return isDirectory(path.join(base, entry.name));
-}
-
-export function suggestProjectDirs(
+export async function suggestProjectDirs(
   input: string,
   scopeRoots: string[],
   recentDirs: string[],
   limit = 32,
-): DirSuggestion[] {
+): Promise<DirSuggestion[]> {
   const query = input.trim().toLowerCase();
   const out: DirSuggestion[] = [];
   const seen = new Set<string>();
-  const add = (dir: string, source: DirSuggestionSource): boolean => {
+  const add = async (
+    dir: string,
+    source: DirSuggestionSource,
+    verified = false,
+  ): Promise<boolean> => {
     const resolved = path.resolve(dir);
     const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
-    if (seen.has(key) || !isDirectory(resolved)) return false;
+    if (seen.has(key) || (!verified && !(await isDirectoryAsync(resolved)))) return false;
     seen.add(key);
     out.push({ path: resolved, source });
     return true;
@@ -961,23 +1142,32 @@ export function suggestProjectDirs(
       !query ||
       dir.toLowerCase().includes(query) ||
       path.basename(dir).toLowerCase().includes(query);
-    if (matchesQuery && add(dir, "recent")) recentCount++;
+    if (matchesQuery && (await add(dir, "recent"))) recentCount += 1;
   }
 
-  const { bases, prefix } = completionSearch(input, scopeRoots);
+  const { bases, prefix } = await completionSearchAsync(input, scopeRoots);
   const want = prefix.toLowerCase();
-  if (!input.trim()) for (const base of bases) add(base, "root");
+  if (!input.trim()) {
+    for (const base of bases) await add(base, "root");
+  }
 
   for (const base of bases) {
-    if (!isDirectory(base)) continue;
+    if (!(await isDirectoryAsync(base))) continue;
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(base, { withFileTypes: true });
+      entries = await fs.promises.readdir(base, { withFileTypes: true });
     } catch {
       continue;
     }
+    const directoryChecks = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.isDirectory()) return true;
+        if (!entry.isSymbolicLink()) return false;
+        return isDirectoryAsync(path.join(base, entry.name));
+      }),
+    );
     const matches = entries
-      .filter((entry) => direntIsDirectory(base, entry))
+      .filter((_, index) => directoryChecks[index])
       .filter((entry) => {
         if (!want) return true;
         const name = entry.name.toLowerCase();
@@ -989,11 +1179,15 @@ export function suggestProjectDirs(
         const ar = want && !an.startsWith(want) ? 1 : 0;
         const br = want && !bn.startsWith(want) ? 1 : 0;
         if (ar !== br) return ar - br;
-        if (a.name.startsWith(".") !== b.name.startsWith("."))
+        if (a.name.startsWith(".") !== b.name.startsWith(".")) {
           return a.name.startsWith(".") ? 1 : -1;
+        }
         return a.name.localeCompare(b.name);
       });
-    for (const entry of matches) add(path.join(base, entry.name), "folder");
+    for (const entry of matches) {
+      await add(path.join(base, entry.name), "folder", true);
+      if (out.length >= limit) break;
+    }
     if (out.length >= limit) break;
   }
 
@@ -1073,6 +1267,7 @@ function toSessionViews(
   forkParents?: Record<string, unknown>,
   sessionRunConfigs?: Record<string, UiSessionRunConfig>,
   uiContextFor?: (sessionId: string) => string,
+  titlePassphrase?: string | null,
 ): SessionView[] {
   return [...sessions]
     .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))
@@ -1125,6 +1320,7 @@ function toSessionViews(
         customTitle: customSessionTitle(s.sessionId, sessionTitles),
         lastPrompt: s.lastPrompt ?? null,
         cwd: s.cwd,
+        tabTitle: sessionTabTitle(s.cwd, titlePassphrase),
         file: s.path,
         project: s.cwd ? path.basename(s.cwd) : "—",
         ageDays: s.lastTs !== null ? Math.floor((now - s.lastTs) / DAY_MS) : null,
@@ -1158,6 +1354,51 @@ function toSessionViews(
         ...(runConfig.speed ? { speed: runConfig.speed } : {}),
       };
     });
+}
+
+async function toSessionViewsCooperatively(
+  sessions: RawSession[],
+  model: AlignmentModel | null,
+  now: number,
+  orchestrator: DaemonOrchestrator,
+  overrides: OverrideStore,
+  tags: TagStore,
+  engagement: EngagementStore,
+  sessionStatus: SessionStatusAccess,
+  stoppedExternalActiveAt: Map<string, number>,
+  sessionTitles?: Record<string, unknown>,
+  forkParents?: Record<string, unknown>,
+  sessionRunConfigs?: Record<string, UiSessionRunConfig>,
+  uiContextFor?: (sessionId: string) => string,
+  titlePassphrase?: string | null,
+): Promise<SessionView[]> {
+  const sorted = [...sessions].sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0));
+  const views: SessionView[] = [];
+  const batchSize = 8;
+  for (let offset = 0; offset < sorted.length; offset += batchSize) {
+    views.push(
+      ...toSessionViews(
+        sorted.slice(offset, offset + batchSize),
+        model,
+        now,
+        orchestrator,
+        overrides,
+        tags,
+        engagement,
+        sessionStatus,
+        stoppedExternalActiveAt,
+        sessionTitles,
+        forkParents,
+        sessionRunConfigs,
+        uiContextFor,
+        titlePassphrase,
+      ),
+    );
+    if (offset + batchSize < sorted.length) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+  return views;
 }
 
 function isExternallyActive(
@@ -1226,6 +1467,16 @@ export function createApp(
 ): Hono {
   const e2ee = createE2ee(config.e2eePassphrase);
   const transcriptIndex = deps.transcriptIndex ?? new TranscriptPathIndex();
+  const transcriptHistory = deps.transcriptHistory ?? new WorkerTranscriptHistory();
+  const sessionSearch: SessionSearch =
+    deps.sessionSearch ?? new WorkerSessionSearch(config.sessionIndex);
+  const alignmentModel =
+    deps.alignmentModel ??
+    new WorkerAlignmentModel({
+      sources: config.memorySources,
+      claudeProjects: config.claudeProjects,
+    });
+  const workPromptIndex = deps.workPromptIndex ?? new WorkerWorkPromptIndex(config.workEvents);
   const engine = deps.engine;
   // Codex chat backend. Defaulted here (not in the deps literal) so callers that
   // pass a partial `deps` — the tests — still get a working Codex route.
@@ -1240,16 +1491,61 @@ export function createApp(
       "cursor",
       classifyCursorError,
     );
-  const drivers = new ChatDriverRegistry([engine, codex, cursor], "claude");
+  const antigravity =
+    deps.antigravity ??
+    new ProcessChatDriver(
+      makeAntigravityExec(config.antigravityBin ?? "agy", config.antigravityCapturedSessions),
+      "danger-full-access",
+      () => null,
+      "antigravity",
+      classifyAntigravityError,
+    );
+  const copilot =
+    deps.copilot ??
+    new ProcessChatDriver(
+      makeCopilotExec(config.copilotBin ?? "copilot", config.copilotCapturedSessions),
+      "danger-full-access",
+      () => null,
+      "copilot",
+      classifyCopilotError,
+    );
+  const drivers = new ChatDriverRegistry([engine, codex, cursor, antigravity, copilot], "claude");
   const configuredVendorAvailability = new Map(
     (deps.vendorAvailability ?? []).map((status) => [status.vendor, status]),
   );
   // Injected drivers are explicit test/embedding integrations and therefore
   // available unless the caller supplies a status snapshot. Production always
   // receives the startup inspection from createDefaultAppDeps().
-  const vendorAvailability: VendorAvailability[] = (["claude", "codex", "cursor"] as const).map(
-    (vendor) => configuredVendorAvailability.get(vendor) ?? { vendor, available: true, chat: true },
+  let vendorAvailability: VendorAvailability[] = (
+    ["claude", "codex", "cursor", "antigravity", "copilot"] as const
+  ).map(
+    (vendor) =>
+      configuredVendorAvailability.get(vendor) ?? {
+        vendor,
+        available: true,
+        chat: true,
+        capabilities: vendorCapabilities(vendor),
+      },
   );
+  let vendorAvailabilityRefresh: Promise<void> | null = null;
+  const refreshVendorAvailability = (): Promise<void> => {
+    if (!deps.vendorAvailabilityCatalog) return Promise.resolve();
+    if (vendorAvailabilityRefresh) return vendorAvailabilityRefresh;
+    vendorAvailabilityRefresh = deps
+      .vendorAvailabilityCatalog()
+      .then((next) => {
+        if (next.length) vendorAvailability = next;
+      })
+      .catch(() => {
+        // Keep the configured-path snapshot. A metadata probe failure must not
+        // remove a working chat adapter or block server startup.
+      })
+      .finally(() => {
+        vendorAvailabilityRefresh = null;
+      });
+    return vendorAvailabilityRefresh;
+  };
+  void refreshVendorAvailability();
   const vendorStatus = (vendor: string | undefined): VendorAvailability => {
     const normalized = chatVendor(vendor);
     return (
@@ -1257,6 +1553,7 @@ export function createApp(
         vendor: normalized,
         available: false,
         chat: true,
+        capabilities: vendorCapabilities(normalized),
         issue: "not_installed",
         message: `${normalized} CLI is unavailable. Install it, then restart Attend.`,
       }
@@ -1376,11 +1673,15 @@ export function createApp(
   const pendingCommentIds = new Map<string, { parentSessionId: string; vendor: string }>();
   const commentThreads = (): Record<string, CommentThreadState> =>
     uiState.get().commentThreads ?? {};
+  // Assigned after the unified live bus is constructed. Thread mutations happen
+  // earlier in this closure, so keep the persistence helper transport-agnostic.
+  let notifyCommentIndex: (() => void) | null = null;
   const commentByProviderId = (sessionId: string): CommentThreadState | null =>
     Object.values(commentThreads()).find((thread) => thread.providerSessionId === sessionId) ??
     null;
   const saveCommentThread = (thread: CommentThreadState): void => {
     uiState.patch({ commentThreads: { [thread.id]: thread } });
+    notifyCommentIndex?.();
   };
   const goalMirror = (goal: SessionGoal, vendor: "claude" | "codex"): UiSessionGoal => ({
     objective: goal.objective,
@@ -1435,7 +1736,9 @@ export function createApp(
     const payload = { ...item.payload } as SchedulePayload & {
       referenceContext?: string;
       contextMessages?: unknown[];
+      tabTitle?: string;
     };
+    payload.tabTitle = sessionTabTitle(payload.cwd, config.e2eePassphrase);
     payload.referenceContext = undefined;
     // A pending fork card needs its frozen visible prefix in order to look like
     // the branch it will become. Comment context remains implementation-only.
@@ -1455,25 +1758,70 @@ export function createApp(
     const previous = stoppedExternalActiveAt.get(event.sessionId) ?? 0;
     if (event.at > previous) stoppedExternalActiveAt.set(event.sessionId, event.at);
   }
-  // Sources are rebuilt each scan (so config paths stay late-bound) but share
-  // persistent mtime parse caches: the short TTL re-lists + stats (cheap) and only
-  // re-parses transcripts whose mtime/size changed. This is what keeps the
-  // periodic scan from re-parsing the whole ~GB of session JSONL every tick.
-  const sourceCaches = {
-    claude: new ScanCache(),
-    codex: new ScanCache(),
-    cursor: new ScanCache(),
-    cursorCaptured: new ScanCache(),
+  const backgroundSessionIndex =
+    deps.sessionIndex ?? new WorkerSessionIndex(config, transcriptIndex);
+  const compactTransport = deps.compactTransport !== false;
+  const refreshSessionSnapshot = (): RawSession[] => {
+    backgroundSessionIndex.requestRefresh("compatibility lookup");
+    applyBackgroundSessionSnapshot(backgroundSessionIndex.snapshot());
+    return sessionsSnapshot;
   };
-  const scanSessions = (): RawSession[] =>
-    buildSources(config, sourceCaches, transcriptIndex).flatMap((s) => s.scan());
-  const getSessions = ttlCache(5_000, scanSessions);
-  const getModel = ttlCache(60_000, (): AlignmentModel => {
-    const sources = config.memorySources.length
-      ? config.memorySources
-      : discoverMemorySources(config.claudeProjects);
-    return buildAlignmentModel(loadMemoryDocs(sources));
+  const initialBackgroundSnapshot = backgroundSessionIndex.snapshot();
+  let sessionIndexEpoch = initialBackgroundSnapshot.epoch;
+  let sessionsSnapshot: RawSession[] = initialBackgroundSnapshot.sessions;
+  let sessionsScannedAt = initialBackgroundSnapshot.scannedAt;
+  let sessionsRevision = initialBackgroundSnapshot.revision;
+  let sessionsPrimed = !initialBackgroundSnapshot.pending;
+  let notifySessionIndex: (() => void) | null = null;
+  let notifyAlignmentModel: (() => void) | null = null;
+  let notifyWorkPromptIndex: (() => void) | null = null;
+  const applyBackgroundSessionSnapshot = (snapshot: SessionIndexSnapshot): void => {
+    const changed =
+      snapshot.epoch !== sessionIndexEpoch ||
+      snapshot.revision !== sessionsRevision ||
+      snapshot.pending === sessionsPrimed;
+    sessionIndexEpoch = snapshot.epoch;
+    sessionsRevision = snapshot.revision;
+    sessionsScannedAt = snapshot.scannedAt;
+    sessionsSnapshot = snapshot.sessions;
+    sessionsPrimed = !snapshot.pending;
+    if (changed) {
+      sessionSearch.sync?.(snapshot.sessions);
+      workPromptIndex.sync(snapshot.sessions);
+      try {
+        notifySessionIndex?.();
+      } catch {
+        // Subscriber failures cannot invalidate an already-published index.
+      }
+    }
+  };
+  const unsubscribeSessionIndex = backgroundSessionIndex.subscribe(applyBackgroundSessionSnapshot);
+  const unsubscribeAlignmentModel = alignmentModel.subscribe(() => notifyAlignmentModel?.());
+  const unsubscribeWorkPromptIndex = workPromptIndex.subscribe(() => notifyWorkPromptIndex?.());
+  if (!initialBackgroundSnapshot.pending) {
+    sessionSearch.sync?.(initialBackgroundSnapshot.sessions);
+    workPromptIndex.sync(initialBackgroundSnapshot.sessions);
+  }
+  const runSessionScan = (): void => {
+    backgroundSessionIndex.requestRefresh("server refresh");
+    applyBackgroundSessionSnapshot(backgroundSessionIndex.snapshot());
+  };
+  const scheduleSessionScan = (): void => {
+    backgroundSessionIndex.requestRefresh("server schedule");
+  };
+  orchestrator.onDaemonRegistered(() => {
+    // The daemon transcript may already be present in the cached catalog. A new
+    // authoritative revision removes it immediately instead of waiting for the
+    // five-second session TTL (or leaving it in a connected console indefinitely).
+    scheduleSessionScan();
   });
+  const getSessions = (): RawSession[] => {
+    applyBackgroundSessionSnapshot(backgroundSessionIndex.snapshot());
+    return sessionsSnapshot;
+  };
+  // True until the worker publishes its first durable snapshot.
+  const sessionsPending = (): boolean => !sessionsPrimed;
+  const getModel = (): AlignmentModel | null => alignmentModel.snapshot();
   // Fixed startup snapshot: installing or upgrading a CLI requires restarting
   // Attend, which keeps detection, execution paths, and UI guidance in sync.
   const getVendors = () => vendorAvailability;
@@ -1482,6 +1830,8 @@ export function createApp(
     claude: { model: "", effort: "", speed: "" },
     codex: { model: "", effort: "", speed: "" },
     cursor: { model: "", effort: "", speed: "" },
+    antigravity: { model: "", effort: "", speed: "" },
+    copilot: { model: "", effort: "", speed: "" },
   };
   let claudeModelsWarning: string | null = vendorStatus("claude").available
     ? "Discovering models from Claude…"
@@ -1534,22 +1884,19 @@ export function createApp(
   const claudeModelRefreshTimer = setInterval(() => void refreshClaudeModels(60_000), 60_000);
   claudeModelRefreshTimer.unref();
   const claudeModelOptions = () => claudeModelsSnapshot;
-  // Query the Codex-owned command surface at startup and after a short TTL. Keep
-  // the last complete snapshot if any source temporarily returns a strict subset.
-  const discoverCodexModels =
-    deps.codexModelCatalog ?? (() => inspectCodexModelCache(config.codexModelsCache));
-  const getCodexModels = deps.codexModelCatalog
-    ? ttlCache(60_000, discoverCodexModels)
-    : discoverCodexModels;
-  const initialCodexModels = getCodexModels();
-  let codexModelsSnapshot = initialCodexModels.models;
-  let codexModelsWarning = initialCodexModels.warning;
-  const codexModelOptions = () => {
-    const inspection = getCodexModels();
+  // Catalog refreshes are stale-while-revalidate. Production catalog functions
+  // use async child processes; request/SSE paths only read the snapshots.
+  const codexCatalog =
+    deps.codexModelCatalog ?? (() => inspectCodexModelCacheAsync(config.codexModelsCache));
+  let codexModelsSnapshot: ModelOption[] = [];
+  let codexModelsWarning: string | null = "Discovering models from Codex…";
+  let codexModelRefresh: Promise<void> | null = null;
+  let codexModelRefreshedAt = Number.NEGATIVE_INFINITY;
+  const applyCodexModels = (inspection: CodexModelCacheInspection): void => {
     const latest = inspection.models;
     if (!latest.length) {
       codexModelsWarning = inspection.warning;
-      return codexModelsSnapshot;
+      return;
     }
     const previousValues = new Set(codexModelsSnapshot.map((option) => option.value));
     const hasNewModel = latest.some((option) => !previousValues.has(option.value));
@@ -1568,27 +1915,144 @@ export function createApp(
       codexModelsSnapshot = latest;
       codexModelsWarning = null;
     }
-    return codexModelsSnapshot;
   };
-  const codexModelRefreshTimer = setInterval(codexModelOptions, 60_000);
+  const refreshCodexModels = (maxAgeMs = 60_000): Promise<void> => {
+    const catalog = codexCatalog;
+    if (codexModelRefresh)
+      return maxAgeMs === 0
+        ? codexModelRefresh.then(() => refreshCodexModels(0))
+        : codexModelRefresh;
+    const now = Date.now();
+    if (now - codexModelRefreshedAt < maxAgeMs) return Promise.resolve();
+    codexModelRefreshedAt = now;
+    try {
+      const result = catalog();
+      if (!result || typeof (result as Promise<CodexModelCacheInspection>).then !== "function") {
+        applyCodexModels(result as CodexModelCacheInspection);
+        return Promise.resolve();
+      }
+      codexModelRefresh = Promise.resolve(result)
+        .then(applyCodexModels)
+        .catch(() => {
+          codexModelsWarning = "Codex model discovery failed; Attend will use the CLI default.";
+        })
+        .finally(() => {
+          codexModelRefresh = null;
+        });
+      return codexModelRefresh;
+    } catch {
+      codexModelsWarning = "Codex model discovery failed; Attend will use the CLI default.";
+      return Promise.resolve();
+    }
+  };
+  const codexModelOptions = () => codexModelsSnapshot;
+  void refreshCodexModels(0);
+  const codexModelRefreshTimer = setInterval(() => void refreshCodexModels(), 60_000);
   codexModelRefreshTimer.unref();
-  const discoverCursorModels = deps.cursorModelCatalog;
-  const getCursorModels = discoverCursorModels ? ttlCache(60_000, discoverCursorModels) : null;
   let cursorModelsSnapshot: ModelOption[] = [];
-  let cursorModelsWarning: string | null = discoverCursorModels
+  let cursorModelsWarning: string | null = deps.cursorModelCatalog
     ? "Discovering models from Cursor…"
     : null;
-  const cursorModelOptions = () => {
-    if (!getCursorModels) return cursorModelsSnapshot;
-    const inspection = getCursorModels();
+  let cursorModelRefresh: Promise<void> | null = null;
+  let cursorModelRefreshedAt = Number.NEGATIVE_INFINITY;
+  const applyCursorModels = (inspection: CursorModelInspection): void => {
     if (inspection.models.length) cursorModelsSnapshot = inspection.models;
     modelDefaults.cursor = inspection.defaults;
     cursorModelsWarning = inspection.warning;
-    return cursorModelsSnapshot;
   };
-  cursorModelOptions();
-  const cursorModelRefreshTimer = setInterval(cursorModelOptions, 60_000);
+  const refreshCursorModels = (maxAgeMs = 60_000): Promise<void> => {
+    const catalog = deps.cursorModelCatalog;
+    if (!catalog) return Promise.resolve();
+    if (cursorModelRefresh)
+      return maxAgeMs === 0
+        ? cursorModelRefresh.then(() => refreshCursorModels(0))
+        : cursorModelRefresh;
+    const now = Date.now();
+    if (now - cursorModelRefreshedAt < maxAgeMs) return Promise.resolve();
+    cursorModelRefreshedAt = now;
+    try {
+      const result = catalog();
+      if (!result || typeof (result as Promise<CursorModelInspection>).then !== "function") {
+        applyCursorModels(result as CursorModelInspection);
+        return Promise.resolve();
+      }
+      cursorModelRefresh = Promise.resolve(result)
+        .then(applyCursorModels)
+        .catch(() => {
+          cursorModelsWarning =
+            "Cursor model discovery failed; Attend will use Cursor's default model.";
+        })
+        .finally(() => {
+          cursorModelRefresh = null;
+        });
+      return cursorModelRefresh;
+    } catch {
+      cursorModelsWarning =
+        "Cursor model discovery failed; Attend will use Cursor's default model.";
+      return Promise.resolve();
+    }
+  };
+  const cursorModelOptions = () => cursorModelsSnapshot;
+  void refreshCursorModels(0);
+  const cursorModelRefreshTimer = setInterval(() => void refreshCursorModels(), 60_000);
   cursorModelRefreshTimer.unref();
+  const processCatalogs = {
+    antigravity: deps.antigravityModelCatalog,
+    copilot: deps.copilotModelCatalog,
+  };
+  const processModelSnapshots: Record<"antigravity" | "copilot", ModelOption[]> = {
+    antigravity: [],
+    copilot: [],
+  };
+  const processModelWarnings: Record<"antigravity" | "copilot", string | null> = {
+    antigravity: processCatalogs.antigravity ? "Discovering models from Antigravity…" : null,
+    copilot: processCatalogs.copilot ? "Discovering models from Copilot…" : null,
+  };
+  const processModelRefreshes: Record<"antigravity" | "copilot", Promise<void> | null> = {
+    antigravity: null,
+    copilot: null,
+  };
+  const processModelRefreshedAt: Record<"antigravity" | "copilot", number> = {
+    antigravity: Number.NEGATIVE_INFINITY,
+    copilot: Number.NEGATIVE_INFINITY,
+  };
+  const refreshProcessModels = (
+    vendor: "antigravity" | "copilot",
+    maxAgeMs = 60_000,
+  ): Promise<void> => {
+    const catalog = processCatalogs[vendor];
+    if (!catalog) return Promise.resolve();
+    const active = processModelRefreshes[vendor];
+    if (active) return active;
+    const now = Date.now();
+    if (now - processModelRefreshedAt[vendor] < maxAgeMs) return Promise.resolve();
+    processModelRefreshedAt[vendor] = now;
+    const refresh = Promise.resolve()
+      .then(catalog)
+      .then((inspection) => {
+        if (inspection.models.length) processModelSnapshots[vendor] = inspection.models;
+        modelDefaults[vendor] = inspection.defaults;
+        processModelWarnings[vendor] = inspection.warning;
+      })
+      .catch(() => {
+        processModelWarnings[vendor] =
+          vendor === "antigravity"
+            ? "Antigravity model discovery failed; Attend will use the CLI default."
+            : "GitHub Copilot model discovery failed; Attend will use Auto.";
+      })
+      .finally(() => {
+        processModelRefreshes[vendor] = null;
+      });
+    processModelRefreshes[vendor] = refresh;
+    return refresh;
+  };
+  void refreshProcessModels("antigravity");
+  void refreshProcessModels("copilot");
+  const processModelRefreshTimer = setInterval(() => {
+    void refreshProcessModels("antigravity");
+    void refreshProcessModels("copilot");
+  }, 60_000);
+  processModelRefreshTimer.unref();
   const resolveRunOptions = (
     vendor: string,
     model: string | undefined,
@@ -1620,11 +2084,10 @@ export function createApp(
     );
   };
   const visibleSessions = (): RawSession[] => filterVisibleSessions(getSessions());
-  // Forking can happen immediately after a provider first materializes its
-  // transcript. The normal session list is intentionally cached for five
-  // seconds, but a cache miss here must not turn an unknown parent into a
-  // same-provider native fork. Retry against a fresh filesystem scan.
-  const freshVisibleSessions = (): RawSession[] => filterVisibleSessions(scanSessions());
+  // Forking can happen immediately after a provider materializes its transcript.
+  // Ask the worker for a refresh, but keep this lookup snapshot-only: it must
+  // never fall back to an inline provider-directory scan.
+  const freshVisibleSessions = (): RawSession[] => filterVisibleSessions(refreshSessionSnapshot());
   const rawSession = (vendor: string, sessionId: string): RawSession | null =>
     visibleSessions().find(
       (session) => session.vendor === vendor && session.sessionId === sessionId,
@@ -1633,6 +2096,75 @@ export function createApp(
       (session) => session.vendor === vendor && session.sessionId === sessionId,
     ) ??
     null;
+
+  /**
+   * Resolve a transcript from the scanner-owned path index. The normal path is
+   * O(1) and performs no provider-directory walk. On a compatibility miss we
+   * only request an asynchronous worker refresh and reuse its latest snapshot.
+   */
+  const indexedTranscriptPath = (
+    vendor: string,
+    sessionId: string,
+    refreshOnMiss = false,
+  ): string | null => {
+    if (!sessionId) return null;
+    const indexed = transcriptIndex.get(vendor, sessionId);
+    if (indexed) return indexed;
+    const cached = sessionsSnapshot
+      .filter((session) => session.vendor === vendor && session.sessionId === sessionId)
+      .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))[0];
+    if (cached?.path) {
+      transcriptIndex.set(vendor, sessionId, cached.path);
+      return cached.path;
+    }
+    if (!refreshOnMiss) return null;
+    const fresh = refreshSessionSnapshot()
+      .filter((session) => session.vendor === vendor && session.sessionId === sessionId)
+      .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))[0];
+    return fresh?.path ?? null;
+  };
+
+  const commentTranscriptPath = (
+    thread: CommentThreadState,
+    refreshOnMiss = false,
+  ): string | null => indexedTranscriptPath(thread.vendor, thread.providerSessionId, refreshOnMiss);
+
+  const commentHistoryVersion = (
+    thread: CommentThreadState,
+    resolvedPath?: string | null,
+    resolvedFileVersion?: string,
+    resolvedQueue?: ReturnType<typeof chatQueue.list>,
+  ): string => {
+    const file = resolvedPath === undefined ? commentTranscriptPath(thread) : resolvedPath;
+    let fileIdentity = "missing";
+    if (file && resolvedFileVersion) {
+      fileIdentity = `${file}\u0000${resolvedFileVersion}`;
+    } else if (file) {
+      const indexed = sessionsSnapshot.find(
+        (session) =>
+          session.path === file ||
+          (session.vendor === thread.vendor && session.sessionId === thread.providerSessionId),
+      );
+      fileIdentity = indexed
+        ? `${file}\u0000${[
+            indexed.lastTs,
+            indexed.lastAssistantTs,
+            indexed.chars,
+            indexed.prompts,
+            indexed.actions,
+          ].join(":")}`
+        : file;
+    }
+    const queued = resolvedQueue ?? chatQueue.list(thread.providerSessionId);
+    return stableHash(
+      JSON.stringify({
+        providerSessionId: thread.providerSessionId,
+        vendor: thread.vendor,
+        file: fileIdentity,
+        queued,
+      }),
+    );
+  };
 
   type ResolvedPin = {
     key: string;
@@ -1716,14 +2248,13 @@ export function createApp(
     }
     return output.trim();
   };
-  const resolvePinReferenceContext = (
+  const resolvePinReferenceContext = async (
     sessionId: string,
     references: ChatReference[],
-  ): { context: string; missing: string[] } => {
+  ): Promise<{ context: string; missing: string[] }> => {
     if (!references.length) return { context: "", missing: [] };
     const sections: string[] = [];
     const missing: string[] = [];
-    let scanned: RawSession[] | null = null;
     for (const reference of references) {
       if (reference.kind === "quote") {
         const label =
@@ -1739,14 +2270,11 @@ export function createApp(
       const parts = [`Pinned ${pinRoleDescription(pin)}:`, clipText(pin.text, 12_000)];
       const thread = pinCommentThread(sessionId, pin);
       if (thread) {
-        scanned ??= scanSessions();
-        const session = scanned.find(
-          (candidate) =>
-            candidate.sessionId === thread.providerSessionId && candidate.vendor === thread.vendor,
-        );
-        const messages = session?.path
-          ? visibleCommentTranscript(transcriptReader(thread.vendor)(session.path, 10_000))
-          : [];
+        const file = commentTranscriptPath(thread);
+        const history = file
+          ? await transcriptHistory.read(file, thread.vendor, CHAT_HISTORY_LIMIT).catch(() => null)
+          : null;
+        const messages = visibleCommentTranscript(history?.messages ?? []);
         messages.push(
           ...chatQueue.list(thread.providerSessionId).map((item) => ({
             role: "user" as const,
@@ -1802,24 +2330,7 @@ export function createApp(
     if (!hasSessionRunConfig(normalizeSessionRunConfig(config))) return;
     uiState.recordSessionRunConfig(vendor, sessionId, config, { observed });
   };
-  let workPromptSyncAt = 0;
-  const syncWorkPromptHistory = (sessions: RawSession[], now: number, force = false) => {
-    if (!force && now - workPromptSyncAt < 30_000) return;
-    try {
-      workEvents.backfillPrompts(sessions, { lockTimeoutMs: WORK_PROMPT_SYNC_LOCK_TIMEOUT_MS });
-    } catch (error) {
-      // Another Attend process can legitimately hold this shared repository
-      // while persisting a large history. Backfill is best-effort and the next
-      // snapshot can retry; lock contention must not escape a timer callback
-      // and terminate the server.
-      if (!(error instanceof WorkEventStoreBusyError)) throw error;
-    } finally {
-      // Throttle failed attempts too, otherwise every subscriber snapshot can
-      // immediately spend another full lock timeout retrying the same work.
-      workPromptSyncAt = now;
-    }
-  };
-  const buildConsoleView = (): ConsoleView => {
+  const prepareConsoleView = () => {
     const now = Date.now();
     const scanned = getSessions();
     const all = filterVisibleSessions(scanned);
@@ -1842,29 +2353,21 @@ export function createApp(
     }
     const listed = limitSessions(all, now, config.recentDays, config.maxSessions);
     const dirs = knownDirs(all, vaultState.recentDirectories, config.scopeRoots);
-    syncWorkPromptHistory(all, now);
     const throughput = trailingPromptActivity(attributedWorkEvents(now - 60 * 60_000), now, 1);
+    return { now, all, vaultState, listed, dirs, throughput };
+  };
+  const finishConsoleView = (
+    prepared: ReturnType<typeof prepareConsoleView>,
+    sessions: SessionView[],
+  ): ConsoleView => {
+    const { all, vaultState, dirs, throughput } = prepared;
     return {
-      sessions: toSessionViews(
-        listed,
-        getModel(),
-        now,
-        orchestrator,
-        overrides,
-        tags,
-        engagement,
-        sessionStatus,
-        stoppedExternalActiveAt,
-        vaultState.sessionTitles,
-        vaultState.forkParents,
-        vaultState.sessionRunConfigs,
-        daemonUiContext,
-      ),
+      sessions,
       schedules: visibleSchedules(),
       knownDirs: dirs,
       scopeRoots: config.scopeRoots,
       defaultNewDir: defaultNewSessionDir(config.scopeRoots, dirs),
-      pageTitle: consolePageTitle(config.scopeRoots),
+      pageTitle: consolePageTitle(config.scopeRoots, config.e2eePassphrase),
       changelogMarkdown: changelogMarkdown(),
       sessions1h: throughput.sessions,
       prompts1h: throughput.prompts,
@@ -1873,10 +2376,14 @@ export function createApp(
       claudeModels: claudeModelOptions(),
       codexModels: codexModelOptions(),
       cursorModels: cursorModelOptions(),
+      antigravityModels: processModelSnapshots.antigravity,
+      copilotModels: processModelSnapshots.copilot,
       modelWarnings: {
         claude: claudeModelsWarning,
         codex: codexModelsWarning,
         cursor: cursorModelsWarning,
+        antigravity: processModelWarnings.antigravity,
+        copilot: processModelWarnings.copilot,
       },
       modelDefaults,
       tags: scopeTagList(all, tags, orchestrator, {
@@ -1885,7 +2392,52 @@ export function createApp(
       }),
       vaultState,
       e2ee: { enabled: e2ee.enabled },
+      sessionsPending: sessionsPending(),
+      sessionIndexEpoch,
+      sessionIndexRevision: sessionsRevision,
     };
+  };
+  const buildConsoleView = (): ConsoleView => {
+    const prepared = prepareConsoleView();
+    return finishConsoleView(
+      prepared,
+      toSessionViews(
+        prepared.listed,
+        getModel(),
+        prepared.now,
+        orchestrator,
+        overrides,
+        tags,
+        engagement,
+        sessionStatus,
+        stoppedExternalActiveAt,
+        prepared.vaultState.sessionTitles,
+        prepared.vaultState.forkParents,
+        prepared.vaultState.sessionRunConfigs,
+        daemonUiContext,
+        config.e2eePassphrase,
+      ),
+    );
+  };
+  const buildConsoleViewAsync = async (): Promise<ConsoleView> => {
+    const prepared = prepareConsoleView();
+    const sessions = await toSessionViewsCooperatively(
+      prepared.listed,
+      getModel(),
+      prepared.now,
+      orchestrator,
+      overrides,
+      tags,
+      engagement,
+      sessionStatus,
+      stoppedExternalActiveAt,
+      prepared.vaultState.sessionTitles,
+      prepared.vaultState.forkParents,
+      prepared.vaultState.sessionRunConfigs,
+      daemonUiContext,
+      config.e2eePassphrase,
+    );
+    return finishConsoleView(prepared, sessions);
   };
 
   const lockedConsoleView = (): ConsoleView => ({
@@ -1894,7 +2446,7 @@ export function createApp(
     knownDirs: [],
     scopeRoots: [],
     defaultNewDir: "",
-    pageTitle: consolePageTitle(config.scopeRoots),
+    pageTitle: consolePageTitle(config.scopeRoots, config.e2eePassphrase),
     changelogMarkdown: changelogMarkdown(),
     sessions1h: 0,
     prompts1h: 0,
@@ -1903,12 +2455,55 @@ export function createApp(
     claudeModels: [],
     codexModels: [],
     cursorModels: [],
+    antigravityModels: [],
+    copilotModels: [],
     modelWarnings: {},
     modelDefaults: {},
     tags: [],
     vaultState: {},
     e2ee: { enabled: true },
+    sessionsPending: sessionsPending(),
+    sessionIndexEpoch,
+    sessionIndexRevision: sessionsRevision,
   });
+  const buildConsoleShellView = (): ConsoleView => {
+    const vaultState = uiState.get();
+    const dirs = knownDirs([], vaultState.recentDirectories, config.scopeRoots);
+    return {
+      sessions: [],
+      schedules: visibleSchedules(),
+      knownDirs: dirs,
+      scopeRoots: config.scopeRoots,
+      defaultNewDir: defaultNewSessionDir(config.scopeRoots, dirs),
+      pageTitle: consolePageTitle(config.scopeRoots, config.e2eePassphrase),
+      changelogMarkdown: changelogMarkdown(),
+      sessions1h: 0,
+      prompts1h: 0,
+      chars1h: 0,
+      vendors: getVendors(),
+      claudeModels: claudeModelOptions(),
+      codexModels: codexModelOptions(),
+      cursorModels: cursorModelOptions(),
+      antigravityModels: processModelSnapshots.antigravity,
+      copilotModels: processModelSnapshots.copilot,
+      modelWarnings: {
+        claude: claudeModelsWarning,
+        codex: codexModelsWarning,
+        cursor: cursorModelsWarning,
+        antigravity: processModelWarnings.antigravity,
+        copilot: processModelWarnings.copilot,
+      },
+      modelDefaults,
+      tags: [],
+      vaultState,
+      e2ee: { enabled: e2ee.enabled },
+      // The authoritative session projection arrives on the already-open live
+      // stream. Keeping the shell pending avoids a misleading empty-state flash.
+      sessionsPending: true,
+      sessionIndexEpoch,
+      sessionIndexRevision: sessionsRevision,
+    };
+  };
   const visibleTags = (opts: { extraTags?: string[]; extraSessionIds?: string[] } = {}) => {
     if (config.scopeRoots.length === 0) return tags.list();
     const sessions = visibleSessions();
@@ -1920,8 +2515,6 @@ export function createApp(
   };
   const throughputSnapshot = () => {
     const now = Date.now();
-    const sessions = visibleSessions();
-    syncWorkPromptHistory(sessions, now);
     const activity = trailingPromptActivity(attributedWorkEvents(now - 60 * 60_000), now, 1);
     return { sessions1h: activity.sessions, prompts1h: activity.prompts, chars1h: activity.chars };
   };
@@ -1981,8 +2574,70 @@ export function createApp(
       stats: throughputSnapshot(),
     };
   };
+  type LiveSnapshotMessage = ReturnType<typeof liveSnapshot>;
+  let cachedLiveSnapshot: LiveSnapshotMessage = {
+    active: [],
+    startedAt: {},
+    lastAssistantAt: {},
+    clientSessionIds: {},
+    queues: {},
+    schedules: [],
+    stats: { sessions1h: 0, prompts1h: 0, chars1h: 0 },
+  };
+  type SessionIndexMessage = {
+    kind: "session_index";
+    epoch: string;
+    revision: number;
+    pending: boolean;
+    scannedAt: number;
+    snapshotUrl?: string;
+    hiddenSessionIds?: string[];
+    sessions?: ConsoleView["sessions"];
+    knownDirs?: string[];
+    defaultNewDir?: string;
+    tags?: string[];
+    sessions1h?: number;
+    prompts1h?: number;
+    chars1h?: number;
+  };
+  type CommentIndexMessage = {
+    kind: "comment_index";
+    epoch: string;
+    generatedAt: number;
+    snapshotUrl?: string;
+    comments?: Array<{
+      thread: CommentThreadState;
+      historyVersion: string;
+    }>;
+  };
+  const stringifySessionIndexCooperatively = async (
+    snapshot: SessionIndexMessage,
+  ): Promise<string> => {
+    const fields: string[] = [];
+    for (const [key, value] of Object.entries(snapshot)) {
+      if (value === undefined) continue;
+      if (key !== "sessions" || !Array.isArray(value)) {
+        const encoded = JSON.stringify(value);
+        if (encoded !== undefined) fields.push(`${JSON.stringify(key)}:${encoded}`);
+        continue;
+      }
+      const chunks: string[] = [];
+      const batchSize = 16;
+      for (let offset = 0; offset < value.length; offset += batchSize) {
+        const encoded = JSON.stringify(value.slice(offset, offset + batchSize));
+        chunks.push(encoded.slice(1, -1));
+        if (offset + batchSize < value.length) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+      fields.push(`${JSON.stringify(key)}:[${chunks.filter(Boolean).join(",")}]`);
+    }
+    return `{${fields.join(",")}}`;
+  };
   type LiveBusMessage =
     | ReturnType<typeof liveSnapshot>
+    | SessionIndexMessage
+    | CommentIndexMessage
     | {
         kind: "session_event";
         sessionId: string;
@@ -1995,16 +2650,270 @@ export function createApp(
     // Pushed when a daemon verdict is cached, so the console applies brief/state/
     // priority/eta/nextStep/probe immediately instead of racing a fixed poll window —
     // Codex daemons routinely reply ~25-35s after turn-end, past the old ~15s poll.
-    | { kind: "analysis"; sessionId: string; analysis: Analysis | null };
+    | { kind: "analysis"; sessionId: string; analysis: Analysis | null }
+    | {
+        kind: "session_operation";
+        operationId: string;
+        clientSessionId: string;
+        operation: "new" | "fork";
+        status: "completed" | "failed";
+        result: Record<string, unknown>;
+      };
   const liveSubscribers = new Set<(message: LiveBusMessage, eventId?: number) => void>();
   const liveEventBuffer: Array<{ id: number; message: LiveBusMessage; bytes: number }> = [];
   let liveEventBufferBytes = 0;
   let liveEventId = 0;
-  const broadcastLive = () => {
-    if (liveSubscribers.size === 0) return;
-    const snapshot = liveSnapshot();
-    for (const send of liveSubscribers) send(snapshot);
+  const publishBufferedLiveMessage = (message: LiveBusMessage): void => {
+    const id = ++liveEventId;
+    const bytes = Buffer.byteLength(JSON.stringify(message));
+    if (bytes <= 2_000_000) {
+      liveEventBuffer.push({ id, message, bytes });
+      liveEventBufferBytes += bytes;
+      while (liveEventBuffer.length > 2_000 || liveEventBufferBytes > 2_000_000) {
+        liveEventBufferBytes -= liveEventBuffer.shift()?.bytes ?? 0;
+      }
+    }
+    for (const send of liveSubscribers) send(message, id);
   };
+  const pendingSessionIndexSnapshot = (): SessionIndexMessage => ({
+    kind: "session_index",
+    epoch: sessionIndexEpoch,
+    revision: sessionsRevision,
+    pending: true,
+    scannedAt: sessionsScannedAt,
+  });
+  const sessionIndexSnapshotFromView = (
+    view: ConsoleView,
+    identity: { epoch: string; revision: number; scannedAt: number },
+  ): SessionIndexMessage => ({
+    kind: "session_index",
+    epoch: identity.epoch,
+    revision: identity.revision,
+    pending: false,
+    scannedAt: identity.scannedAt,
+    hiddenSessionIds: [...orchestrator.daemonIds()],
+    sessions: view.sessions,
+    knownDirs: view.knownDirs,
+    defaultNewDir: view.defaultNewDir,
+    tags: view.tags,
+    sessions1h: view.sessions1h,
+    prompts1h: view.prompts1h,
+    chars1h: view.chars1h,
+  });
+  const buildSessionIndexSnapshot = (): SessionIndexMessage => {
+    if (sessionsPending()) {
+      return pendingSessionIndexSnapshot();
+    }
+    const identity = {
+      epoch: sessionIndexEpoch,
+      revision: sessionsRevision,
+      scannedAt: sessionsScannedAt,
+    };
+    return sessionIndexSnapshotFromView(buildConsoleView(), identity);
+  };
+  const buildSessionIndexSnapshotAsync = async (): Promise<SessionIndexMessage> => {
+    if (sessionsPending()) return pendingSessionIndexSnapshot();
+    const identity = {
+      epoch: sessionIndexEpoch,
+      revision: sessionsRevision,
+      scannedAt: sessionsScannedAt,
+    };
+    return sessionIndexSnapshotFromView(await buildConsoleViewAsync(), identity);
+  };
+  let cachedSessionIndexSnapshot: SessionIndexMessage = {
+    kind: "session_index",
+    epoch: sessionIndexEpoch,
+    revision: sessionsRevision,
+    pending: true,
+    scannedAt: sessionsScannedAt,
+  };
+  let cachedSessionIndexJson = JSON.stringify(cachedSessionIndexSnapshot);
+  const cacheSessionIndexSnapshot = (snapshot: SessionIndexMessage): void => {
+    cachedSessionIndexSnapshot = snapshot;
+    cachedSessionIndexJson = JSON.stringify(snapshot);
+  };
+  const cacheSessionIndexSnapshotCooperatively = async (
+    snapshot: SessionIndexMessage,
+  ): Promise<void> => {
+    const json = await stringifySessionIndexCooperatively(snapshot);
+    cachedSessionIndexSnapshot = snapshot;
+    cachedSessionIndexJson = json;
+  };
+  let sessionProjectionScheduled = false;
+  let sessionProjectionDirty = false;
+  let sessionProjectionRunning: Promise<void> | null = null;
+  const sessionIndexMessage = (): SessionIndexMessage => {
+    if (!compactTransport) {
+      if (cachedSessionIndexSnapshot.pending && !sessionsPending()) {
+        cacheSessionIndexSnapshot(buildSessionIndexSnapshot());
+      }
+      return cachedSessionIndexSnapshot;
+    }
+    const snapshot = cachedSessionIndexSnapshot;
+    return snapshot.pending
+      ? {
+          kind: "session_index",
+          epoch: snapshot.epoch,
+          revision: snapshot.revision,
+          pending: true,
+          scannedAt: snapshot.scannedAt,
+        }
+      : {
+          kind: "session_index",
+          epoch: snapshot.epoch,
+          revision: snapshot.revision,
+          pending: false,
+          scannedAt: snapshot.scannedAt,
+          snapshotUrl: `/session-index?epoch=${encodeURIComponent(snapshot.epoch)}&revision=${snapshot.revision}`,
+        };
+  };
+  const scheduleSessionProjection = (): void => {
+    sessionProjectionDirty = true;
+    if (sessionProjectionScheduled || sessionProjectionRunning) return;
+    sessionProjectionScheduled = true;
+    setImmediate(() => {
+      sessionProjectionScheduled = false;
+      const run = (async () => {
+        while (sessionProjectionDirty) {
+          sessionProjectionDirty = false;
+          if (compactTransport) {
+            await cacheSessionIndexSnapshotCooperatively(await buildSessionIndexSnapshotAsync());
+          } else {
+            cacheSessionIndexSnapshot(buildSessionIndexSnapshot());
+          }
+        }
+      })();
+      sessionProjectionRunning = run;
+      void run
+        .then(() => {
+          const message = sessionIndexMessage();
+          for (const send of liveSubscribers) send(message);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (sessionProjectionRunning === run) sessionProjectionRunning = null;
+          if (sessionProjectionDirty) scheduleSessionProjection();
+        });
+    });
+  };
+  const broadcastSessionIndex = (): void => {
+    scheduleSessionProjection();
+  };
+  const buildCommentIndexSnapshot = async (): Promise<CommentIndexMessage> => {
+    const comments = await Promise.all(
+      Object.values(commentThreads()).map(async (thread) => {
+        const file = commentTranscriptPath(thread);
+        let fileVersion: string | undefined;
+        if (file && transcriptHistory.version) {
+          fileVersion = (await transcriptHistory.version(file).catch(() => null)) ?? "missing";
+        }
+        return {
+          thread,
+          historyVersion: commentHistoryVersion(thread, file, fileVersion),
+        };
+      }),
+    );
+    return {
+      kind: "comment_index",
+      epoch: sessionIndexEpoch,
+      generatedAt: Date.now(),
+      comments,
+    };
+  };
+  let cachedCommentIndexSnapshot: CommentIndexMessage = {
+    kind: "comment_index",
+    epoch: sessionIndexEpoch,
+    generatedAt: 0,
+    comments: [],
+  };
+  let cachedCommentIndexJson = JSON.stringify(cachedCommentIndexSnapshot);
+  const cacheCommentIndexSnapshot = (snapshot: CommentIndexMessage): void => {
+    cachedCommentIndexSnapshot = snapshot;
+    cachedCommentIndexJson = JSON.stringify(snapshot);
+  };
+  let commentProjectionScheduled = false;
+  let commentProjectionDirty = false;
+  let commentProjectionRunning: Promise<void> | null = null;
+  const commentIndexMessage = (): CommentIndexMessage => {
+    if (!compactTransport) return cachedCommentIndexSnapshot;
+    return {
+      kind: "comment_index",
+      epoch: cachedCommentIndexSnapshot.epoch,
+      generatedAt: cachedCommentIndexSnapshot.generatedAt,
+      snapshotUrl: `/comment-index?epoch=${encodeURIComponent(
+        cachedCommentIndexSnapshot.epoch,
+      )}&generatedAt=${cachedCommentIndexSnapshot.generatedAt}`,
+    };
+  };
+  const refreshCommentProjection = (): Promise<void> => {
+    commentProjectionDirty = true;
+    if (commentProjectionRunning) return commentProjectionRunning;
+    commentProjectionRunning = (async () => {
+      while (commentProjectionDirty) {
+        commentProjectionDirty = false;
+        cacheCommentIndexSnapshot(await buildCommentIndexSnapshot());
+      }
+    })().finally(() => {
+      commentProjectionRunning = null;
+    });
+    return commentProjectionRunning;
+  };
+  const scheduleCommentProjection = (): void => {
+    if (commentProjectionScheduled) return;
+    commentProjectionScheduled = true;
+    setImmediate(() => {
+      commentProjectionScheduled = false;
+      void refreshCommentProjection()
+        .then(() => {
+          const message = commentIndexMessage();
+          for (const send of liveSubscribers) send(message);
+        })
+        .catch(() => {});
+    });
+  };
+  const broadcastCommentIndex = (): void => {
+    scheduleCommentProjection();
+  };
+  let commentIndexBroadcastScheduled = false;
+  notifyCommentIndex = () => {
+    if (commentIndexBroadcastScheduled) return;
+    commentIndexBroadcastScheduled = true;
+    queueMicrotask(() => {
+      commentIndexBroadcastScheduled = false;
+      scheduleCommentProjection();
+    });
+  };
+  notifySessionIndex = () => {
+    scheduleSessionProjection();
+    // A cold scan also hydrates TranscriptPathIndex. Publish the resulting
+    // history versions so an already-connected CommentPanel can recover.
+    scheduleCommentProjection();
+  };
+  notifyAlignmentModel = scheduleSessionProjection;
+  let liveProjectionScheduled = false;
+  const scheduleLiveProjection = (): void => {
+    if (liveProjectionScheduled) return;
+    liveProjectionScheduled = true;
+    setImmediate(() => {
+      liveProjectionScheduled = false;
+      try {
+        cachedLiveSnapshot = liveSnapshot();
+      } catch {
+        return;
+      }
+      for (const send of liveSubscribers) send(cachedLiveSnapshot);
+    });
+  };
+  const broadcastLive = () => {
+    scheduleLiveProjection();
+  };
+  notifyWorkPromptIndex = () => {
+    scheduleSessionProjection();
+    scheduleLiveProjection();
+  };
+  scheduleSessionProjection();
+  scheduleCommentProjection();
+  scheduleLiveProjection();
   const broadcastSessionEvent = (
     sessionId: string,
     vendor: string,
@@ -2197,9 +3106,19 @@ export function createApp(
     if (orchestrator.isDaemon(sid) || !orchestrator.hasDaemon(sid)) return;
     analyzeAndRecordState(sid, cwdOf(sid)).catch(() => {});
   };
+  // A product-created session keeps a stable clientSessionId even when its provider id
+  // rolls mid-turn (Claude /clear reinitializes with a fresh id). Track the current
+  // provider id per client so a roll can re-key the daemon pairing to the new id —
+  // otherwise the continued session has no daemon and turn-end analysis stops.
+  const providerIdByClient = new Map<string, string>();
   for (const driver of drivers.values()) {
     driver.onTurnEnd((sessionId) => onTurnEnd(sessionId, driver.vendor));
     driver.onEvent?.((sessionId, event, clientSessionId) => {
+      if (clientSessionId && sessionId) {
+        const previous = providerIdByClient.get(clientSessionId);
+        if (previous && previous !== sessionId) orchestrator.rekeyTask(previous, sessionId);
+        providerIdByClient.set(clientSessionId, sessionId);
+      }
       if (event.kind === "run_config") {
         rememberSessionRunConfig(
           driver.vendor,
@@ -2220,6 +3139,23 @@ export function createApp(
   }
 
   const app = new Hono();
+  const runtimePerformance = new RuntimePerformanceMonitor();
+  appPerformanceMonitors.set(app, runtimePerformance);
+  let backgroundClosed = false;
+  appBackgroundRuntimes.set(app, {
+    close() {
+      if (backgroundClosed) return;
+      backgroundClosed = true;
+      unsubscribeSessionIndex();
+      unsubscribeAlignmentModel();
+      unsubscribeWorkPromptIndex();
+      if (!deps.sessionIndex) backgroundSessionIndex.close();
+      if (!deps.transcriptHistory) transcriptHistory.close?.();
+      if (!deps.sessionSearch) sessionSearch.close?.();
+      if (!deps.alignmentModel) alignmentModel.close?.();
+      if (!deps.workPromptIndex) workPromptIndex.close?.();
+    },
+  });
   const internalError = (c: Context, error: unknown) => {
     const errorId = crypto.randomUUID();
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -2252,6 +3188,20 @@ export function createApp(
   );
 
   app.use("*", async (c, next) => {
+    const pathname = new URL(c.req.url).pathname;
+    // A streaming response completes when the browser disconnects; measuring
+    // that lifetime as route latency would hide the handshake regressions this
+    // monitor is intended to expose.
+    if (pathname === "/chat/live-stream") return next();
+    const startedAt = performance.now();
+    try {
+      return await next();
+    } finally {
+      runtimePerformance.recordRoute(pathname, performance.now() - startedAt);
+    }
+  });
+
+  app.use("*", async (c, next) => {
     if (!e2ee.enabled) return next();
     const pathname = new URL(c.req.url).pathname;
     const internal = c.req.header("x-attend-e2ee-internal") === "1";
@@ -2267,12 +3217,55 @@ export function createApp(
     return c.json({ ok: false, error: "e2ee required" }, 403);
   });
 
-  app.get("/assets/:name", (c) => {
-    const name = c.req.param("name") as keyof typeof browserAssetFiles;
+  app.get("/assets/:name", async (c) => {
+    const requested = c.req.param("name");
+    const consoleContents = consoleAsset(requested);
+    if (consoleContents !== null) {
+      c.header(
+        "Content-Type",
+        requested.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
+      );
+      c.header("Cache-Control", "public, max-age=31536000, immutable");
+      return c.body(consoleContents);
+    }
+    const name = requested as keyof typeof browserAssetFiles;
     if (!Object.hasOwn(browserAssetFiles, name)) return c.notFound();
     c.header("Content-Type", "text/javascript; charset=utf-8");
     c.header("Cache-Control", "public, max-age=31536000, immutable");
-    return c.body(browserAsset(name));
+    return c.body(await browserAsset(name));
+  });
+
+  app.get("/debug/performance", (c) => {
+    c.header("Cache-Control", "no-store");
+    const index = backgroundSessionIndex.snapshot();
+    const alignment = alignmentModel.snapshot();
+    return c.json({
+      ...runtimePerformance.snapshot(),
+      sessionIndex: {
+        epoch: index.epoch,
+        revision: index.revision,
+        pending: index.pending,
+        scannedAt: index.scannedAt,
+        ageMs: index.scannedAt ? Math.max(0, Date.now() - index.scannedAt) : null,
+        sessions: index.sessions.length,
+        metrics: index.metrics ?? null,
+        error: index.error ?? null,
+      },
+      background: {
+        compactTransport,
+        alignmentReady: alignment !== null,
+        alignmentVocabSize: alignment?.vocabSize ?? 0,
+        refreshing: {
+          vendors: vendorAvailabilityRefresh !== null,
+          claudeModels: claudeModelRefresh !== null,
+          codexModels: codexModelRefresh !== null,
+          codexDefaults: codexDefaultsRefresh !== null,
+          cursorModels: cursorModelRefresh !== null,
+          antigravityModels: processModelRefreshes.antigravity !== null,
+          copilotModels: processModelRefreshes.copilot !== null,
+        },
+      },
+    });
   });
 
   // Main view: slock-style console — all sessions aggregated, chat in-browser.
@@ -2280,6 +3273,11 @@ export function createApp(
     // The HTML embeds live sessions and model-cache snapshots. Never reuse a
     // response from a previous Attend process or an earlier navigation.
     c.header("Cache-Control", "no-store");
+    if (compactTransport) {
+      return c.html(
+        renderConsoleShell(e2ee.enabled ? lockedConsoleView() : buildConsoleShellView()),
+      );
+    }
     return c.html(renderConsole(e2ee.enabled ? lockedConsoleView() : buildConsoleView()));
   });
 
@@ -2288,7 +3286,12 @@ export function createApp(
     try {
       const body = (await c.req.json().catch(() => ({}))) as { payload?: unknown };
       e2ee.decryptJson(body.payload);
-      return c.json({ payload: e2ee.encryptJson({ ok: true, bootstrap: buildConsoleView() }) });
+      return c.json({
+        payload: e2ee.encryptJson({
+          ok: true,
+          bootstrap: compactTransport ? buildConsoleShellView() : buildConsoleView(),
+        }),
+      });
     } catch {
       return c.json({ ok: false, error: "invalid passphrase" }, 401);
     }
@@ -2303,6 +3306,8 @@ export function createApp(
         path?: unknown;
         body?: unknown;
         contentType?: unknown;
+        prefer?: unknown;
+        clientSessionId?: unknown;
       }>(body.payload);
       const method = typeof payload.method === "string" ? payload.method.toUpperCase() : "GET";
       const target = typeof payload.path === "string" ? payload.path : "";
@@ -2313,6 +3318,18 @@ export function createApp(
       headers.set("x-attend-e2ee-internal", "1");
       if (typeof payload.contentType === "string" && payload.contentType) {
         headers.set("content-type", payload.contentType);
+      }
+      if (
+        typeof payload.prefer === "string" &&
+        payload.prefer.toLowerCase().includes("respond-async")
+      ) {
+        headers.set("prefer", "respond-async");
+      }
+      if (
+        typeof payload.clientSessionId === "string" &&
+        /^[A-Za-z0-9_-]{1,128}$/.test(payload.clientSessionId)
+      ) {
+        headers.set("x-attend-client-session-id", payload.clientSessionId);
       }
       const init: RequestInit = { method, headers };
       if (method !== "GET" && method !== "HEAD" && typeof payload.body === "string") {
@@ -2354,6 +3371,7 @@ export function createApp(
         vaultState.forkParents,
         vaultState.sessionRunConfigs,
         daemonUiContext,
+        config.e2eePassphrase,
       )[0] ?? null
     );
   };
@@ -2382,7 +3400,6 @@ export function createApp(
     const range = c.req.query("range") ?? "today";
     const now = Date.now();
     const sessions = visibleSessions();
-    syncWorkPromptHistory(sessions, now, true);
     const hiddenComments = new Set(
       Object.values(commentThreads()).map((thread) => thread.providerSessionId),
     );
@@ -2407,14 +3424,21 @@ export function createApp(
     });
   });
 
-  app.get("/dirs/suggest", (c) => {
+  app.get("/dirs/suggest", async (c) => {
     const q = c.req.query("q") ?? "";
+    const rawOffset = Number.parseInt(c.req.query("offset") ?? "0", 10);
+    const rawLimit = Number.parseInt(c.req.query("limit") ?? "24", 10);
+    const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.min(rawOffset, 100_000)) : 0;
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 100)) : 24;
+    const suggestions = await suggestProjectDirs(
+      q,
+      config.scopeRoots,
+      knownDirs(visibleSessions(), uiState.get().recentDirectories, config.scopeRoots),
+      offset + limit + 1,
+    );
     return c.json({
-      dirs: suggestProjectDirs(
-        q,
-        config.scopeRoots,
-        knownDirs(visibleSessions(), uiState.get().recentDirectories, config.scopeRoots),
-      ),
+      dirs: suggestions.slice(offset, offset + limit),
+      hasMore: suggestions.length > offset + limit,
     });
   });
 
@@ -2422,9 +3446,15 @@ export function createApp(
   // Let the already-open console pick up that newer snapshot without a full reload.
   app.get("/models/codex", async (c) => {
     c.header("Cache-Control", "no-store");
-    const models = codexModelOptions();
-    await refreshCodexDefaults();
-    return c.json({ models, defaults: modelDefaults.codex, warning: codexModelsWarning });
+    await Promise.all([
+      refreshCodexModels(deps.codexModelCatalog ? 60_000 : 0),
+      refreshCodexDefaults(),
+    ]);
+    return c.json({
+      models: codexModelOptions(),
+      defaults: modelDefaults.codex,
+      warning: codexModelsWarning,
+    });
   });
 
   // Claude Code can refresh its gateway model cache outside Attend too.
@@ -2444,10 +3474,31 @@ export function createApp(
 
   app.get("/models/cursor", (c) => {
     c.header("Cache-Control", "no-store");
+    void refreshCursorModels();
     return c.json({
       models: cursorModelOptions(),
       defaults: modelDefaults.cursor,
       warning: cursorModelsWarning,
+    });
+  });
+
+  app.get("/models/antigravity", (c) => {
+    c.header("Cache-Control", "no-store");
+    void refreshProcessModels("antigravity");
+    return c.json({
+      models: processModelSnapshots.antigravity,
+      defaults: modelDefaults.antigravity,
+      warning: processModelWarnings.antigravity,
+    });
+  });
+
+  app.get("/models/copilot", (c) => {
+    c.header("Cache-Control", "no-store");
+    void refreshProcessModels("copilot");
+    return c.json({
+      models: processModelSnapshots.copilot,
+      defaults: modelDefaults.copilot,
+      warning: processModelWarnings.copilot,
     });
   });
 
@@ -2472,6 +3523,7 @@ export function createApp(
         vendor: match.vendor,
         file: match.path,
         cwd: match.cwd,
+        tabTitle: sessionTabTitle(match.cwd, config.e2eePassphrase),
         project: match.cwd ? path.basename(match.cwd) : "—",
         title: match.title,
         lastPrompt: match.lastPrompt,
@@ -2656,7 +3708,7 @@ export function createApp(
   app.post("/session/status", async (c) => {
     const id = c.req.query("session");
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
-    const requestedCwd = resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots);
+    const requestedCwd = await resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots);
     const matchedCwd = visibleSessions().find((s) => s.sessionId === id)?.cwd ?? null;
     const statusCwd = requestedCwd ?? matchedCwd;
     const body = (await c.req.json().catch(() => ({}))) as { state?: unknown; updatedAt?: unknown };
@@ -2671,17 +3723,39 @@ export function createApp(
 
   // Point-in-time live status for API consumers and diagnostics.
   app.get("/chat/live", (c) => {
-    return c.json(liveSnapshot());
+    if (!compactTransport) return c.json(liveSnapshot());
+    scheduleLiveProjection();
+    return c.json(cachedLiveSnapshot);
+  });
+
+  app.get("/session-index", (c) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Content-Type", "application/json; charset=UTF-8");
+    return c.body(cachedSessionIndexJson);
+  });
+
+  app.get("/comment-index", (c) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Content-Type", "application/json; charset=UTF-8");
+    return c.body(cachedCommentIndexJson);
   });
 
   // Global live-state stream. In-process turns broadcast immediately; the low
   // frequency tick catches activity from external terminal-launched sessions.
   app.get("/chat/live-stream", (c) =>
     streamSSE(c, async (stream) => {
+      // File identity checks run in the history worker. Awaiting the current
+      // catalog here preserves reconnect correctness without putting stat or
+      // transcript parsing back on the HTTP event loop.
+      await refreshCommentProjection().catch(() => {});
       await new Promise<void>((resolve) => {
         let closed = false;
-        let lastSentId = Number(c.req.header("last-event-id") ?? 0) || 0;
-        const reconnecting = lastSentId > 0;
+        const requestedLastEventId = Number(c.req.header("last-event-id") ?? 0) || 0;
+        // EventSource retains Last-Event-ID across a server restart, while this
+        // process-local counter restarts at zero. A future id therefore belongs
+        // to an old process and must not suppress this process's buffered events.
+        const reconnecting = requestedLastEventId > 0 && requestedLastEventId <= liveEventId;
+        let lastSentId = reconnecting ? requestedLastEventId : 0;
         let sendChain = Promise.resolve();
         const send = (message: LiveBusMessage, eventId?: number) => {
           if (closed) return;
@@ -2699,8 +3773,19 @@ export function createApp(
         if (reconnecting) {
           for (const buffered of liveEventBuffer) send(buffered.message, buffered.id);
         }
-        send(liveSnapshot());
-        const timer = setInterval(() => send(liveSnapshot()), LIVE_SNAPSHOT_INTERVAL_MS);
+        send(cachedLiveSnapshot);
+        // `session_index` is an authoritative handshake, not only a buffered
+        // edge event. Sending it on every first connection and reconnect closes
+        // both races: scan completion before connect and completion while offline.
+        send(sessionIndexMessage());
+        // Comment history is loaded on demand, but its version catalog is an
+        // authoritative handshake. Replayed deltas arrive first; this message
+        // then tells an open CommentPanel whether it must resync from disk.
+        send(commentIndexMessage());
+        const timer = setInterval(() => {
+          send(cachedLiveSnapshot);
+          scheduleLiveProjection();
+        }, LIVE_SNAPSHOT_INTERVAL_MS);
         (timer as unknown as { unref?: () => void }).unref?.();
         stream.onAbort(() => {
           closed = true;
@@ -2712,12 +3797,34 @@ export function createApp(
     }),
   );
 
-  app.get("/search", (c) => {
+  app.get("/search", async (c) => {
     const q = c.req.query("q") ?? "";
     const now = Date.now();
-    const sessions = limitSessions(visibleSessions(), now, config.recentDays, config.maxSessions);
+    const startRaw = c.req.query("start");
+    const endRaw = c.req.query("end");
+    const start = startRaw === undefined ? null : Number(startRaw);
+    const end = endRaw === undefined ? null : Number(endRaw);
+    if (
+      (start !== null && !Number.isFinite(start)) ||
+      (end !== null && !Number.isFinite(end)) ||
+      (start !== null && end !== null && end < start)
+    ) {
+      return c.json({ results: [], error: "invalid search range" }, 400);
+    }
+    const inclusiveEnd = c.req.query("inclusiveEnd") === "1";
+    const sessions = limitSessions(
+      visibleSessions(),
+      now,
+      config.recentDays,
+      config.maxSessions,
+    ).filter((session) => {
+      const timestamp = session.lastTs ?? 0;
+      if (start !== null && timestamp < start) return false;
+      if (end !== null && (inclusiveEnd ? timestamp > end : timestamp >= end)) return false;
+      return true;
+    });
     try {
-      return c.json({ results: searchSessions(sessions, q) });
+      return c.json({ results: await sessionSearch.search(sessions, q) });
     } catch (error) {
       return c.json(
         { results: [], error: error instanceof Error ? error.message : "invalid search" },
@@ -2734,24 +3841,121 @@ export function createApp(
     return c.json({ threads });
   });
 
-  app.get("/comments/messages", (c) => {
+  app.get("/comments/messages", async (c) => {
     const id = c.req.query("id");
     const thread = id ? commentThreads()[id] : null;
     if (!thread) return c.json({ ok: false, error: "comment thread not found" }, 404);
-    const session = scanSessions()
-      .filter((candidate) => candidate.sessionId === thread.providerSessionId)
-      .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))[0];
-    const queuedMessages = chatQueue
-      .list(thread.providerSessionId)
-      .map((item) => ({ role: "user" as const, text: item.text }));
-    if (!session) return c.json({ ok: true, messages: queuedMessages, thread });
-    return c.json({
+    const file = commentTranscriptPath(thread, true);
+    const loadHistory = async () => {
+      const history = file
+        ? await transcriptHistory.read(file, thread.vendor, CHAT_HISTORY_LIMIT).catch(() => null)
+        : null;
+      const historyMessages = history ? visibleCommentTranscript(history.messages) : [];
+      const queuedOrdinal = historyMessages.reduce(
+        (next, message) => Math.max(next, (message.historyOrdinal ?? -1) + 1),
+        0,
+      );
+      const queued = chatQueue.list(thread.providerSessionId);
+      return {
+        messages: [
+          ...historyMessages,
+          ...queued.map((item, index) => ({
+            role: "user" as const,
+            text: item.text,
+            historyId: `q_${stableHash(JSON.stringify([thread.providerSessionId, item]))}`,
+            historyOrdinal: queuedOrdinal + index,
+            historyIndex: historyMessages.length + index,
+          })),
+        ],
+        historyVersion: commentHistoryVersion(thread, file, history?.version, queued),
+      };
+    };
+    let loaded = await loadHistory();
+    // Do not label an older file/queue snapshot with a newer comment_index
+    // version. One cache-backed retry closes the append-between-read-and-response
+    // race without turning a busy transcript into an unbounded retry loop.
+    if (loaded.historyVersion !== commentHistoryVersion(thread, file)) {
+      loaded = await loadHistory();
+    }
+    const { messages, historyVersion } = loaded;
+    const response = {
       ok: true,
-      messages: [
-        ...visibleCommentTranscript(transcriptReader(thread.vendor)(session.path)),
-        ...queuedMessages,
-      ],
       thread,
+      epoch: sessionIndexEpoch,
+      generatedAt: Date.now(),
+      historyVersion,
+    };
+    const around = c.req.query("around")?.trim() ?? "";
+    if (around) {
+      const window = targetedHistoryWindow(messages, around, c.req.query("radius"));
+      if (!window) {
+        return c.json({ ...response, ok: false, error: "history target not found" }, 404);
+      }
+      return c.json({
+        ...response,
+        messages: window.messages,
+        page: {
+          before: window.start,
+          hasMore: window.start > 0,
+          total: messages.length,
+          version: historyVersion,
+        },
+        window: {
+          historyId: around,
+          center: window.center,
+          start: window.start,
+          end: window.end,
+          hasEarlier: window.start > 0,
+          hasLater: window.end < messages.length,
+          total: messages.length,
+          version: historyVersion,
+        },
+      });
+    }
+    if (c.req.query("paged") !== "1") {
+      return c.json({
+        ...response,
+        messages: messages.map(
+          ({
+            historyId: _historyId,
+            historyOrdinal: _historyOrdinal,
+            historyIndex: _historyIndex,
+            ...message
+          }) => {
+            if (!("tools" in message) || !Array.isArray(message.tools)) return message;
+            return {
+              ...message,
+              tools: message.tools.map(
+                ({
+                  historyId: _toolHistoryId,
+                  historyOrdinal: _toolOrdinal,
+                  historyIndex: _toolHistoryIndex,
+                  ...tool
+                }) => tool,
+              ),
+            };
+          },
+        ),
+      });
+    }
+    const rawBefore = Number(c.req.query("before"));
+    const before = Number.isFinite(rawBefore)
+      ? Math.max(0, Math.min(messages.length, Math.floor(rawBefore)))
+      : messages.length;
+    const rawLimit = Number(c.req.query("limit"));
+    const pageSize = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(CHAT_HISTORY_PAGE_MAX, Math.floor(rawLimit)))
+      : CHAT_HISTORY_PAGE_SIZE;
+    const start = Math.max(0, before - pageSize);
+    return c.json({
+      ...response,
+      messages: messages.slice(start, before),
+      page: {
+        before: start,
+        hasMore: start > 0,
+        total: messages.length,
+        version: historyVersion,
+      },
     });
   });
 
@@ -2797,12 +4001,13 @@ export function createApp(
       // the legacy generated custom title if this thread was promoted previously.
       sessionTitles: { [thread.providerSessionId]: null },
     });
-    const scanned = scanSessions();
+    notifyCommentIndex?.();
+    const scanned = refreshSessionSnapshot();
     const promotedSession = scanned.find(
       (session) => session.sessionId === thread.providerSessionId,
     );
     if (promotedSession) {
-      workEvents.backfillPrompts([promotedSession]);
+      workPromptIndex.sync([promotedSession]);
       // Inherit the parent workspace's tags so a promoted comment keeps its labels
       // (mirrors the notes/todos/goal inheritance done above).
       const parentSession = scanned.find((s) => s.sessionId === thread.parentSessionId);
@@ -2826,7 +4031,6 @@ export function createApp(
     // record it would default to "read" (gray / already-dismissed); mark it unread
     // so it surfaces as a fresh green row instead of looking archived.
     sessionStatus.set(thread.providerSessionId, thread.cwd, "unread", Date.now());
-    workPromptSyncAt = 0;
     orchestrator.recordSessionRelation(thread.providerSessionId, thread.vendor, thread.cwd, {
       parentSessionId: thread.parentSessionId,
       kind: "promoted_comment",
@@ -2865,6 +4069,7 @@ export function createApp(
       resolvedReferenceContext?: unknown;
       contextMessages?: unknown;
       createdWhileGenerating?: boolean;
+      vendor?: string;
       model?: string;
       effort?: string;
       speed?: string;
@@ -2904,16 +4109,17 @@ export function createApp(
         : undefined;
     const pinContext =
       frozenReferenceContext === undefined
-        ? resolvePinReferenceContext(parentSessionId, references)
+        ? await resolvePinReferenceContext(parentSessionId, references)
         : { context: frozenReferenceContext, missing: [] };
     if (pinContext.missing.length)
       return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
     const providerQuestion = withPinReferenceContext(question, pinContext.context);
-    const vendor = chatVendor(matchedThread?.vendor ?? parent?.vendor);
+    const requestedVendor = isVendorId(body.vendor) ? body.vendor : undefined;
+    const vendor = chatVendor(matchedThread?.vendor ?? requestedVendor ?? parent?.vendor);
     const unavailable = unavailableVendorResponse(c, vendor);
     if (unavailable) return unavailable;
     const cwd = matchedThread?.cwd ?? parent?.cwd ?? "";
-    if (!cwd || !fs.existsSync(cwd))
+    if (!cwd || !(await isDirectoryAsync(cwd)))
       return c.json({ ok: false, error: "directory not found" }, 400);
     const driver = driverFor(vendor);
     const requestedCommentConfig = normalizeSessionRunConfig({
@@ -3061,19 +4267,129 @@ export function createApp(
     }
   });
 
-  // Static transcript of a session (history shown when you open it). The rollout
-  // schema differs by vendor, so the reader is picked by ?vendor (default Claude).
-  app.get("/chat/messages", (c) => {
-    const file = c.req.query("file");
-    const vendor = c.req.query("vendor");
-    if (!file || !file.endsWith(".jsonl") || !fs.existsSync(file)) return c.json([]);
-    const requested = canonicalFile(file);
-    const allowed = [...visibleSessions(), ...freshVisibleSessions()].some(
-      (session) =>
-        canonicalFile(session.path) === requested && (!vendor || session.vendor === vendor),
-    );
-    if (!allowed) return c.json({ ok: false, error: "transcript not found" }, 404);
-    return c.json(transcriptReader(vendor)(file));
+  // Static transcript of a session (history shown when you open it). New
+  // browsers address it by session id, allowing the scanner-owned path index to
+  // authorize + resolve the file without a full vendor scan. The legacy file
+  // query remains for API compatibility and now scans only on a cache miss.
+  app.get("/chat/messages", async (c) => {
+    const requestedSession = c.req.query("session")?.trim() ?? "";
+    const requestedVendor = c.req.query("vendor")?.trim() ?? "";
+    const requestedFile = c.req.query("file");
+    let file: string | null = null;
+    let vendor = requestedVendor;
+
+    if (requestedSession) {
+      const pick = (sessions: RawSession[]) =>
+        sessions
+          .filter(
+            (session) =>
+              session.sessionId === requestedSession &&
+              (!requestedVendor || session.vendor === requestedVendor),
+          )
+          .sort((a, b) => (b.lastTs ?? 0) - (a.lastTs ?? 0))[0];
+      const matched = pick(filterVisibleSessions(sessionsSnapshot)) ?? pick(freshVisibleSessions());
+      if (!matched) return c.json({ ok: false, error: "transcript not found" }, 404);
+      vendor = matched.vendor;
+      file = transcriptIndex.get(matched.vendor, requestedSession) ?? matched.path;
+      if (file) transcriptIndex.set(matched.vendor, requestedSession, file);
+    } else if (requestedFile?.endsWith(".jsonl") && (await pathExists(requestedFile))) {
+      // The legacy file-addressed API accepts only the exact normalized path
+      // already published by the session index. Resolving every candidate with
+      // realpath here would turn one history request into O(n) synchronous I/O.
+      const requested = path.resolve(requestedFile);
+      const matches = (sessions: RawSession[]) =>
+        sessions.find(
+          (session) =>
+            path.resolve(session.path) === requested &&
+            (!requestedVendor || session.vendor === requestedVendor),
+        );
+      const matched =
+        matches(filterVisibleSessions(sessionsSnapshot)) ?? matches(freshVisibleSessions());
+      if (matched) {
+        file = requestedFile;
+        vendor = matched.vendor;
+      }
+    } else if (!requestedFile) {
+      return c.json([]);
+    }
+
+    if (!file) return c.json({ ok: false, error: "transcript not found" }, 404);
+    const snapshot = await transcriptHistory
+      .read(file, vendor || "claude", CHAT_HISTORY_LIMIT)
+      .catch(() => null);
+    if (!snapshot) return c.json({ ok: false, error: "transcript not found" }, 404);
+    const around = c.req.query("around")?.trim() ?? "";
+    if (around) {
+      const window = targetedHistoryWindow(snapshot.messages, around, c.req.query("radius"));
+      if (!window) {
+        return c.json({ ok: false, error: "history target not found" }, 404);
+      }
+      return c.json({
+        ok: true,
+        messages: window.messages,
+        page: {
+          before: window.start,
+          hasMore: window.start > 0,
+          total: snapshot.messages.length,
+          version: snapshot.version,
+          sourceTruncated: snapshot.truncatedBefore,
+        },
+        window: {
+          historyId: around,
+          center: window.center,
+          start: window.start,
+          end: window.end,
+          hasEarlier: window.start > 0,
+          hasLater: window.end < snapshot.messages.length,
+          total: snapshot.messages.length,
+          version: snapshot.version,
+        },
+      });
+    }
+    if (c.req.query("paged") !== "1") {
+      return c.json(
+        snapshot.messages.map(
+          ({
+            historyId: _historyId,
+            historyOrdinal: _historyOrdinal,
+            historyIndex: _historyIndex,
+            tools,
+            ...message
+          }) => ({
+            ...message,
+            tools: tools.map(
+              ({
+                historyId: _toolHistoryId,
+                historyOrdinal: _toolOrdinal,
+                historyIndex: _toolHistoryIndex,
+                ...tool
+              }) => tool,
+            ),
+          }),
+        ),
+      );
+    }
+
+    const rawBefore = Number(c.req.query("before"));
+    const before = Number.isFinite(rawBefore)
+      ? Math.max(0, Math.min(snapshot.messages.length, Math.floor(rawBefore)))
+      : snapshot.messages.length;
+    const rawLimit = Number(c.req.query("limit"));
+    const pageSize = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(CHAT_HISTORY_PAGE_MAX, Math.floor(rawLimit)))
+      : CHAT_HISTORY_PAGE_SIZE;
+    const start = Math.max(0, before - pageSize);
+    return c.json({
+      ok: true,
+      messages: snapshot.messages.slice(start, before),
+      page: {
+        before: start,
+        hasMore: start > 0,
+        total: snapshot.messages.length,
+        version: snapshot.version,
+        sourceTruncated: snapshot.truncatedBefore,
+      },
+    });
   });
 
   const publicQueueItem = <T extends { referenceContext?: string }>(
@@ -3087,18 +4403,25 @@ export function createApp(
     return {
       items: items.map(publicQueueItem),
       parked: chatQueue.parked(sessionId),
-      steerable: items.some((item) => !item.goal && driverFor(item.vendor).canSteer(sessionId)),
+      steerable: items.some(
+        (item) =>
+          !item.goal &&
+          isVendorId(item.vendor) &&
+          nativeCapability(item.vendor, "steer") &&
+          driverFor(item.vendor).canSteer(sessionId),
+      ),
     };
   };
 
-  const queuedProviderTurn = (item: QueuedChatTurn) => ({
-    text: withPinReferenceContext(
-      item.text,
+  const queuedProviderTurn = async (item: QueuedChatTurn) => {
+    const referenceContext =
       item.referenceContext ??
-        resolvePinReferenceContext(item.sessionId, item.references ?? []).context,
-    ),
-    attachments: item.attachments,
-  });
+      (await resolvePinReferenceContext(item.sessionId, item.references ?? [])).context;
+    return {
+      text: withPinReferenceContext(item.text, referenceContext),
+      attachments: item.attachments,
+    };
+  };
 
   const queueDraining = new Set<string>();
   const queueOwner = crypto.randomUUID();
@@ -3130,7 +4453,7 @@ export function createApp(
     try {
       let sent = false;
       const startedAt = Date.now();
-      const referencedText = queuedProviderTurn(item).text;
+      const referencedText = (await queuedProviderTurn(item)).text;
       const providerText =
         item.goal && driver.vendor === "claude" ? `/goal ${referencedText}` : referencedText;
       if (driver.get(sessionId)) {
@@ -3225,7 +4548,7 @@ export function createApp(
     const id = c.req.query("session");
     const cwd = c.req.query("cwd");
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
-    if (!cwd || !fs.existsSync(cwd))
+    if (!cwd || !(await isDirectoryAsync(cwd)))
       return c.json({ ok: false, error: "directory not found" }, 400);
     const body = (await c.req.json().catch(() => ({}))) as {
       text?: string;
@@ -3247,8 +4570,8 @@ export function createApp(
     if (unavailable) return unavailable;
     if (goalRequested && !text)
       return c.json({ ok: false, error: "Goal requires an objective" }, 400);
-    if (goalRequested && vendor === "cursor")
-      return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+    if (goalRequested && !vendorSupportsGoal(vendor))
+      return c.json(unsupportedGoalPayload(vendor), 400);
     const validationError = attachmentError(driverFor(vendor), attachments);
     if (validationError) return c.json({ ok: false, error: validationError }, 400);
     const frozenReferenceContext =
@@ -3258,7 +4581,7 @@ export function createApp(
         : undefined;
     const pinContext =
       frozenReferenceContext === undefined
-        ? resolvePinReferenceContext(id, references)
+        ? await resolvePinReferenceContext(id, references)
         : { context: frozenReferenceContext, missing: [] };
     if (pinContext.missing.length)
       return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
@@ -3327,17 +4650,23 @@ export function createApp(
     if (!id || !itemId) return c.json({ ok: false, error: "missing queue item" }, 400);
     const item = chatQueue.list(id).find((candidate) => candidate.id === itemId);
     if (!item) return c.json({ ok: false, error: "queue item not found" }, 404);
+    if (!isVendorId(item.vendor))
+      return c.json({ ok: false, error: "queued message has an unknown vendor" }, 409);
     const unavailable = unavailableVendorResponse(c, item.vendor);
     if (unavailable) return unavailable;
     const driver = driverFor(item.vendor);
-    if (!item.goal && driver.canSteer(id)) {
+    const active = driver.activeSessions().includes(id);
+    if (active && !nativeCapability(item.vendor, "steer")) {
+      return c.json(capabilityUnavailable(item.vendor, "steer"), 409);
+    }
+    if (!item.goal && nativeCapability(item.vendor, "steer") && driver.canSteer(id)) {
       const extracted = chatQueue.extract(id, itemId);
       if (!extracted)
         return c.json({ ok: false, error: "queued message is no longer available" }, 409);
       const steeredAt = Date.now();
       let steered = false;
       try {
-        steered = await driver.steer(id, queuedProviderTurn(extracted.item));
+        steered = await driver.steer(id, await queuedProviderTurn(extracted.item));
       } catch {
         steered = false;
       }
@@ -3387,7 +4716,7 @@ export function createApp(
     const unavailable = unavailableVendorResponse(c, c.req.query("vendor"));
     if (unavailable) return unavailable;
     const drv = driverFor(c.req.query("vendor"));
-    if (drv.vendor === "cursor") return c.json({ ok: true, supported: false, goal: null });
+    if (!vendorSupportsGoal(drv.vendor)) return c.json({ ok: true, supported: false, goal: null });
     if (drv.vendor === "codex" && drv.getGoal) {
       try {
         const goal = await drv.getGoal(id);
@@ -3412,8 +4741,7 @@ export function createApp(
     const unavailable = unavailableVendorResponse(c, c.req.query("vendor"));
     if (unavailable) return unavailable;
     const drv = driverFor(c.req.query("vendor"));
-    if (drv.vendor === "cursor")
-      return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+    if (!vendorSupportsGoal(drv.vendor)) return c.json(unsupportedGoalPayload(drv.vendor), 400);
     try {
       if (drv.clearGoal) await drv.clearGoal(id);
       else if (drv.vendor === "claude" && drv.activeSessions().includes(id))
@@ -3448,7 +4776,7 @@ export function createApp(
     const hasRunConfig = body.runConfig === true;
     const goalRequested = body.goal === true;
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
-    if (!cwd || !fs.existsSync(cwd))
+    if (!cwd || !(await isDirectoryAsync(cwd)))
       return c.json({ ok: false, error: "directory not found" }, 400);
     if (!text && !attachments.length) return c.json({ ok: false, error: "empty message" }, 400);
     const vendor = c.req.query("vendor");
@@ -3457,8 +4785,8 @@ export function createApp(
     const drv = driverFor(vendor);
     if (goalRequested && !text)
       return c.json({ ok: false, error: "Goal requires an objective" }, 400);
-    if (goalRequested && drv.vendor === "cursor")
-      return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+    if (goalRequested && !vendorSupportsGoal(drv.vendor))
+      return c.json(unsupportedGoalPayload(drv.vendor), 400);
     const requestedRunConfig = normalizeSessionRunConfig({ model, effort, speed });
     const liveRun = drv.get(id);
     const resumeConfig = hasRunConfig
@@ -3479,7 +4807,7 @@ export function createApp(
       return c.json({ ok: false, error: "Cursor did not advertise that model configuration" }, 400);
     const validationError = attachmentError(drv, attachments);
     if (validationError) return c.json({ ok: false, error: validationError }, 400);
-    const pinContext = resolvePinReferenceContext(id, references);
+    const pinContext = await resolvePinReferenceContext(id, references);
     if (pinContext.missing.length)
       return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
     const referencedText = withPinReferenceContext(text, pinContext.context);
@@ -3592,7 +4920,7 @@ export function createApp(
     const toolUseId = body.toolUseId?.trim();
     const text = body.text?.trim();
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
-    if (!cwd || !fs.existsSync(cwd))
+    if (!cwd || !(await isDirectoryAsync(cwd)))
       return c.json({ ok: false, error: "directory not found" }, 400);
     if (!toolUseId) return c.json({ ok: false, error: "missing toolUseId" }, 400);
     if (!text) return c.json({ ok: false, error: "empty answer" }, 400);
@@ -3623,9 +4951,20 @@ export function createApp(
     const externalTurnId = visibleSessions().find((s) => s.sessionId === id)?.activeTurnId;
     let stopped = false;
     for (const driver of abortDriversFor(c.req.query("vendor"), id)) {
-      stopped = (await driver.interrupt(id, { turnId: externalTurnId })) || stopped;
+      try {
+        if (await driver.interrupt(id, { turnId: externalTurnId })) {
+          stopped = true;
+          break;
+        }
+      } catch {
+        // A stale vendor hint may route through an adapter that cannot own this
+        // session. Keep trying the session-derived and remaining adapters.
+      }
     }
     const stoppedAt = Date.now();
+    const knownActiveToLocalDriver = drivers
+      .values()
+      .some((driver) => driver.activeSessionStates().some((state) => state.sessionId === id));
     // No in-process driver had a live run — but the session may still show as
     // "generating" from an unterminated transcript whose process orphaned/exited
     // (the classic post-restart shape, where a detached `codex exec` outlived the
@@ -3633,27 +4972,90 @@ export function createApp(
     // successful stop instead of alarming the user with "could not stop".
     const stoppedExternal =
       !stopped &&
+      !knownActiveToLocalDriver &&
       !!visibleSessions().find((s) => s.sessionId === id && isExternallyActive(s, stoppedAt));
-    stoppedExternalActiveAt.set(id, stoppedAt);
-    // Persist even when no in-process driver can be interrupted: that is the
-    // expected shape after a restart, where only the unterminated transcript is
-    // left. A later provider turn has a newer activeStartedAt and automatically
-    // supersedes this marker.
-    workEvents.record({
-      kind: "turn_finished",
-      at: stoppedAt,
-      sessionId: id,
-      ...(c.req.query("vendor") ? { vendor: chatVendor(c.req.query("vendor")) } : {}),
-      source: "live",
-      ok: false,
-    });
+    if (stopped || stoppedExternal) {
+      stoppedExternalActiveAt.set(id, stoppedAt);
+      // Persist when the provider accepted the interrupt, or when no in-process
+      // driver owns an externally stale turn. A rejected live interrupt must
+      // remain visibly active instead of being hidden as though it stopped.
+      workEvents.record({
+        kind: "turn_finished",
+        at: stoppedAt,
+        sessionId: id,
+        ...(c.req.query("vendor") ? { vendor: chatVendor(c.req.query("vendor")) } : {}),
+        source: "live",
+        ok: false,
+      });
+    }
     broadcastLive();
     return c.json({ ok: stopped || stoppedExternal, session: id });
   });
 
   // Start a brand-new session in a directory.
   app.post("/chat/new", async (c) => {
-    const cwd = resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots);
+    if (c.req.header("prefer")?.toLowerCase().includes("respond-async")) {
+      const bodyText = await c.req.text();
+      let requestedClientSessionId = c.req.header("x-attend-client-session-id")?.trim() ?? "";
+      if (!requestedClientSessionId) {
+        try {
+          const parsed = JSON.parse(bodyText) as { clientSessionId?: unknown };
+          requestedClientSessionId =
+            typeof parsed.clientSessionId === "string" ? parsed.clientSessionId.trim() : "";
+        } catch {
+          // The synchronous executor will return the detailed body error.
+        }
+      }
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestedClientSessionId)) {
+        return c.json({ ok: false, error: "invalid client session id" }, 400);
+      }
+      const operationId = crypto.randomUUID();
+      const target = new URL(c.req.url);
+      const headers = new Headers(c.req.raw.headers);
+      headers.delete("prefer");
+      headers.delete("content-length");
+      headers.set("x-attend-e2ee-internal", "1");
+      queueMicrotask(() => {
+        void (async () => {
+          let result: Record<string, unknown>;
+          try {
+            const response = await app.request(target.toString(), {
+              method: "POST",
+              headers,
+              body: bodyText,
+            });
+            const parsed = (await response.json().catch(() => null)) as unknown;
+            result =
+              parsed && typeof parsed === "object"
+                ? (parsed as Record<string, unknown>)
+                : { ok: false, error: `session start failed (${response.status})` };
+          } catch (error) {
+            result = {
+              ok: false,
+              error: error instanceof Error ? error.message : "session start failed",
+            };
+          }
+          publishBufferedLiveMessage({
+            kind: "session_operation",
+            operationId,
+            clientSessionId: requestedClientSessionId,
+            operation: "new",
+            status: result.ok === true ? "completed" : "failed",
+            result,
+          });
+        })();
+      });
+      return c.json(
+        {
+          ok: true,
+          accepted: true,
+          operationId,
+          clientSessionId: requestedClientSessionId,
+        },
+        202,
+      );
+    }
+    const cwd = await resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots);
     const body = (await c.req.json().catch(() => ({}))) as {
       text?: string;
       attachments?: unknown;
@@ -3671,7 +5073,7 @@ export function createApp(
     const speed = normalizeSpeed(body.speed);
     const clientSessionId = body.clientSessionId?.trim() ?? "";
     const goalRequested = body.goal === true;
-    if (!cwd || !fs.existsSync(cwd))
+    if (!cwd || !(await isDirectoryAsync(cwd)))
       return c.json({ ok: false, error: "directory not found" }, 400);
     if (clientSessionId && !/^[A-Za-z0-9_-]{1,128}$/.test(clientSessionId))
       return c.json({ ok: false, error: "invalid client session id" }, 400);
@@ -3682,8 +5084,8 @@ export function createApp(
     const setGoal = drv.setGoal?.bind(drv);
     if (goalRequested && !text)
       return c.json({ ok: false, error: "Goal requires an objective" }, 400);
-    if (goalRequested && vendor === "cursor")
-      return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+    if (goalRequested && !vendorSupportsGoal(vendor))
+      return c.json(unsupportedGoalPayload(vendor), 400);
     if (goalRequested && vendor === "codex" && !setGoal)
       return c.json({ ok: false, error: "Codex Goal is unavailable" }, 400);
     const runOptions = resolveRunOptions(vendor, model, effort, speed);
@@ -3763,6 +5165,7 @@ export function createApp(
         ...(clientSessionId ? { clientSessionId } : {}),
         vendor,
         cwd,
+        tabTitle: sessionTabTitle(cwd, config.e2eePassphrase),
         ...(goalRequested ? { goal: createdGoal ?? uiState.get().sessionGoals?.[session] } : {}),
       });
     } catch (err) {
@@ -3777,6 +5180,67 @@ export function createApp(
   // forks by copying the parent's rollout then resuming the copy — both need the
   // opening message up front.
   app.post("/chat/fork", async (c) => {
+    if (c.req.header("prefer")?.toLowerCase().includes("respond-async")) {
+      const bodyText = await c.req.text();
+      let requestedClientSessionId = c.req.header("x-attend-client-session-id")?.trim() ?? "";
+      if (!requestedClientSessionId) {
+        try {
+          const parsed = JSON.parse(bodyText) as { clientSessionId?: unknown };
+          requestedClientSessionId =
+            typeof parsed.clientSessionId === "string" ? parsed.clientSessionId.trim() : "";
+        } catch {
+          // The synchronous executor will return the detailed body error.
+        }
+      }
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestedClientSessionId)) {
+        return c.json({ ok: false, error: "invalid client session id" }, 400);
+      }
+      const operationId = crypto.randomUUID();
+      const target = new URL(c.req.url);
+      const headers = new Headers(c.req.raw.headers);
+      headers.delete("prefer");
+      headers.delete("content-length");
+      headers.set("x-attend-e2ee-internal", "1");
+      queueMicrotask(() => {
+        void (async () => {
+          let result: Record<string, unknown>;
+          try {
+            const response = await app.request(target.toString(), {
+              method: "POST",
+              headers,
+              body: bodyText,
+            });
+            const parsed = (await response.json().catch(() => null)) as unknown;
+            result =
+              parsed && typeof parsed === "object"
+                ? (parsed as Record<string, unknown>)
+                : { ok: false, error: `session fork failed (${response.status})` };
+          } catch (error) {
+            result = {
+              ok: false,
+              error: error instanceof Error ? error.message : "session fork failed",
+            };
+          }
+          publishBufferedLiveMessage({
+            kind: "session_operation",
+            operationId,
+            clientSessionId: requestedClientSessionId,
+            operation: "fork",
+            status: result.ok === true ? "completed" : "failed",
+            result,
+          });
+        })();
+      });
+      return c.json(
+        {
+          ok: true,
+          accepted: true,
+          operationId,
+          clientSessionId: requestedClientSessionId,
+        },
+        202,
+      );
+    }
     const id = c.req.query("session");
     const cwd = c.req.query("cwd");
     const body = (await c.req.json().catch(() => ({}))) as {
@@ -3804,7 +5268,7 @@ export function createApp(
     const hasContextMessages = Array.isArray(body.contextMessages);
     const contextMessages = parseForkContextMessages(body.contextMessages);
     if (!id) return c.json({ ok: false, error: "missing session" }, 400);
-    if (!cwd || !fs.existsSync(cwd))
+    if (!cwd || !(await isDirectoryAsync(cwd)))
       return c.json({ ok: false, error: "directory not found" }, 400);
     if (!text && !attachments.length)
       return c.json({ ok: false, error: "type a message or attach a file to branch with" }, 400);
@@ -3823,15 +5287,14 @@ export function createApp(
     const pinContext =
       internalReferenceContext !== null
         ? { context: internalReferenceContext, missing: [] }
-        : resolvePinReferenceContext(id, references);
+        : await resolvePinReferenceContext(id, references);
     if (pinContext.missing.length)
       return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
     const referencedText = withPinReferenceContext(text, pinContext.context);
     const setGoal = driverFor(vendor).setGoal?.bind(driverFor(vendor));
     if (goalRequested) {
       if (!text) return c.json({ ok: false, error: "Goal requires an objective" }, 400);
-      if (vendor === "cursor")
-        return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+      if (!vendorSupportsGoal(vendor)) return c.json(unsupportedGoalPayload(vendor), 400);
       if (vendor === "codex" && !setGoal)
         return c.json({ ok: false, error: "Codex Goal is unavailable" }, 400);
     }
@@ -3875,7 +5338,7 @@ export function createApp(
       // Cursor has interactive `/fork`, but its headless CLI and current ACP
       // server expose no fork operation. Preserve the same user-facing branch
       // semantics with a fresh session seeded from the parent transcript.
-      const useNativeFork = sameVendor && vendor !== "cursor" && !hasContextMessages;
+      const useNativeFork = sameVendor && nativeCapability(vendor, "fork") && !hasContextMessages;
       if (goalRequested && !useNativeFork)
         return c.json(
           { ok: false, error: "Goal branches must be a same-vendor Claude or Codex fork" },
@@ -3909,7 +5372,7 @@ export function createApp(
                     pinContext.context,
                   )
                 : withPinReferenceContext(
-                    providerForkPrompt(parent, text, attachments),
+                    await providerForkPrompt(transcriptHistory, parent, text, attachments),
                     pinContext.context,
                   ),
               firstAttachments: attachments,
@@ -3971,12 +5434,13 @@ export function createApp(
         clientSessionId,
         vendor,
         cwd,
+        tabTitle: sessionTabTitle(cwd, config.e2eePassphrase),
         project: path.basename(cwd),
         parentSessionId: id,
-        forkMode: hasContextMessages
-          ? "context-prefix"
-          : sameVendor
-            ? "native"
+        forkMode: useNativeFork
+          ? "native"
+          : hasContextMessages
+            ? "context-prefix"
             : "provider-context",
         ...(goalRequested ? { goal: createdGoal ?? uiState.get().sessionGoals?.[session] } : {}),
       });
@@ -4086,11 +5550,11 @@ export function createApp(
       const goalRequested = raw.goal === true;
       if (goalRequested && !text)
         return c.json({ ok: false, error: "Goal requires an objective" }, 400);
-      if (goalRequested && vendor === "cursor")
-        return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+      if (goalRequested && !vendorSupportsGoal(vendor))
+        return c.json(unsupportedGoalPayload(vendor), 400);
       const validationError = attachmentError(driverFor(vendor), attachments);
       if (validationError) return c.json({ ok: false, error: validationError }, 400);
-      const pinContext = resolvePinReferenceContext(session.sessionId, references);
+      const pinContext = await resolvePinReferenceContext(session.sessionId, references);
       if (pinContext.missing.length)
         return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
       payload = {
@@ -4117,11 +5581,11 @@ export function createApp(
         : null;
       if (mode === "fork" && (!parent?.sessionId || !parent.cwd))
         return c.json({ ok: false, error: "parent session not ready" }, 409);
-      const cwd = resolveProjectDir(
+      const cwd = await resolveProjectDir(
         mode === "fork" ? (parent?.cwd ?? "") : typeof raw.cwd === "string" ? raw.cwd : "",
         config.scopeRoots,
       );
-      if (!cwd || !fs.existsSync(cwd))
+      if (!cwd || !(await isDirectoryAsync(cwd)))
         return c.json({ ok: false, error: "directory not found" }, 400);
       const vendor = chatVendor(typeof raw.vendor === "string" ? raw.vendor : undefined);
       const unavailable = unavailableVendorResponse(c, vendor);
@@ -4147,13 +5611,13 @@ export function createApp(
       const goalRequested = raw.goal === true;
       if (goalRequested && !text)
         return c.json({ ok: false, error: "Goal requires an objective" }, 400);
-      if (goalRequested && vendor === "cursor")
-        return c.json({ ok: false, error: "Cursor does not support Goal" }, 400);
+      if (goalRequested && !vendorSupportsGoal(vendor))
+        return c.json(unsupportedGoalPayload(vendor), 400);
       if (goalRequested && mode === "fork")
         return c.json({ ok: false, error: "Scheduled Fork does not support Goal" }, 400);
       const pinContext =
         mode === "fork"
-          ? resolvePinReferenceContext(parentSessionId, references)
+          ? await resolvePinReferenceContext(parentSessionId, references)
           : { context: undefined, missing: [] as string[] };
       if (pinContext.missing.length)
         return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
@@ -4214,7 +5678,8 @@ export function createApp(
       const threadId = /^[A-Za-z0-9_-]{1,160}$/.test(matched?.id ?? requestedThreadId)
         ? (matched?.id ?? requestedThreadId)
         : `comment-${crypto.randomUUID()}`;
-      const vendor = chatVendor(matched?.vendor ?? parent.vendor);
+      const requestedVendor = isVendorId(raw.vendor) ? raw.vendor : undefined;
+      const vendor = chatVendor(matched?.vendor ?? requestedVendor ?? parent.vendor);
       const unavailable = unavailableVendorResponse(c, vendor);
       if (unavailable) return unavailable;
       const anchorText = typeof raw.anchorText === "string" ? raw.anchorText.slice(0, 20_000) : "";
@@ -4225,7 +5690,7 @@ export function createApp(
       const model = normalizeModel(raw.model);
       const effort = normalizeEffort(raw.effort);
       const speed = normalizeSpeed(raw.speed);
-      const pinContext = resolvePinReferenceContext(parentSessionId, references);
+      const pinContext = await resolvePinReferenceContext(parentSessionId, references);
       if (pinContext.missing.length)
         return c.json({ ok: false, error: "A referenced Pin is no longer available" }, 409);
       payload = {
@@ -4479,6 +5944,7 @@ export function createApp(
         resolvedReferenceContext: item.payload.referenceContext,
         contextMessages: item.payload.contextMessages ?? [],
         createdWhileGenerating: item.payload.createdWhileGenerating,
+        vendor: item.payload.vendor,
         model: item.payload.model,
         effort: item.payload.effort,
         speed: item.payload.speed,
@@ -4547,6 +6013,12 @@ export function createApp(
         if (!item) break;
         await executeScheduledItem(item);
       }
+    } catch (error) {
+      // The shared SQLite file can be contended by a second attend instance
+      // (ports auto-bump so concurrent instances are supported). A transient
+      // lock must retry on the next tick, never crash the fire-and-forget timer.
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`attend schedule tick error: ${detail}\n`);
     } finally {
       scheduleRunning = false;
       if (scheduleClosed && scheduleDirectRuns === 0) closeScheduleStore();
@@ -4597,12 +6069,12 @@ export function createApp(
   appScheduleRuntimes.set(app, scheduleRuntime);
 
   // Launch a vendor action in a terminal: resume / fork an existing session, or start a new one.
-  app.post("/launch", (c) => {
+  app.post("/launch", async (c) => {
     const action = c.req.query("action");
     const vendor = c.req.query("vendor");
     const cwd =
       action === "new"
-        ? resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots)
+        ? await resolveProjectDir(c.req.query("cwd") ?? "", config.scopeRoots)
         : c.req.query("cwd");
     const id = c.req.query("id");
     const prompt = c.req.query("prompt");
@@ -4622,11 +6094,14 @@ export function createApp(
     if (!runOptions) {
       return c.json({ ok: false, error: "Cursor did not advertise that model configuration" }, 400);
     }
-    if (!cwd || !fs.existsSync(cwd)) {
+    if (!cwd || !(await isDirectoryAsync(cwd))) {
       return c.json({ ok: false, error: "directory not found" }, 400);
     }
     if ((action === "resume" || action === "fork") && (!id || !/^[A-Za-z0-9_-]+$/.test(id))) {
       return c.json({ ok: false, error: "invalid session id" }, 400);
+    }
+    if (action === "fork" && !nativeCapability(vendor, "fork")) {
+      return c.json(capabilityUnavailable(vendor, "fork"), 409);
     }
     try {
       const command = deps.launcher(action, vendor, cwd, {
@@ -4642,7 +6117,7 @@ export function createApp(
     }
   });
 
-  function resolveRevealPath(reqPath: string, cwd: string): string | null {
+  async function resolveRevealPath(reqPath: string, cwd: string): Promise<string | null> {
     let resolved = reqPath.trim();
     if (!resolved) return null;
     if (resolved.startsWith("~/")) resolved = path.join(os.homedir(), resolved.slice(2));
@@ -4652,7 +6127,7 @@ export function createApp(
     }
     let candidate = resolved;
     while (candidate) {
-      if (fs.existsSync(candidate)) return candidate;
+      if (await pathExists(candidate)) return candidate;
       const stripped = candidate.replace(/:\d+(?::\d+)?$/, "");
       if (stripped !== candidate) {
         candidate = stripped;
@@ -4666,7 +6141,7 @@ export function createApp(
     return null;
   }
 
-  function resolveExistingLocalPath(reqPath: string, cwd: string): string | null {
+  async function resolveExistingLocalPath(reqPath: string, cwd: string): Promise<string | null> {
     let resolved = reqPath.trim().replace(/:\d+(?::\d+)?$/, "");
     if (!resolved) return null;
     if (resolved.startsWith("~/")) resolved = path.join(os.homedir(), resolved.slice(2));
@@ -4674,7 +6149,7 @@ export function createApp(
       if (!cwd) return null;
       resolved = path.resolve(cwd, resolved);
     }
-    return fs.existsSync(resolved) ? resolved : null;
+    return (await pathExists(resolved)) ? resolved : null;
   }
 
   // Ambiguous slash-separated message text is only styled as a local path after
@@ -4688,14 +6163,15 @@ export function createApp(
           .slice(0, 64)
           .map((item) => item.slice(0, 2048))
       : [];
-    return c.json({ exists: paths.map((item) => !!resolveExistingLocalPath(item, cwd)) });
+    const resolved = await Promise.all(paths.map((item) => resolveExistingLocalPath(item, cwd)));
+    return c.json({ exists: resolved.map(Boolean) });
   });
 
   // Reveal a local file (clicked in a chat message) in the OS file manager. A
   // relative path is resolved against the session's cwd; `~/` against $HOME.
   // `file.md:12` / `file.md:12:4` are accepted and strip their line suffix. If
   // the file is gone, fall back to the nearest existing parent directory.
-  app.post("/open", (c) => {
+  app.post("/open", async (c) => {
     const reqPath = c.req.query("path");
     const cwd = c.req.query("cwd") ?? "";
     if (!reqPath) return c.json({ ok: false, error: "no path" }, 400);
@@ -4707,7 +6183,7 @@ export function createApp(
     ) {
       return c.json({ ok: false, error: "no cwd to resolve relative path" }, 400);
     }
-    const resolved = resolveRevealPath(reqPath, cwd);
+    const resolved = await resolveRevealPath(reqPath, cwd);
     if (!resolved) return c.json({ ok: false, error: "file not found" }, 404);
     try {
       (deps.revealer ?? revealPath)(resolved);
@@ -4730,7 +6206,7 @@ export interface RunningServer {
 }
 
 function recordShutdownTurns(config: AttendConfig, deps: AppDeps, at: number): void {
-  const drivers = [deps.engine, deps.codex, deps.cursor];
+  const drivers = [deps.engine, deps.codex, deps.cursor, deps.antigravity, deps.copilot];
   try {
     const events = new WorkEventStore(config.workEvents);
     for (const driver of drivers) {
@@ -4772,6 +6248,8 @@ export function startServer(
   const appDeps = deps ?? createDefaultAppDeps(config);
   const app = createApp(config, appDeps);
   const scheduleRuntime = appScheduleRuntimes.get(app);
+  const performanceMonitor = appPerformanceMonitors.get(app);
+  const backgroundRuntime = appBackgroundRuntimes.get(app);
   const listen = (port: number, attemptsLeft: number): Promise<RunningServer> =>
     new Promise((resolve, reject) => {
       const server = serve({ fetch: app.fetch, hostname: config.host, port }, () => {
@@ -4787,7 +6265,17 @@ export function startServer(
           appDeps.engine.shutdown?.();
           appDeps.codex?.shutdown?.();
           appDeps.cursor?.shutdown?.();
+          appDeps.antigravity?.shutdown?.();
+          appDeps.copilot?.shutdown?.();
+          backgroundRuntime?.close();
+          appDeps.sessionIndex?.close();
+          appDeps.transcriptHistory?.close?.();
+          appDeps.analyzerContext?.close?.();
+          appDeps.sessionSearch?.close?.();
+          appDeps.alignmentModel?.close?.();
+          appDeps.workPromptIndex?.close?.();
           scheduleRuntime?.close();
+          performanceMonitor?.close();
           const httpServer = server as {
             closeIdleConnections?: () => void;
             closeAllConnections?: () => void;
@@ -4801,10 +6289,11 @@ export function startServer(
           port,
           vendors:
             appDeps.vendorAvailability ??
-            (["claude", "codex", "cursor"] as const).map((vendor) => ({
+            (["claude", "codex", "cursor", "antigravity", "copilot"] as const).map((vendor) => ({
               vendor,
               available: true,
               chat: true,
+              capabilities: vendorCapabilities(vendor),
             })),
           close,
         });

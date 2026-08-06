@@ -27,6 +27,7 @@ import type {
 const INTERACTIVE_APPROVAL_POLICY = "never";
 const INTERACTIVE_SANDBOX = "danger-full-access";
 const INTERACTIVE_SANDBOX_POLICY = { type: "dangerFullAccess" } as const;
+const INTERRUPT_REQUEST_TIMEOUT_MS = 5_000;
 
 interface CodexRun extends DriverRun {
   model?: string;
@@ -299,11 +300,16 @@ export class CodexAppServerDriver implements ChatDriver {
       run.interruptRequested = true;
       return true;
     }
-    await this.client.request("turn/interrupt", {
-      threadId: sessionId,
-      turnId: run.turnId,
-    });
-    return true;
+    try {
+      await this.client.request(
+        "turn/interrupt",
+        { threadId: sessionId, turnId: run.turnId },
+        { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async interruptRemoteTurn(
@@ -313,24 +319,30 @@ export class CodexAppServerDriver implements ChatDriver {
     try {
       if (hintedTurnId) {
         try {
-          await this.client.request("turn/interrupt", {
-            threadId: sessionId,
-            turnId: hintedTurnId,
-          });
+          await this.client.request(
+            "turn/interrupt",
+            { threadId: sessionId, turnId: hintedTurnId },
+            { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
+          );
           return true;
         } catch {
           // The scanner can be one event behind a just-finished turn. Fall
           // through to discover a newer active turn before reporting failure.
         }
       }
-      const response = await this.client.request<ThreadReadResponse>("thread/read", {
-        threadId: sessionId,
-        includeTurns: true,
-      });
+      const response = await this.client.request<ThreadReadResponse>(
+        "thread/read",
+        { threadId: sessionId, includeTurns: true },
+        { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
+      );
       const turns = Array.isArray(response.thread.turns) ? response.thread.turns : [];
       const active = [...turns].reverse().find((turn) => turn.status === "inProgress");
       if (!active?.id) return false;
-      await this.client.request("turn/interrupt", { threadId: sessionId, turnId: active.id });
+      await this.client.request(
+        "turn/interrupt",
+        { threadId: sessionId, turnId: active.id },
+        { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
+      );
       return true;
     } catch {
       return false;
@@ -393,10 +405,11 @@ export class CodexAppServerDriver implements ChatDriver {
       });
       run.turnId = response.turn.id;
       if (run.interruptRequested) {
-        await this.client.request("turn/interrupt", {
-          threadId: run.sessionId,
-          turnId: run.turnId,
-        });
+        await this.client.request(
+          "turn/interrupt",
+          { threadId: run.sessionId, turnId: run.turnId },
+          { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
+        );
       }
     } catch (error) {
       run.interruptRequested = false;
@@ -440,7 +453,6 @@ export class CodexAppServerDriver implements ChatDriver {
         this.client.respondError(message.id, `No live Attend session for ${threadId}`);
       return;
     }
-
     switch (message.method) {
       case "thread/goal/updated": {
         const goal = record(params.goal) as unknown as SessionGoal;

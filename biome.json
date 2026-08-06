@@ -1,7 +1,8 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "files": {
-    "ignore": ["dist", "legacy", "node_modules"]
+    "ignore": ["dist", "legacy", "node_modules"],
+    "maxSize": 1572864
   },
   "formatter": {
     "enabled": true,

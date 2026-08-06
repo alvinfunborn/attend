@@ -21,7 +21,18 @@ try {
   mkdirSync(installRoot);
   execFileSync(
     npm,
-    ["install", "--prefix", installRoot, "--no-audit", "--no-fund", path.join(smokeRoot, filename)],
+    [
+      "install",
+      "--prefix",
+      installRoot,
+      "--no-audit",
+      "--no-fund",
+      // The smoke exercises Attend's packed CLI, not the SDK's platform binary.
+      // Omitting optional packages avoids a large network download on every run;
+      // normal user installs still receive the matching Claude binary.
+      "--omit=optional",
+      path.join(smokeRoot, filename),
+    ],
     { stdio: "inherit" },
   );
 

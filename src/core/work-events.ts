@@ -206,6 +206,42 @@ export class WorkEventStore {
     const at = validAt(event.at) ?? Date.now();
     const dedupeWithinMs = Math.max(0, opts.dedupeWithinMs ?? 0);
     return this.transaction(() => {
+      if (event.kind === "user_prompt" && event.source === "live") {
+        const chars = Math.max(0, Math.floor(event.chars ?? 0));
+        const transcript = this.db
+          .prepare(
+            `SELECT * FROM work_events
+             WHERE source = 'transcript' AND kind = 'user_prompt' AND session_id = ?
+               AND at BETWEEN ? AND ?
+             ORDER BY at DESC LIMIT 1`,
+          )
+          .get(event.sessionId, at - 5_000, at + 5_000) as unknown as EventRow | undefined;
+        // Transcript indexing and live event delivery race in either order.
+        // Promote the materialized row to the more precise live timestamp /
+        // visible-user character count rather than counting one turn twice.
+        if (transcript) {
+          const merged = this.db
+            .prepare(
+              `UPDATE work_events
+               SET at = ?,
+                   vendor = COALESCE(?, vendor),
+                   queue_id = COALESCE(?, queue_id),
+                   chars = CASE WHEN ? > 0 THEN ? ELSE chars END,
+                   source = 'live'
+               WHERE id = ?
+               RETURNING *`,
+            )
+            .get(
+              at,
+              event.vendor ?? null,
+              event.queueId ?? null,
+              chars,
+              chars,
+              transcript.id,
+            ) as unknown as EventRow;
+          return rowEvent(merged);
+        }
+      }
       if (dedupeWithinMs > 0) {
         const duplicate = this.db
           .prepare(
@@ -280,10 +316,10 @@ export class WorkEventStore {
         for (const prompt of promptActivity) {
           const at = validAt(prompt.at);
           if (!at) continue;
+          const chars = Math.max(0, Math.floor(prompt.chars));
           const live = nearbyLivePrompt.get(session.sessionId, at - 5_000, at + 5_000) as
             | { id: string; chars: number | null }
             | undefined;
-          const chars = Math.max(0, Math.floor(prompt.chars));
           if (live) {
             if (!live.chars && chars > 0) added += changed(enrichLivePrompt.run(chars, live.id));
             continue;

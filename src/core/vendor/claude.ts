@@ -190,6 +190,20 @@ function appendClaudeLine(state: ClaudeSessionState, line: string): void {
 
 const claudeJsonlParser: IncrementalJsonlParser<ClaudeSessionState> = {
   create: createClaudeState,
+  restore: (file, checkpoint) => {
+    if (!checkpoint || typeof checkpoint !== "object") return null;
+    const saved = checkpoint as Partial<ClaudeSessionState>;
+    if (!saved.session || typeof saved.session !== "object") return null;
+    return {
+      session: { ...saved.session, path: file, vendor: "claude" },
+      previousTs:
+        saved.previousTs === null ||
+        (typeof saved.previousTs === "number" && Number.isFinite(saved.previousTs))
+          ? saved.previousTs
+          : null,
+    };
+  },
+  serialize: (state) => state,
   append: appendClaudeLine,
   snapshot: (state) => state.session,
 };

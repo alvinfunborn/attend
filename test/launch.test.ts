@@ -27,6 +27,12 @@ describe("buildCommand", () => {
       "codex fork x1",
     );
     expect(() => buildCommand("fork", "cursor", { sessionId: "x1" })).toThrow("interactive /fork");
+    expect(() => buildCommand("fork", "antigravity", { sessionId: "x1" })).toThrow(
+      "does not expose a native fork",
+    );
+    expect(() => buildCommand("fork", "copilot", { sessionId: "x1" })).toThrow(
+      "does not expose a native fork",
+    );
   });
   it("new, with and without an initial prompt", () => {
     expect(displayCommand(buildCommand("new", "claude"))).toBe("claude");
@@ -40,6 +46,23 @@ describe("buildCommand", () => {
     expect(
       displayCommand(buildCommand("new", "cursor", { model: "composer-2", prompt: "fix it" })),
     ).toBe("cursor-agent --model composer-2 'fix it'");
+  });
+  it("Antigravity and Copilot terminal commands", () => {
+    expect(displayCommand(buildCommand("resume", "antigravity", { sessionId: "g1" }))).toBe(
+      "agy --conversation g1",
+    );
+    expect(displayCommand(buildCommand("resume", "copilot", { sessionId: "c1" }))).toBe(
+      "copilot --resume=c1",
+    );
+    expect(
+      displayCommand(
+        buildCommand("new", "copilot", {
+          prompt: "review",
+          model: "gpt-5.3-codex",
+          effort: "high",
+        }),
+      ),
+    ).toBe("copilot --model gpt-5.3-codex --reasoning-effort high --interactive review");
   });
   it("new, with model and effort overrides", () => {
     expect(displayCommand(buildCommand("new", "claude", { model: "sonnet", effort: "high" }))).toBe(
