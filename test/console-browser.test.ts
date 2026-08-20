@@ -157,6 +157,28 @@ const commentView: ConsoleView = {
   },
 };
 
+// A thread whose reply is still streaming, so the drawer opens mid-turn and the
+// composer must queue rather than send.
+const commentGeneratingView: ConsoleView = {
+  ...raceView,
+  vaultState: {
+    commentThreads: {
+      "comment-generating": {
+        id: "comment-generating",
+        parentSessionId: "s1",
+        anchorKey: "assistant:0",
+        anchorText: "An answer with an unread comment",
+        providerSessionId: "comment-provider-generating",
+        vendor: "claude",
+        cwd: "/tmp/project",
+        createdAt: 101,
+        status: "generating",
+        messageCount: 2,
+      },
+    },
+  },
+};
+
 const commentMotionView: ConsoleView = {
   ...raceView,
   vaultState: {
@@ -934,6 +956,147 @@ describe("console browser behavior", () => {
     expect(commentFlow.foot.position).toBe("relative");
     expect(pageErrors).toEqual([]);
     await page.close();
+  }, 15_000);
+
+  it("queues a comment typed mid-turn and materializes it when the server drains it", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    page.setDefaultTimeout(2_000);
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    const queuePosts: Array<Record<string, unknown>> = [];
+    const queueItems: Array<{ id: string; text: string; vendor: string }> = [];
+    let commentSendCalls = 0;
+    let queueGets = 0;
+    let hangQueuePost = false;
+
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__commentQueueEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(commentGeneratingView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [{ role: "assistant", text: "An answer with an unread comment" }],
+        });
+      } else if (url.pathname === "/comments/messages") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            thread: commentGeneratingView.vaultState?.commentThreads?.["comment-generating"],
+            messages: [],
+          },
+        });
+      } else if (url.pathname === "/comments/send") {
+        commentSendCalls += 1;
+        await route.fulfill({ json: { ok: true, thread: {} } });
+      } else if (url.pathname === "/chat/queue" && request.method() === "POST") {
+        const body = request.postDataJSON() as Record<string, unknown>;
+        queuePosts.push({ ...body, session: url.searchParams.get("session") });
+        // Leaves the optimistic row stuck without a server id, which is the
+        // state that must not survive a thread switch.
+        if (hangQueuePost) return;
+        queueItems.push({ id: "queued-1", text: String(body.text), vendor: "claude" });
+        await route.fulfill({
+          json: {
+            ok: true,
+            item: queueItems[0],
+            items: queueItems,
+            parked: false,
+            steerable: false,
+          },
+        });
+      } else if (url.pathname === "/chat/queue") {
+        queueGets += 1;
+        await route.fulfill({
+          json: { ok: true, items: queueItems, parked: false, steerable: false },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.locator('#list .item[data-session-id="s1"] .it-comment').click();
+      await page.locator("#commentInput").fill("one more thing");
+      await page.locator("#commentInput").press("Enter");
+
+      // Mid-turn the draft becomes a queue row, never an optimistic bubble.
+      await expect.poll(() => page.locator("#commentQueue .qitem").count()).toBe(1);
+      expect(await page.locator("#commentQueue").textContent()).toContain("one more thing");
+      expect(await page.locator("#commentMsgs").textContent()).not.toContain("one more thing");
+      // It lands in the shared queue store, not on the comment send route.
+      await expect.poll(() => queuePosts.length).toBe(1);
+      expect(queuePosts[0]).toMatchObject({
+        text: "one more thing",
+        session: "comment-provider-generating",
+      });
+      expect(commentSendCalls).toBe(0);
+
+      // Draining it is what turns the row into a real user message.
+      await page.evaluate(() => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__commentQueueEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "comment-provider-generating",
+            vendor: "claude",
+            emittedAt: Date.now(),
+            event: {
+              kind: "queued_turn_started",
+              queueId: "queued-1",
+              text: "one more thing",
+              startedAt: Date.now(),
+            },
+          }),
+        });
+      });
+      await expect.poll(() => page.locator("#commentQueue .qitem").count()).toBe(0);
+      await expect
+        .poll(() => page.locator("#commentMsgs").textContent())
+        .toContain("one more thing");
+
+      // An enqueue still in flight leaves an optimistic row with no server id.
+      // Reopening must rebuild from the server rather than keep that row, which
+      // would otherwise also suppress every later refresh.
+      hangQueuePost = true;
+      queueItems.length = 0;
+      queueItems.push({ id: "queued-2", text: "left by another tab", vendor: "claude" });
+      await page.locator("#commentInput").fill("stuck in flight");
+      await page.locator("#commentInput").press("Enter");
+      await expect
+        .poll(() => page.locator("#commentQueue").textContent())
+        .toContain("stuck in flight");
+      const getsBeforeReopen = queueGets;
+      await page.locator("#commentClose").click();
+      await page.locator('#list .item[data-session-id="s1"] .it-comment').click();
+      await expect.poll(() => queueGets).toBeGreaterThan(getsBeforeReopen);
+      await expect
+        .poll(() => page.locator("#commentQueue").textContent())
+        .toContain("left by another tab");
+      expect(await page.locator("#commentQueue").textContent()).not.toContain("stuck in flight");
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
   }, 15_000);
 
   it("edits scheduled user messages inline in the queued area", async () => {
@@ -3547,6 +3710,155 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("resolves the fork prefix in one read while the transcript keeps growing", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(3_000);
+    const historyRequests: string[] = [];
+    type ForkPrefixBody = { contextMessages?: Array<{ role?: string; text?: string }> };
+    let forkBody: ForkPrefixBody | null = null;
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(composerRailView) });
+      } else if (url.pathname === "/chat/fork") {
+        forkBody = route.request().postDataJSON() as typeof forkBody;
+        await route.fulfill({
+          json: { ok: true, session: "fork-prefix-child", parentSessionId: "s1", generating: true },
+        });
+      } else if (url.pathname === "/chat/messages") {
+        historyRequests.push(url.search);
+        if (url.searchParams.get("full") === "1") {
+          // The turn kept writing after the first page was served, so this read
+          // sees a newer file version. It is still internally consistent, which
+          // is the whole point of asking for it in one request.
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: [
+                {
+                  role: "user",
+                  text: "old question 0",
+                  tools: [],
+                  historyId: "m0",
+                  historyIndex: 0,
+                },
+                {
+                  role: "assistant",
+                  text: "old answer 0",
+                  tools: [],
+                  historyId: "m1",
+                  historyIndex: 1,
+                },
+                {
+                  role: "user",
+                  text: "old question 1",
+                  tools: [],
+                  historyId: "m2",
+                  historyIndex: 2,
+                },
+                {
+                  role: "assistant",
+                  text: "old answer 1",
+                  tools: [],
+                  historyId: "m3",
+                  historyIndex: 3,
+                },
+                {
+                  role: "user",
+                  text: "recent question",
+                  tools: [],
+                  historyId: "m4",
+                  historyIndex: 4,
+                },
+                {
+                  role: "assistant",
+                  text: "recent answer",
+                  tools: [],
+                  historyId: "m5",
+                  historyIndex: 5,
+                },
+              ],
+              page: {
+                before: 0,
+                hasMore: false,
+                total: 6,
+                version: "1:2:2000:9000",
+                sourceTruncated: false,
+              },
+            },
+          });
+        } else {
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: [
+                {
+                  role: "user",
+                  text: "recent question",
+                  tools: [],
+                  historyId: "m4",
+                  historyIndex: 4,
+                },
+                {
+                  role: "assistant",
+                  text: "recent answer",
+                  tools: [],
+                  historyId: "m5",
+                  historyIndex: 5,
+                },
+              ],
+              page: {
+                before: 4,
+                hasMore: true,
+                total: 6,
+                version: "1:2:1000:5000",
+                sourceTruncated: false,
+              },
+            },
+          });
+        }
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect.poll(() => page.locator("#msgs").textContent()).toContain("recent answer");
+
+    const recent = page.locator("#msgs .msg.user", { hasText: "recent question" });
+    await recent.hover();
+    await recent.locator(".msg-edit").click();
+
+    await expect.poll(() => page.locator("#msgs .inline-edit-ta").count()).toBe(1);
+    expect(await page.locator("#msgs .inline-edit-ta").inputValue()).toBe("recent question");
+    expect(await page.locator("#toastHost .toast.warn").count()).toBe(0);
+    expect(historyRequests.filter((search) => search.includes("full=1"))).toHaveLength(1);
+    expect(historyRequests.filter((search) => search.includes("before="))).toHaveLength(0);
+
+    await page.locator("#msgs .inline-edit-ta").fill("edited question");
+    await page.locator("#msgs .inline-edit-save").click();
+
+    // The point of the whole exercise: the branch carries every message before
+    // the fork point, including the ones that were never rendered, and not the
+    // forked message itself.
+    await expect.poll(() => forkBody).not.toBeNull();
+    expect((forkBody as ForkPrefixBody | null)?.contextMessages).toMatchObject([
+      { role: "user", text: "old question 0" },
+      { role: "assistant", text: "old answer 0" },
+      { role: "user", text: "old question 1" },
+      { role: "assistant", text: "old answer 1" },
+    ]);
+    await page.close();
+  });
+
   it("loads one targeted window when a Pin is outside the recent chat page", async () => {
     const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
     page.setDefaultTimeout(3_000);
@@ -5647,6 +5959,179 @@ describe("console browser behavior", () => {
     await page.close();
   }, 15_000);
 
+  it("keeps a half-typed rail todo focused while session data streams in", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    page.setDefaultTimeout(2_000);
+    const typingView: ConsoleView = {
+      ...composerRailView,
+      vaultState: {
+        ...composerRailView.vaultState,
+        sessionTodos: {
+          s1: [
+            {
+              id: "todo-1",
+              text: "Verify permissions",
+              createdAt: 1,
+              updatedAt: 1,
+              completed: false,
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__railBus = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(typingView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await page.locator("#railTodos").click();
+    await expect.poll(() => page.locator("#composerRailPop .rail-item").count()).toBe(1);
+
+    // A half-written todo: typed, not submitted, caret parked mid-word.
+    await page.locator("#railAddInput").pressSequentially("Check the deploy");
+    await page.locator("#railAddInput").evaluate((input) => {
+      (input as unknown as { setSelectionRange(a: number, b: number): void }).setSelectionRange(
+        5,
+        5,
+      );
+    });
+    const draftState = async () =>
+      page.locator("#railAddInput").evaluate((input) => {
+        const field = input as unknown as {
+          value: string;
+          selectionStart: number;
+          ownerDocument: { activeElement: unknown };
+        };
+        return {
+          value: field.value,
+          caret: field.selectionStart,
+          focused: field.ownerDocument.activeElement === input,
+          open: !!input.ownerDocument.getElementById("composerRailPop"),
+        };
+      });
+    expect(await draftState()).toEqual({
+      value: "Check the deploy",
+      caret: 5,
+      focused: true,
+      open: true,
+    });
+    // Tag the live node: surviving inbound data proves the panel was never
+    // rebuilt, which is the only thing that keeps an IME composition alive
+    // (a rebuild loses it even though value/caret would be replayed).
+    await page.locator("#railAddInput").evaluate((input) => {
+      (input as unknown as Record<string, unknown>).__railNodeMark = "original";
+    });
+
+    // Inbound session data — an index revision, a live snapshot and a daemon
+    // verdict — repaints the rail buttons. None of it may rebuild the panel.
+    await page.evaluate((sessions) => {
+      const bus = (globalThis as unknown as Record<string, unknown>).__railBus as {
+        onmessage: ((event: { data: string }) => void) | null;
+      };
+      bus.onmessage?.({
+        data: JSON.stringify({
+          kind: "session_index",
+          epoch: "typing-server",
+          revision: 2,
+          pending: false,
+          sessions,
+          knownDirs: ["/tmp/project"],
+          defaultNewDir: "/tmp/project",
+          tags: [],
+          scannedAt: 2,
+        }),
+      });
+      bus.onmessage?.({
+        data: JSON.stringify({
+          kind: "session_event",
+          sessionId: "s1",
+          vendor: "claude",
+          emittedAt: 2,
+          event: { kind: "user_turn_started", text: "a turn starts while typing" },
+        }),
+      });
+      bus.onmessage?.({
+        data: JSON.stringify({
+          active: ["s1"],
+          startedAt: { s1: 1 },
+          lastAssistantAt: { s1: 2 },
+          clientSessionIds: {},
+          queues: {},
+          stats: { sessions1h: 1, prompts1h: 1, chars1h: 10 },
+        }),
+      });
+      bus.onmessage?.({
+        data: JSON.stringify({
+          active: [],
+          startedAt: {},
+          lastAssistantAt: { s1: 3 },
+          clientSessionIds: {},
+          queues: {},
+          stats: { sessions1h: 1, prompts1h: 1, chars1h: 10 },
+        }),
+      });
+      bus.onmessage?.({
+        data: JSON.stringify({
+          kind: "analysis",
+          sessionId: "s1",
+          analysis: {
+            brief: "Reviewing the deploy",
+            reason: "waiting on a reply",
+            state: "needs_input",
+            priority: 7,
+            etaMin: 5,
+            nextStep: "Confirm the rollout",
+            probe: "Which revision is live?",
+          },
+        }),
+      });
+    }, typingView.sessions);
+    await expect.poll(() => page.locator("#railProbe").isVisible()).toBe(true);
+    expect(await draftState()).toEqual({
+      value: "Check the deploy",
+      caret: 5,
+      focused: true,
+      open: true,
+    });
+    expect(
+      await page
+        .locator("#railAddInput")
+        .evaluate((input) => (input as unknown as Record<string, unknown>).__railNodeMark),
+    ).toBe("original");
+
+    // A rebuild the user *did* ask for (completing another todo) still keeps the
+    // draft and hands focus back to the control that was clicked.
+    await page.locator("#composerRailPop .rail-todo-check").check();
+    await expect.poll(() => page.locator("#composerRailPop .rail-item.done").count()).toBe(1);
+    expect(await page.locator("#railAddInput").inputValue()).toBe("Check the deploy");
+    expect(await page.locator(".rail-add button").isEnabled()).toBe(true);
+    expect(
+      await page
+        .locator("#composerRailPop .rail-todo-check")
+        .evaluate((check) => check.ownerDocument.activeElement === check),
+    ).toBe(true);
+    await page.close();
+  }, 15_000);
+
   it("shows the next-step ghost before the empty composer is focused", async () => {
     const page = await browser.newPage();
     const nextStepView: ConsoleView = {
@@ -6785,6 +7270,102 @@ describe("console browser behavior", () => {
     releaseAbort();
     await expect.poll(() => sentBodies.length).toBe(2);
     expect(sentBodies[1]).toMatchObject({ text: "Edited message to resend" });
+    await page.close();
+  }, 10_000);
+
+  it("keeps a stopped waiting turn resendable when its delayed lifecycle events arrive", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 1200, height: 900 },
+    });
+    const sentBodies: Array<Record<string, unknown>> = [];
+    let forkRequests = 0;
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as {
+        __stoppedWaitingEventSource?: {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+      };
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__stoppedWaitingEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(composerRailView),
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [
+            { role: "user", text: "Earlier question" },
+            { role: "assistant", text: "Earlier answer" },
+          ],
+        });
+      } else if (url.pathname === "/chat/send") {
+        sentBodies.push(request.postDataJSON() as Record<string, unknown>);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/fork") {
+        forkRequests++;
+        await route.fulfill({ json: { ok: true, session: "unexpected-fork" } });
+      } else if (url.pathname === "/chat/abort") {
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/queue") {
+        await route.fulfill({ json: { ok: true, parked: false, items: [] } });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await expect.poll(() => page.locator("#msgs .msg.user").count()).toBe(1);
+    await page.locator("#input").fill("Stopped while waiting");
+    await page.locator("#send").click();
+    await expect.poll(() => page.locator("#send").textContent()).toContain("stop");
+    await page.locator("#send").click();
+    await expect.poll(() => page.locator("#send").textContent()).toBe("send");
+
+    await page.evaluate(() => {
+      const source = (
+        globalThis as unknown as {
+          __stoppedWaitingEventSource?: {
+            onmessage: ((event: { data: string }) => void) | null;
+          };
+        }
+      ).__stoppedWaitingEventSource;
+      const emit = (event: Record<string, unknown>) =>
+        source?.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_event",
+            sessionId: "s1",
+            emittedAt: Date.now(),
+            event,
+          }),
+        });
+      emit({ kind: "user_turn_started", text: "Stopped while waiting", attachments: [] });
+      emit({ kind: "result", ok: true, text: "stopped" });
+    });
+    await expect.poll(() => page.locator("#send").textContent()).toBe("send");
+
+    const latestUser = page.locator("#msgs .msg.user").last();
+    await latestUser.hover();
+    await latestUser.locator(".msg-edit").click();
+    const save = latestUser.locator(".inline-edit-save");
+    expect((await save.textContent())?.toLowerCase()).toContain("send");
+    await latestUser.locator(".inline-edit-ta").fill("Edited after stopped waiting");
+    await save.click();
+    await expect.poll(() => sentBodies.length).toBe(2);
+    expect(sentBodies[1]).toMatchObject({ text: "Edited after stopped waiting" });
+    expect(forkRequests).toBe(0);
     await page.close();
   }, 10_000);
 
@@ -11069,6 +11650,106 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("keeps middle-panel cards mounted when navigation projections settle", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+    const projectedView: ConsoleView = {
+      ...raceView,
+      sessions: raceView.sessions.map((session, index) => ({
+        ...session,
+        unread: index === 1,
+        seen: index === 0,
+      })),
+    };
+    await page.addInitScript(() => {
+      localStorage.setItem("attend.sessionPanelOpen", "1");
+      class StubEventSource {
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      const session = projectedView.sessions.find(
+        (candidate) => candidate.sessionId === url.searchParams.get("session"),
+      );
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(projectedView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/session/status") {
+        await route.fulfill({
+          json: { ok: true, view: session ? { ...session, unread: false, seen: true } : null },
+        });
+      } else if (url.pathname === "/session/engagement") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            view: session
+              ? { ...session, pattern: "unknown", patternReason: null, patternData: null }
+              : null,
+          },
+        });
+      } else {
+        await route.fulfill({ json: {} });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    await page.locator('#sessionPanelList .item[data-session-id="s1"]').click();
+    await page.waitForTimeout(1_050);
+    await page.evaluate(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown> & {
+        document: { querySelector(selector: string): unknown };
+      };
+      browserGlobal.__middlePanelNodes = {
+        s1: browserGlobal.document.querySelector('#sessionPanelList .item[data-session-id="s1"]'),
+        s2: browserGlobal.document.querySelector('#sessionPanelList .item[data-session-id="s2"]'),
+      };
+    });
+    const engagementResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/session/engagement",
+    );
+    const statusResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/session/status" &&
+        new URL(response.url()).searchParams.get("session") === "s2",
+    );
+    await page.locator('#sessionPanelList .item[data-session-id="s2"]').click();
+    await Promise.all([engagementResponse, statusResponse]);
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const browserGlobal = globalThis as unknown as Record<string, unknown> & {
+            document: { querySelector(selector: string): unknown };
+          };
+          const refs = browserGlobal.__middlePanelNodes as { s1: unknown; s2: unknown };
+          return {
+            s1:
+              refs.s1 ===
+              browserGlobal.document.querySelector('#sessionPanelList .item[data-session-id="s1"]'),
+            s2:
+              refs.s2 ===
+              browserGlobal.document.querySelector('#sessionPanelList .item[data-session-id="s2"]'),
+          };
+        }),
+      )
+      .toEqual({ s1: true, s2: true });
+    await expect
+      .poll(() =>
+        page.locator('#sessionPanelList .item[data-session-id="s1"]').getAttribute("class"),
+      )
+      .not.toContain("avoidance");
+    await expect
+      .poll(() =>
+        page
+          .locator('#sessionPanelList .item[data-session-id="s2"] .it-status')
+          .getAttribute("class"),
+      )
+      .toContain("seen");
+    await page.close();
+  });
+
   it("defers transcript-scan activity until a generating session finishes", async () => {
     const page = await browser.newPage();
     const now = Date.now();
@@ -11555,6 +12236,245 @@ describe("console browser behavior", () => {
     await expect.poll(() => page.locator("#h-title").textContent()).toContain("Avoidance session");
     await page.locator("#railTodos").click();
     expect(await page.locator("#composerRailPop").textContent()).toContain("Verify the migration");
+    await page.close();
+  });
+
+  it("browses shortcuts, notes and todos in the hub and remembers the open list", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    page.setDefaultTimeout(2_000);
+    const uiPatches: Record<string, unknown>[] = [];
+    const hubView: ConsoleView = {
+      ...composerRailView,
+      vaultState: {
+        shortcuts: [
+          { id: "shortcut-1", text: "Review changes", createdAt: 1, updatedAt: 1 },
+          { id: "shortcut-2", text: "Run the tests", createdAt: 2, updatedAt: 2 },
+        ],
+        sessionNotes: {
+          s1: [{ id: "note-1", text: "Rollout needs the flag", createdAt: 5, updatedAt: 5 }],
+        },
+        sessionTodos: {
+          s1: [
+            {
+              id: "session-1",
+              text: "Verify the migration",
+              createdAt: 20,
+              updatedAt: 20,
+              completed: false,
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(hubView) });
+      } else if (url.pathname === "/vault/ui-state") {
+        uiPatches.push(request.postDataJSON() as Record<string, unknown>);
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+
+    const tab = (kind: string) => page.locator(`.todohub-tab[data-hub-kind="${kind}"]`);
+    const selectedTab = () =>
+      page.locator('.todohub-tab[aria-selected="true"]').getAttribute("data-hub-kind");
+    const rowTexts = () => page.locator("#todoHubBody .todohub-text").allTextContents();
+    const rowGridColumns = () =>
+      page
+        .locator("#todoHubBody .todohub-item")
+        .first()
+        .evaluate((row) => {
+          const view = row.ownerDocument.defaultView as unknown as {
+            getComputedStyle(target: typeof row): { gridTemplateColumns: string };
+          };
+          return view.getComputedStyle(row).gridTemplateColumns.split(/\s+/).length;
+        });
+
+    // Tabs read left→right shortcuts · notes · todo, and a fresh browser opens on todo.
+    await page.locator("#todoHubToggle").click();
+    expect(
+      await page
+        .locator("#todoHubTabs .todohub-tab")
+        .evaluateAll((tabs) => tabs.map((node) => node.getAttribute("data-hub-kind"))),
+    ).toEqual(["shortcuts", "notes", "todo"]);
+    expect(await selectedTab()).toBe("todo");
+    expect(await rowTexts()).toEqual(["Verify the migration"]);
+    // Todos are the one completable list, so theirs is the only checkbox column.
+    expect(await rowGridColumns()).toBe(3);
+    expect(await page.locator("#todoHubBody .todohub-check").count()).toBe(1);
+    expect(await tab("shortcuts").locator(".todohub-tab-count").textContent()).toBe("2");
+    expect(await tab("notes").locator(".todohub-tab-count").textContent()).toBe("1");
+
+    // Shortcuts: machine-global, so no session scope, and order is data — it
+    // drives completion priority, so the hub can reorder it.
+    await tab("shortcuts").click();
+    expect(await rowTexts()).toEqual(["Review changes", "Run the tests"]);
+    expect(await page.locator("#todoHubBody .todohub-scope").count()).toBe(0);
+    // A list with no checkbox must not keep the checkbox column: the text would
+    // land in that ~1rem track and wrap one character per line.
+    expect(await rowGridColumns()).toBe(2);
+    const [firstRowBox, firstTextBox] = await Promise.all([
+      page.locator("#todoHubBody .todohub-item").first().boundingBox(),
+      page.locator("#todoHubBody .todohub-text").first().boundingBox(),
+    ]);
+    if (!firstRowBox || !firstTextBox) throw new Error("Missing shortcut row geometry");
+    expect(firstTextBox.width).toBeGreaterThan(firstRowBox.width * 0.4);
+    expect(await page.locator("#todoHubBody .todohub-check").count()).toBe(0);
+    expect(await page.locator("#todoHubAddInput").getAttribute("placeholder")).toBe(
+      "Add a shortcut…",
+    );
+    await page
+      .locator('.todohub-item[data-todo-id="shortcut-1"] .qmove-down')
+      .evaluate((button) => (button as unknown as { click(): void }).click());
+    await expect.poll(() => rowTexts()).toEqual(["Run the tests", "Review changes"]);
+    await page.locator("#todoHubAddInput").fill("Ship the release");
+    await page.locator("#todoHubAddInput").press("Enter");
+    await expect.poll(() => rowTexts()).toContain("Ship the release");
+    await expect
+      .poll(() =>
+        uiPatches.some(
+          (patch) =>
+            Array.isArray(patch.shortcuts) &&
+            (patch.shortcuts as { text?: string }[]).some(
+              (item) => item.text === "Ship the release",
+            ),
+        ),
+      )
+      .toBe(true);
+
+    // Notes are per session: the hub gathers every session's notes, and a new one
+    // attaches to the open session rather than inventing an owner.
+    await tab("notes").click();
+    expect(await rowTexts()).toEqual(["Rollout needs the flag"]);
+    expect(await page.locator("#todoHubBody .todohub-scope").first().textContent()).toContain(
+      "Avoidance session",
+    );
+    expect(await page.locator("#todoHubAddInput").getAttribute("placeholder")).toContain(
+      "Add a note to Avoidance session",
+    );
+    await page.locator("#todoHubAddInput").fill("Check the rollback path");
+    await page.locator("#todoHubAddInput").press("Enter");
+    await expect.poll(() => rowTexts()).toContain("Check the rollback path");
+    await expect
+      .poll(() =>
+        uiPatches.some((patch) => {
+          const notes = (patch.sessionNotes as Record<string, { text?: string }[]>) ?? null;
+          return !!notes?.s1?.some((item) => item.text === "Check the rollback path");
+        }),
+      )
+      .toBe(true);
+    // The rail is the same collection seen from the session's side.
+    await page.locator("#todoHubClose").click();
+    await page.locator("#railNotes").click();
+    expect(await page.locator("#composerRailPop").textContent()).toContain(
+      "Check the rollback path",
+    );
+
+    // The open list survives a close/reopen and a reload — it is browser-local.
+    await page.locator("#todoHubToggle").click();
+    expect(await selectedTab()).toBe("notes");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator("#todoHubToggle").click();
+    expect(await selectedTab()).toBe("notes");
+    await page.close();
+  }, 20_000);
+
+  it("shows structured memory citations without exposing the raw trailer", async () => {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 760 } });
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(raceView) });
+      } else if (url.pathname === "/chat/messages") {
+        const older = Array.from({ length: 61 }, (_value, index) => [
+          { role: "user", text: `Older question ${index}`, tools: [] },
+          { role: "assistant", text: `Older answer ${index}`, tools: [] },
+        ]).flat();
+        await route.fulfill({
+          json: [
+            ...older,
+            { role: "user", text: "What informed this answer?", tools: [] },
+            {
+              role: "assistant",
+              text: "Prior evidence informed the answer.",
+              tools: [],
+              memoryCitations: {
+                entries: [
+                  {
+                    path: "MEMORY.md",
+                    lineStart: 1449,
+                    lineEnd: 1465,
+                    note: "Used prior P2P link recording evidence routing",
+                  },
+                  {
+                    path: "rollout_summaries/prior.md",
+                    lineStart: 20,
+                    lineEnd: 45,
+                    note: "Prior sidecar incident guided verification",
+                  },
+                ],
+                rolloutIds: [],
+              },
+            },
+          ],
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await expect
+      .poll(() => page.locator("#msgs").getAttribute("class"))
+      .toContain("transcript-virtualized");
+    const assistant = page.locator("#msgs .msg.assistant").last();
+    await expect.poll(() => assistant.locator(".memory-citation-trigger").count()).toBe(1);
+    expect(await assistant.locator(".bubble").getAttribute("data-raw")).toBe(
+      "Prior evidence informed the answer.",
+    );
+    expect(await assistant.textContent()).not.toContain("oai-mem-citation");
+    expect(await assistant.locator(".memory-citation-trigger").textContent()).toContain(
+      "Memories · 2",
+    );
+
+    await assistant.locator(".memory-citation-trigger").click();
+    const popover = page.locator("#memoryCitationPopover");
+    await expect.poll(() => popover.isVisible()).toBe(true);
+    expect(await popover.locator(".memory-citation-note").allTextContents()).toEqual([
+      "Used prior P2P link recording evidence routing",
+      "Prior sidecar incident guided verification",
+    ]);
+    expect(await popover.locator(".memory-citation-source").first().textContent()).toBe(
+      "MEMORY.md · L1449–1465",
+    );
+    await page.keyboard.press("Escape");
+    await expect.poll(() => popover.isHidden()).toBe(true);
+    expect(await assistant.locator(".memory-citation-trigger").getAttribute("aria-expanded")).toBe(
+      "false",
+    );
     await page.close();
   });
 

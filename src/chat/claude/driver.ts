@@ -342,6 +342,7 @@ export class ClaudeSdkDriver implements ChatDriver {
           }
           for await (const message of stream) {
             this.observeBackground(run, message);
+            this.maybeReviveTurn(run, message);
             this.scheduleStall(run);
             const events = toUiEventsFromClaude(message);
             const knownFailure = events.reduce<ReturnType<typeof classifyClaudeError>>(
@@ -465,6 +466,32 @@ export class ClaudeSdkDriver implements ChatDriver {
       run.resultDeferred =
         terminalReason === "background_requested" || run.backgroundTaskIds.size > 0;
     }
+  }
+
+  /**
+   * A finished turn can start again with no user input: when a background subagent /
+   * teammate / workflow settles, the CLI injects its task notification and the model
+   * resumes on its own. With `turnActive` false, every event of that provider-initiated
+   * turn — including its final result — was dropped by `emit`, so the UI stayed on
+   * "generated", the daemon never re-analyzed, and a session that was actively working
+   * (often spawning its *next* subagent) looked idle for its whole self-driven run.
+   * An assistant message while no turn is active is definitive proof the model is
+   * running again (thinking-only messages count — they arrive well before the first
+   * visible block), so revive the turn; the next result then ends it normally
+   * (turn-end → daemon re-analysis → UI). A pending AskUserQuestion still parks the
+   * session: the question stays the user's move, matching `emit`'s handling.
+   */
+  private maybeReviveTurn(run: ClaudeRun, message: SDKMessage): void {
+    if (run.turnActive || run.done || run.awaitingQuestionToolUseId) return;
+    if (message.type !== "assistant") return;
+    run.turnActive = true;
+    run.turnStartedAt = Date.now();
+    // A revived turn is a fresh turn: reconnecting subscribers must not replay the
+    // previous turn's buffer ahead of it.
+    run.events = [];
+    run.resultDeferred = false;
+    if (run.sessionId) this.idle.cancel(run.sessionId);
+    this.runtime.publish(run, { kind: "sync", turnActive: true, startedAt: run.turnStartedAt });
   }
 
   private emit(run: ClaudeRun, event: UiEvent): boolean {

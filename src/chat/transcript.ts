@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import type { MemoryCitationBundle } from "./memory-citations.js";
 
 export interface ToolCall {
   id?: string | null;
@@ -18,6 +19,8 @@ export interface TranscriptMsg {
   role: "user" | "assistant";
   text: string;
   tools: ToolCall[];
+  /** Codex local-memory provenance parsed from the assistant's terminal trailer. */
+  memoryCitations?: MemoryCitationBundle;
   /** epoch ms parsed from the transcript row, when the vendor records one */
   ts?: number;
   /** Stable content identity used for direct Pin history lookup. */

@@ -33,6 +33,7 @@ function isInputTool(name: string, input: unknown): boolean {
 function isTurnEvent(event: UiEvent): boolean {
   return (
     event.kind === "assistant_text" ||
+    event.kind === "assistant_memory_citations" ||
     event.kind === "tool_use" ||
     event.kind === "tool_result" ||
     event.kind === "result" ||
@@ -284,6 +285,7 @@ export class ProcessChatDriver implements ChatDriver {
     if (run.awaitingInputToolUseId) {
       if (
         event.kind === "assistant_text" ||
+        event.kind === "assistant_memory_citations" ||
         event.kind === "result" ||
         event.kind === "error" ||
         (event.kind === "tool_result" && event.id === run.awaitingInputToolUseId)

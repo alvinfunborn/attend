@@ -253,14 +253,16 @@ describe("renderConsole", () => {
     expect(html).toContain("function quotedInstructionText(text,selected,note)");
     expect(html).toContain("quote+(instruction?'\\n\\n@ comment\\n'+instruction:'')");
     expect(html).not.toContain("if(!note||!referenceState)");
-    expect(html).toContain("if(!String(message.text||'').trim()) commentMsgOrdinal++;");
     expect(html).toContain(
-      "else appendCommentMessage(message.role,message.text||'',message.historyOrdinal,message.historyId,message.historyIndex);",
+      "if(!String(message.text||'').trim()&&!message.memoryCitations) commentMsgOrdinal++;",
+    );
+    expect(html).toContain(
+      "else appendCommentMessage(message.role,message.text||'',message.historyOrdinal,message.historyId,message.historyIndex,message.memoryCitations);",
     );
     expect(html).toContain("if(!delta) return true;");
     const appendComment = html.slice(
       html.indexOf(
-        "function appendCommentMessage(role,text,historyOrdinal,historyId,historyIndex)",
+        "function appendCommentMessage(role,text,historyOrdinal,historyId,historyIndex,memoryCitations)",
       ),
       html.indexOf("function cacheOpenCommentMessages()"),
     );
@@ -1013,7 +1015,7 @@ describe("renderConsole", () => {
     expect(html).not.toContain(".railbtn.dirty");
     expect(html).not.toContain("rail-option-check");
     expect(html).not.toContain("'vendor · '+(config.vendor||'—')");
-    expect(html).toContain("setRailButton('railVendor',config.vendor||'—'");
+    expect(html).toContain("setRailButton('railVendor',display.vendor||'—'");
     expect(html).toContain("function compactRailLabel(label)");
     expect(html).toContain("badge.hidden=n===0;");
     expect(html).not.toContain("railpop-close");
@@ -1053,8 +1055,15 @@ describe("renderConsole", () => {
     expect(html).toContain('id="composerRailPop"');
     expect(html).not.toContain('id="runCfgBtn"');
     expect(html).toContain("function applyRunConfig()");
-    expect(html).toContain("function currentRunDisplayConfig(selected)");
-    expect(html).toContain("(config.effort || 'unknown')+' · '");
+    // One display source for the rail button and the rail menu. Two of them is
+    // how the button could read the session's config while the menu marked a
+    // stale staged pick as "current".
+    expect(html).toContain("function currentRunSelection()");
+    expect(html).not.toContain("function currentRunDisplayConfig(");
+    expect(html).toContain("var display=currentRunSelection(),options=[],selected='';");
+    // An authoritative config retires the staged one, so they cannot drift.
+    expect(html).toContain("if(runConfigApplied && !runConfigStaged(s)) clearStagedRunConfig(s);");
+    expect(html).toContain("if(!runConfigStaged(existing)) clearStagedRunConfig(existing);");
     expect(html).toContain("if(target.runConfigDirty)");
     expect(html).toContain("body.runConfig=true;");
   });
@@ -1091,7 +1100,10 @@ describe("renderConsole", () => {
     expect(html).toContain("'Goal in pursuit — click to clear'");
     expect(html).not.toContain(".goal-toggle.active::before");
     expect(html).toContain("if(kind==='shortcuts') return VAULT_STATE.shortcuts;");
-    expect(html).toContain("saveVaultUiState({shortcuts:items});");
+    // Shortcuts are machine-global: written whole, never keyed by session.
+    expect(html).toContain("patch.shortcuts=items;");
+    // The rail and the hub share one writer, so a hub edit repaints the rail too.
+    expect(html).toContain("function persistUiTextItems(kind,ownerKey,items)");
     expect(html).toContain("function inheritSessionGoal(parent,child)");
     expect(html).toContain("function migrateSessionGoal(fromKey,toKey)");
     expect(html).toContain("migrateSessionGoal(previous,String(providerId));");

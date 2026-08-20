@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { debugLog } from "../../debug-log.js";
 import type {
   ActiveSessionState,
   ChatDriver,
@@ -10,6 +11,7 @@ import type {
 import type { UiEvent } from "../../events.js";
 import { IdleSessionTimers, SESSION_IDLE_TTL_MS } from "../../idle-sessions.js";
 import { InteractionBroker } from "../../interactions.js";
+import { MEMORY_CITATION_OPEN, extractMemoryCitationTrailer } from "../../memory-citations.js";
 import { providerErrorPayload } from "../../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../../runtime.js";
 import { classifyCodexError } from "../errors.js";
@@ -37,7 +39,7 @@ interface CodexRun extends DriverRun {
   turnReady: Promise<void> | null;
   interruptRequested: boolean;
   interactions: InteractionBroker<ToolAnswer>;
-  streamedMessages: Set<string>;
+  agentMessageStreams: Map<string, { raw: string; emittedLength: number }>;
   cleanupInputs: Set<() => void>;
 }
 
@@ -210,7 +212,7 @@ export class CodexAppServerDriver implements ChatDriver {
       turnReady: null,
       interruptRequested: resumeKey ? this.pendingInterrupts.delete(resumeKey) : false,
       interactions: new InteractionBroker<ToolAnswer>(),
-      streamedMessages: new Set(),
+      agentMessageStreams: new Map(),
       cleanupInputs: new Set(),
     };
     this.runtime.index(sessionId, run);
@@ -260,17 +262,34 @@ export class CodexAppServerDriver implements ChatDriver {
     if (run.turnReady) await run.turnReady;
     if (!this.canSteer(sessionId) || !run.turnId) return false;
     this.idle.cancel(sessionId);
-    const expectedTurnId = run.turnId;
     const prepared = this.prepareTurnInput(turn);
     run.cleanupInputs.add(prepared.cleanup);
-    try {
-      await this.client.request("turn/steer", {
+    const submit = (expectedTurnId: string) =>
+      this.client.request("turn/steer", {
         threadId: sessionId,
         input: prepared.input,
         expectedTurnId,
       });
+    const expectedTurnId = run.turnId;
+    try {
+      await submit(expectedTurnId);
       return true;
-    } catch {
+    } catch (error) {
+      debugLog("codex", `turn/steer rejected for ${sessionId}`, error);
+      // The tracked id can be stale whenever the provider started a turn we did
+      // not (Goal continuation being the standard case). Re-resolve the live
+      // turn once and retry, so a desynced run repairs itself instead of
+      // refusing every guide until the session is restarted.
+      const activeTurnId = await this.resolveActiveTurnId(sessionId);
+      if (activeTurnId && activeTurnId !== expectedTurnId) {
+        run.turnId = activeTurnId;
+        try {
+          await submit(activeTurnId);
+          return true;
+        } catch (retryError) {
+          debugLog("codex", `turn/steer retry rejected for ${sessionId}`, retryError);
+        }
+      }
       run.cleanupInputs.delete(prepared.cleanup);
       prepared.cleanup();
       return false;
@@ -307,8 +326,28 @@ export class CodexAppServerDriver implements ChatDriver {
         { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
       );
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      debugLog("codex", `turn/interrupt rejected for ${sessionId}`, error);
+      // Same stale-id hazard as steer: a run tracking a turn the provider never
+      // ran could never be stopped, because the live-run branch had no fallback
+      // at all. Re-resolve and retry rather than stranding the session.
+      return this.interruptRemoteTurn(sessionId);
+    }
+  }
+
+  /** The turn the provider is actually running, whatever this run believes. */
+  private async resolveActiveTurnId(sessionId: string): Promise<string | null> {
+    try {
+      const response = await this.client.request<ThreadReadResponse>(
+        "thread/read",
+        { threadId: sessionId, includeTurns: true },
+        { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
+      );
+      const turns = Array.isArray(response.thread.turns) ? response.thread.turns : [];
+      return [...turns].reverse().find((turn) => turn.status === "inProgress")?.id ?? null;
+    } catch (error) {
+      debugLog("codex", `thread/read failed for ${sessionId}`, error);
+      return null;
     }
   }
 
@@ -325,26 +364,26 @@ export class CodexAppServerDriver implements ChatDriver {
             { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
           );
           return true;
-        } catch {
+        } catch (error) {
           // The scanner can be one event behind a just-finished turn. Fall
           // through to discover a newer active turn before reporting failure.
+          debugLog("codex", `hinted turn/interrupt rejected for ${sessionId}`, error);
         }
       }
-      const response = await this.client.request<ThreadReadResponse>(
-        "thread/read",
-        { threadId: sessionId, includeTurns: true },
-        { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
-      );
-      const turns = Array.isArray(response.thread.turns) ? response.thread.turns : [];
-      const active = [...turns].reverse().find((turn) => turn.status === "inProgress");
-      if (!active?.id) return false;
+      const activeTurnId = await this.resolveActiveTurnId(sessionId);
+      if (!activeTurnId) return false;
       await this.client.request(
         "turn/interrupt",
-        { threadId: sessionId, turnId: active.id },
+        { threadId: sessionId, turnId: activeTurnId },
         { timeoutMs: INTERRUPT_REQUEST_TIMEOUT_MS },
       );
+      // Keep a live run pointed at the turn we just proved is real, so a
+      // follow-up guide does not repeat the same rejected round trip.
+      const run = this.runtime.get(sessionId);
+      if (run?.turnActive) run.turnId = activeTurnId;
       return true;
-    } catch {
+    } catch (error) {
+      debugLog("codex", `remote turn/interrupt failed for ${sessionId}`, error);
       return false;
     }
   }
@@ -381,9 +420,12 @@ export class CodexAppServerDriver implements ChatDriver {
   private async startTurn(run: CodexRun, turn: UserTurn): Promise<void> {
     if (run.sessionId) this.idle.cancel(run.sessionId);
     run.events = [];
-    run.streamedMessages.clear();
+    run.agentMessageStreams.clear();
     run.turnActive = true;
     run.turnStartedAt = Date.now();
+    // A fresh turn owns a fresh id, and `turn/started` may claim it before
+    // `turn/start` answers (see below). Clear first so "unset" is meaningful.
+    run.turnId = null;
     const prepared = this.prepareTurnInput(turn);
     this.cleanupPreparedInputs(run);
     run.cleanupInputs.add(prepared.cleanup);
@@ -403,7 +445,14 @@ export class CodexAppServerDriver implements ChatDriver {
         approvalPolicy: INTERACTIVE_APPROVAL_POLICY,
         sandboxPolicy: INTERACTIVE_SANDBOX_POLICY,
       });
-      run.turnId = response.turn.id;
+      // `turn/started` is authoritative; the `turn/start` response is not.
+      // `thread/goal/set` immediately starts a goal turn of its own, so our
+      // later `turn/start` is absorbed into that already-running turn — and
+      // answers with a *different*, never-live turn id. Adopting it made every
+      // `expectedTurnId` wrong for the rest of the turn, which silently broke
+      // both steer and interrupt on Goal sessions. Verified against the real
+      // app-server: `expected active turn id <ours> but found <goal turn>`.
+      if (!run.turnId) run.turnId = response.turn.id;
       if (run.interruptRequested) {
         await this.client.request(
           "turn/interrupt",
@@ -485,9 +534,8 @@ export class CodexAppServerDriver implements ChatDriver {
       }
       case "item/agentMessage/delta": {
         const itemId = typeof params.itemId === "string" ? params.itemId : "";
-        if (itemId) run.streamedMessages.add(itemId);
         if (typeof params.delta === "string" && params.delta) {
-          this.runtime.publish(run, { kind: "assistant_text", text: params.delta });
+          this.publishAgentMessageDelta(run, itemId, params.delta);
         }
         break;
       }
@@ -524,6 +572,71 @@ export class CodexAppServerDriver implements ChatDriver {
     }
   }
 
+  private publishAgentMessageDelta(run: CodexRun, itemId: string, delta: string): void {
+    const key = itemId || "__agent_message__";
+    const state = run.agentMessageStreams.get(key) ?? { raw: "", emittedLength: 0 };
+    state.raw += delta;
+    run.agentMessageStreams.set(key, state);
+
+    const markerAt = state.raw.indexOf(MEMORY_CITATION_OPEN);
+    let visibleEnd = markerAt;
+    if (markerAt < 0) {
+      let possibleMarkerLength = Math.min(MEMORY_CITATION_OPEN.length - 1, state.raw.length);
+      while (
+        possibleMarkerLength > 0 &&
+        !MEMORY_CITATION_OPEN.startsWith(state.raw.slice(-possibleMarkerLength))
+      ) {
+        possibleMarkerLength--;
+      }
+      visibleEnd = state.raw.length - possibleMarkerLength;
+    }
+    if (visibleEnd <= state.emittedLength) return;
+    this.runtime.publish(run, {
+      kind: "assistant_text",
+      text: state.raw.slice(state.emittedLength, visibleEnd),
+    });
+    state.emittedLength = visibleEnd;
+  }
+
+  private completeAgentMessage(run: CodexRun, itemId: string, text: string): void {
+    const key = itemId || "__agent_message__";
+    const state = run.agentMessageStreams.get(key);
+    const parsed = extractMemoryCitationTrailer(text);
+    const emittedLength = state?.emittedLength ?? 0;
+    const emittedPrefix = state?.raw.slice(0, emittedLength) ?? "";
+
+    if (parsed.memoryCitations) {
+      if (!state || parsed.text.startsWith(emittedPrefix)) {
+        const remainder = parsed.text.slice(emittedLength);
+        if (remainder) this.runtime.publish(run, { kind: "assistant_text", text: remainder });
+      }
+      this.runtime.publish(run, {
+        kind: "assistant_memory_citations",
+        text: parsed.text,
+        memoryCitations: parsed.memoryCitations,
+      });
+    } else if (!state || text.startsWith(emittedPrefix)) {
+      const remainder = text.slice(emittedLength);
+      if (remainder) this.runtime.publish(run, { kind: "assistant_text", text: remainder });
+    } else {
+      // A malformed terminal block must remain visible. A provider-side rewrite
+      // is not expected, but releasing the withheld streamed bytes is safer than
+      // silently discarding them when the completed text differs.
+      const remainder = state.raw.slice(emittedLength);
+      if (remainder) this.runtime.publish(run, { kind: "assistant_text", text: remainder });
+    }
+
+    run.agentMessageStreams.delete(key);
+  }
+
+  private flushAgentMessageStreams(run: CodexRun): void {
+    for (const state of run.agentMessageStreams.values()) {
+      const remainder = state.raw.slice(state.emittedLength);
+      if (remainder) this.runtime.publish(run, { kind: "assistant_text", text: remainder });
+    }
+    run.agentMessageStreams.clear();
+  }
+
   private itemStarted(run: CodexRun, item: AppServerItem): void {
     if (!item.id) return;
     if (item.type === "commandExecution") {
@@ -545,8 +658,8 @@ export class CodexAppServerDriver implements ChatDriver {
 
   private itemCompleted(run: CodexRun, item: AppServerItem): void {
     if (!item.id) return;
-    if (item.type === "agentMessage" && item.text && !run.streamedMessages.has(item.id)) {
-      this.runtime.publish(run, { kind: "assistant_text", text: item.text });
+    if (item.type === "agentMessage" && item.text) {
+      this.completeAgentMessage(run, item.id, item.text);
     } else if (item.type === "commandExecution") {
       this.runtime.publish(run, {
         kind: "tool_result",
@@ -867,6 +980,7 @@ export class CodexAppServerDriver implements ChatDriver {
     run.interruptRequested = false;
     run.interactions.cancelAll();
     this.cleanupPreparedInputs(run);
+    this.flushAgentMessageStreams(run);
     if (turn.status === "failed") {
       this.runtime.publish(run, {
         kind: "error",
@@ -888,6 +1002,7 @@ export class CodexAppServerDriver implements ChatDriver {
     run.interruptRequested = false;
     run.interactions.cancelAll();
     this.cleanupPreparedInputs(run);
+    this.flushAgentMessageStreams(run);
     this.runtime.publish(run, {
       kind: "error",
       ...providerErrorPayload(this.classifyError, error),

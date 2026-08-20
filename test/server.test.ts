@@ -164,17 +164,6 @@ function createApp(config: ReturnType<typeof resolveConfig>, deps: AppDeps) {
       requestRefresh: () => {},
       subscribe: () => () => {},
     },
-    workPromptIndex: deps.workPromptIndex ?? {
-      sync: (sessions) => {
-        const store = new WorkEventStore(config.workEvents);
-        try {
-          store.backfillPrompts(sessions);
-        } finally {
-          store.close();
-        }
-      },
-      subscribe: () => () => {},
-    },
     compactTransport: deps.compactTransport ?? false,
   };
   return createServerApp(config, effectiveDeps);
@@ -449,10 +438,6 @@ describe("GET /", () => {
       alignmentModel: {
         snapshot: () => null,
         requestRefresh: () => {},
-        subscribe: () => () => {},
-      },
-      workPromptIndex: {
-        sync: () => {},
         subscribe: () => () => {},
       },
     });
@@ -2093,6 +2078,27 @@ describe("engagement routes", () => {
       engine: new ChatEngine(fakeQuery),
       orchestrator,
     });
+    const workEventStore = new WorkEventStore(config.workEvents);
+    try {
+      workEventStore.record({
+        kind: "user_prompt",
+        at: activityAt - 10_000,
+        sessionId: "s1",
+        vendor: "claude",
+        chars: "first prompt".length,
+        source: "live",
+      });
+      workEventStore.record({
+        kind: "assistant_output",
+        at: activityAt,
+        sessionId: "s1",
+        vendor: "claude",
+        chars: "reply".length,
+        source: "live",
+      });
+    } finally {
+      workEventStore.close();
+    }
     const res = await app.request("/session/engagement?session=s1", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2216,18 +2222,32 @@ describe("engagement routes", () => {
     });
   });
 
-  it("keeps live snapshots available when work-history backfill cannot acquire its lock", async () => {
+  it("excludes transcript-sourced activity from work statistics", async () => {
     const { app, workEvents } = appWithSpy();
-    const holder = new DatabaseSync(workEvents);
-    holder.exec("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE");
-
+    const store = new WorkEventStore(workEvents);
     try {
-      const res = await app.request("/chat/live");
+      const now = Date.now();
+      store.record({
+        kind: "user_prompt",
+        at: now - 2_000,
+        sessionId: "external",
+        chars: 20,
+        source: "transcript",
+      });
+      store.record({
+        kind: "user_prompt",
+        at: now - 1_000,
+        sessionId: "attend",
+        chars: 10,
+        source: "live",
+      });
+      const res = await app.request("/stats/work?range=1h");
       expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ stats: { prompts1h: 0 } });
+      expect(await res.json()).toMatchObject({
+        summary: { sessionsTouched: 1, prompts: 1 },
+      });
     } finally {
-      holder.exec("ROLLBACK");
-      holder.close();
+      store.close();
     }
   });
 
@@ -2791,6 +2811,24 @@ describe("request boundaries", () => {
         hasLater: true,
         total: 200,
       });
+      expect(replaceVendor).not.toHaveBeenCalled();
+
+      // Forking from a message needs the whole prefix out of one coherent read.
+      // A backwards page walk cannot give that: a transcript that is still being
+      // written shifts the bounded tail between requests, so the cursor and the
+      // history indices of the page already held stop denoting the same rows.
+      const full = (await (
+        await app.request("/chat/messages?session=history-index&vendor=codex&paged=1&full=1")
+      ).json()) as {
+        messages: Array<{ text: string; historyId: string; historyIndex: number }>;
+        page: { before: number; hasMore: boolean; total: number; version: string };
+      };
+      expect(full.messages).toHaveLength(200);
+      expect(full.messages[0]).toMatchObject({ text: "question 0", historyIndex: 0 });
+      expect(full.messages.at(-1)?.historyIndex).toBe(199);
+      expect(full.messages[110]?.historyId).toBe(target?.historyId);
+      expect(full.page).toMatchObject({ before: 0, hasMore: false, total: 200 });
+      expect(full.page.version).toBe(firstBody.page.version);
       expect(replaceVendor).not.toHaveBeenCalled();
 
       const missing = await app.request(
@@ -3649,7 +3687,15 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(queuedMessages.messages.some((message) => message.text.includes("@referenced"))).toBe(
       false,
     );
-    expect(queuedMessages.messages).toContainEqual({ role: "user", text: "one more thing" });
+    // A queued turn is not history. The drawer draws it as a queue row fed by
+    // /chat/queue, so injecting it here too would show it twice.
+    expect(queuedMessages.messages.some((message) => message.text === "one more thing")).toBe(
+      false,
+    );
+    const queueView = (await (await app.request("/chat/queue?session=cx-1")).json()) as {
+      items: Array<{ text: string }>;
+    };
+    expect(queueView.items).toContainEqual(expect.objectContaining({ text: "one more thing" }));
     const busyPromotion = await app.request("/comments/promote", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3725,7 +3771,9 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       const promotedStats = (await (await app.request("/stats/work?range=7d")).json()) as {
         summary: { sessionsTouched: number };
       };
-      expect(promotedStats.summary.sessionsTouched).toBe(2);
+      // The parent exists only as an external transcript. Work statistics count
+      // the promoted Attend-driven session, not the external parent history.
+      expect(promotedStats.summary.sessionsTouched).toBe(1);
     });
     const afterPromotionEvents = new WorkEventStore(config.workEvents).list();
     expect(
@@ -4705,6 +4753,36 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     expect(codex.starts[0]?.firstText).toContain("Assistant: original answer");
     expect(codex.starts[0]?.firstText).toContain("[tools: Bash]");
     expect(codex.starts[0]?.firstText).toContain("Attend fork context:");
+  });
+
+  it("keeps the turns next to the fork point when the context budget overflows", async () => {
+    const { app, codex } = appWithCodexSpy();
+    // Well past the 24k context budget, so something has to be dropped.
+    const contextMessages = Array.from({ length: 40 }, (_value, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      text: `turn ${index} ${"x".repeat(1_500)}`,
+      tools: [],
+    }));
+    const res = await app.request(`/chat/fork?session=parent-1&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "edited opener",
+        clientSessionId: "branch-budget",
+        contextMessages,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const firstText = codex.starts[0]?.firstText ?? "";
+    // The branch diverges here, so the last turn before it must survive and the
+    // opening turns are what gets cut.
+    expect(firstText).toContain("turn 39");
+    expect(firstText).not.toContain("turn 0 ");
+    expect(firstText).toContain("[earlier context truncated]");
+    // The note describes what was actually dropped: it precedes what was kept.
+    expect(firstText.indexOf("[earlier context truncated]")).toBeLessThan(
+      firstText.indexOf("turn 39"),
+    );
   });
 
   it("inherits run config, notes, and todos into a fork but NOT the parent's Goal", async () => {

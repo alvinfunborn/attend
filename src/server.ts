@@ -26,6 +26,7 @@ import { classifyCursorError } from "./chat/cursor/errors.js";
 import { makeCursorExec } from "./chat/cursor/exec.js";
 import { readCursorTranscript } from "./chat/cursor/transcript.js";
 import { DaemonOrchestrator } from "./chat/daemon.js";
+import { debugLog } from "./chat/debug-log.js";
 import type {
   ActiveSessionState,
   ChatAttachment,
@@ -133,7 +134,6 @@ import {
   WorkerSessionIndex,
 } from "./core/vendor/session-index.js";
 import { TranscriptPathIndex, type TranscriptPathWriter } from "./core/vendor/transcript-index.js";
-import { type WorkPromptIndex, WorkerWorkPromptIndex } from "./core/work-prompt-index.js";
 import { migrateWorkspaceState } from "./core/workspace-state-migration.js";
 
 const LIVE_SNAPSHOT_INTERVAL_MS = 60_000;
@@ -357,22 +357,34 @@ function clipText(text: string, max: number): string {
   return `${trimmed.slice(0, Math.max(0, max - 16)).trimEnd()}\n[truncated]`;
 }
 
+// Spend the context budget backwards from the fork point. A branch diverges
+// from where the user clicked, so the turns adjacent to that point are the ones
+// it cannot do without; the opening small talk is what a long history can afford
+// to lose. Filling forwards instead kept the oldest turns and dropped the fork
+// point itself, while still labelling the cut "[earlier context truncated]".
 function transcriptContext(msgs: TranscriptMsg[]): string {
-  let out = "";
-  for (const m of msgs) {
+  const kept: string[] = [];
+  let used = 0;
+  let droppedEarlier = false;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m) continue;
     const role = m.role === "user" ? "User" : "Assistant";
     const parts: string[] = [];
     if (m.text.trim()) parts.push(clipText(m.text, PROVIDER_FORK_MSG_LIMIT));
     if (m.tools.length) parts.push(`[tools: ${m.tools.map((t) => t.name).join(", ")}]`);
     if (!parts.length) continue;
     const next = `${role}: ${parts.join("\n")}\n\n`;
-    if (out.length + next.length > PROVIDER_FORK_CONTEXT_LIMIT) {
-      out = `${out.slice(0, PROVIDER_FORK_CONTEXT_LIMIT).trimEnd()}\n\n[earlier context truncated]\n`;
+    if (used + next.length > PROVIDER_FORK_CONTEXT_LIMIT) {
+      droppedEarlier = true;
       break;
     }
-    out += next;
+    kept.push(next);
+    used += next.length;
   }
-  return out.trim();
+  kept.reverse();
+  const out = kept.join("");
+  return (droppedEarlier ? `[earlier context truncated]\n\n${out}` : out).trim();
 }
 
 async function providerForkPrompt(
@@ -819,8 +831,6 @@ export interface AppDeps {
   sessionSearch?: SessionSearch;
   /** Worker-owned memory TF-IDF model. */
   alignmentModel?: AlignmentModelReader;
-  /** Worker-owned transcript activity → work-event materializer. */
-  workPromptIndex?: WorkPromptIndex;
   /** Background session catalog. Tests can inject a deterministic in-memory
    *  implementation; every runtime fallback is worker-backed. */
   sessionIndex?: SessionIndex;
@@ -864,7 +874,6 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
       sources: config.memorySources,
       claudeProjects: config.claudeProjects,
     }),
-    workPromptIndex: new WorkerWorkPromptIndex(config.workEvents),
     engine: new ClaudeSdkDriver(claudeQuery),
     codex: new CodexAppServerDriver(new CodexAppServerClient(codexBin ?? "codex")),
     cursor: new ProcessChatDriver(
@@ -1476,7 +1485,6 @@ export function createApp(
       sources: config.memorySources,
       claudeProjects: config.claudeProjects,
     });
-  const workPromptIndex = deps.workPromptIndex ?? new WorkerWorkPromptIndex(config.workEvents);
   const engine = deps.engine;
   // Codex chat backend. Defaulted here (not in the deps literal) so callers that
   // pass a partial `deps` — the tests — still get a working Codex route.
@@ -1724,7 +1732,7 @@ export function createApp(
         thread.parentSessionId,
       ]),
     );
-    return workEvents.list(since).map((event) => {
+    return workEvents.list(since, "live").map((event) => {
       const parentSessionId = parentByCommentSession.get(event.sessionId);
       return parentSessionId ? { ...event, sessionId: parentSessionId } : event;
     });
@@ -1774,7 +1782,6 @@ export function createApp(
   let sessionsPrimed = !initialBackgroundSnapshot.pending;
   let notifySessionIndex: (() => void) | null = null;
   let notifyAlignmentModel: (() => void) | null = null;
-  let notifyWorkPromptIndex: (() => void) | null = null;
   const applyBackgroundSessionSnapshot = (snapshot: SessionIndexSnapshot): void => {
     const changed =
       snapshot.epoch !== sessionIndexEpoch ||
@@ -1787,7 +1794,6 @@ export function createApp(
     sessionsPrimed = !snapshot.pending;
     if (changed) {
       sessionSearch.sync?.(snapshot.sessions);
-      workPromptIndex.sync(snapshot.sessions);
       try {
         notifySessionIndex?.();
       } catch {
@@ -1797,10 +1803,8 @@ export function createApp(
   };
   const unsubscribeSessionIndex = backgroundSessionIndex.subscribe(applyBackgroundSessionSnapshot);
   const unsubscribeAlignmentModel = alignmentModel.subscribe(() => notifyAlignmentModel?.());
-  const unsubscribeWorkPromptIndex = workPromptIndex.subscribe(() => notifyWorkPromptIndex?.());
   if (!initialBackgroundSnapshot.pending) {
     sessionSearch.sync?.(initialBackgroundSnapshot.sessions);
-    workPromptIndex.sync(initialBackgroundSnapshot.sessions);
   }
   const runSessionScan = (): void => {
     backgroundSessionIndex.requestRefresh("server refresh");
@@ -2907,10 +2911,6 @@ export function createApp(
   const broadcastLive = () => {
     scheduleLiveProjection();
   };
-  notifyWorkPromptIndex = () => {
-    scheduleSessionProjection();
-    scheduleLiveProjection();
-  };
   scheduleSessionProjection();
   scheduleCommentProjection();
   scheduleLiveProjection();
@@ -3134,6 +3134,10 @@ export function createApp(
           },
         });
       }
+      // A mid-stream sync with turnActive means a finished turn revived itself (the
+      // model resumed after a background task settled). Reproject live state now so
+      // the sidebar flips back to generating instead of waiting for the slow tick.
+      if (event.kind === "sync" && event.turnActive) broadcastLive();
       broadcastSessionEvent(sessionId, driver.vendor, event, clientSessionId);
     });
   }
@@ -3148,12 +3152,10 @@ export function createApp(
       backgroundClosed = true;
       unsubscribeSessionIndex();
       unsubscribeAlignmentModel();
-      unsubscribeWorkPromptIndex();
       if (!deps.sessionIndex) backgroundSessionIndex.close();
       if (!deps.transcriptHistory) transcriptHistory.close?.();
       if (!deps.sessionSearch) sessionSearch.close?.();
       if (!deps.alignmentModel) alignmentModel.close?.();
-      if (!deps.workPromptIndex) workPromptIndex.close?.();
     },
   });
   const internalError = (c: Context, error: unknown) => {
@@ -3851,22 +3853,13 @@ export function createApp(
         ? await transcriptHistory.read(file, thread.vendor, CHAT_HISTORY_LIMIT).catch(() => null)
         : null;
       const historyMessages = history ? visibleCommentTranscript(history.messages) : [];
-      const queuedOrdinal = historyMessages.reduce(
-        (next, message) => Math.max(next, (message.historyOrdinal ?? -1) + 1),
-        0,
-      );
+      // Queued turns are not history. The drawer renders them as queue rows the
+      // same way the main composer does, so injecting them here would show every
+      // queued comment twice. They still feed historyVersion, which is how a
+      // second tab learns its queue view is stale via comment_index.
       const queued = chatQueue.list(thread.providerSessionId);
       return {
-        messages: [
-          ...historyMessages,
-          ...queued.map((item, index) => ({
-            role: "user" as const,
-            text: item.text,
-            historyId: `q_${stableHash(JSON.stringify([thread.providerSessionId, item]))}`,
-            historyOrdinal: queuedOrdinal + index,
-            historyIndex: historyMessages.length + index,
-          })),
-        ],
+        messages: historyMessages,
         historyVersion: commentHistoryVersion(thread, file, history?.version, queued),
       };
     };
@@ -4007,7 +4000,6 @@ export function createApp(
       (session) => session.sessionId === thread.providerSessionId,
     );
     if (promotedSession) {
-      workPromptIndex.sync([promotedSession]);
       // Inherit the parent workspace's tags so a promoted comment keeps its labels
       // (mirrors the notes/todos/goal inheritance done above).
       const parentSession = scanned.find((s) => s.sessionId === thread.parentSessionId);
@@ -4346,6 +4338,25 @@ export function createApp(
         },
       });
     }
+    // Forking from a message needs every preceding message as one coherent
+    // prefix, and paging backwards cannot supply that: each page is sliced from
+    // a separately-read bounded tail, so a transcript that is still being
+    // written shifts the window and invalidates the cursor mid-walk. This serves
+    // the whole snapshot from the single read above — already in memory, and the
+    // same bound the page walk was confined to.
+    if (c.req.query("full") === "1") {
+      return c.json({
+        ok: true,
+        messages: snapshot.messages,
+        page: {
+          before: 0,
+          hasMore: false,
+          total: snapshot.messages.length,
+          version: snapshot.version,
+          sourceTruncated: snapshot.truncatedBefore,
+        },
+      });
+    }
     if (c.req.query("paged") !== "1") {
       return c.json(
         snapshot.messages.map(
@@ -4667,7 +4678,8 @@ export function createApp(
       let steered = false;
       try {
         steered = await driver.steer(id, await queuedProviderTurn(extracted.item));
-      } catch {
+      } catch (error) {
+        debugLog("chat", `steer threw for ${id} (${item.vendor})`, error);
         steered = false;
       }
       if (!steered) {
@@ -6273,7 +6285,6 @@ export function startServer(
           appDeps.analyzerContext?.close?.();
           appDeps.sessionSearch?.close?.();
           appDeps.alignmentModel?.close?.();
-          appDeps.workPromptIndex?.close?.();
           scheduleRuntime?.close();
           performanceMonitor?.close();
           const httpServer = server as {

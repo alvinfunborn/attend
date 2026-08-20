@@ -84,6 +84,38 @@ class DeferredTurnAppServer extends FakeAppServer {
   }
 }
 
+/** `thread/goal/set` starts a turn of its own before `turn/start` is answered. */
+class GoalTurnAppServer extends FakeAppServer {
+  goalTurnId = "goal-turn";
+
+  override async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method !== "turn/start") return super.request<T>(method, params);
+    this.requests.push({ method, params });
+    this.emit({
+      method: "turn/started",
+      params: {
+        threadId: this.nextThread,
+        turn: { id: this.goalTurnId, status: "inProgress" },
+      },
+    });
+    return { turn: { id: "turn-never-live", status: "inProgress" } } as T;
+  }
+}
+
+/** Rejects steering that names anything but the genuinely running turn. */
+class StaleTurnAppServer extends FakeAppServer {
+  activeTurnId = "turn-live";
+
+  override async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method !== "turn/steer") return super.request<T>(method, params);
+    this.requests.push({ method, params });
+    const expected = (params as { expectedTurnId?: string } | undefined)?.expectedTurnId;
+    if (expected !== this.activeTurnId)
+      throw new Error(`expected active turn id \`${expected}\` but found \`${this.activeTurnId}\``);
+    return {} as T;
+  }
+}
+
 class RejectInterruptAppServer extends FakeAppServer {
   override async request<T>(method: string, params?: unknown): Promise<T> {
     if (method !== "turn/interrupt") return super.request<T>(method, params);
@@ -199,6 +231,89 @@ describe("CodexAppServerDriver", () => {
     expect(driver.activeSessions()).toEqual([]);
   });
 
+  it("withholds a split memory trailer and publishes structured citations at completion", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "answer from memory" });
+    const events: UiEvent[] = [];
+    driver.subscribe(id, (event) => events.push(event));
+    const answer = `Answer.\n\n<oai-mem-citation>
+<citation_entries>
+MEMORY.md:20-24|note=[Used prior routing context]
+</citation_entries>
+<rollout_ids>
+019fcf92-6aa8-71d2-b503-9dbc27a54228
+</rollout_ids>
+</oai-mem-citation>`;
+
+    for (const delta of ["Answer.\n\n<oai-mem-", answer.slice("Answer.\n\n<oai-mem-".length)]) {
+      client.emit({
+        method: "item/agentMessage/delta",
+        params: { threadId: id, turnId: "turn-1", itemId: "message-1", delta },
+      });
+    }
+    client.emit({
+      method: "item/completed",
+      params: {
+        threadId: id,
+        turnId: "turn-1",
+        item: { id: "message-1", type: "agentMessage", text: answer },
+      },
+    });
+
+    expect(
+      events
+        .filter((event) => event.kind === "assistant_text")
+        .map((event) => event.text)
+        .join(""),
+    ).not.toContain("oai-mem-citation");
+    expect(events).toContainEqual({
+      kind: "assistant_memory_citations",
+      text: "Answer.",
+      memoryCitations: {
+        entries: [
+          {
+            path: "MEMORY.md",
+            lineStart: 20,
+            lineEnd: 24,
+            note: "Used prior routing context",
+          },
+        ],
+        rolloutIds: ["019fcf92-6aa8-71d2-b503-9dbc27a54228"],
+      },
+    });
+  });
+
+  it("releases a withheld marker when the completed assistant text is not a valid trailer", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "show the example" });
+    const events: UiEvent[] = [];
+    driver.subscribe(id, (event) => events.push(event));
+    const answer = "Example: <oai-mem-citation> is only an opening tag.";
+
+    client.emit({
+      method: "item/agentMessage/delta",
+      params: { threadId: id, turnId: "turn-1", itemId: "message-1", delta: answer },
+    });
+    client.emit({
+      method: "item/completed",
+      params: {
+        threadId: id,
+        turnId: "turn-1",
+        item: { id: "message-1", type: "agentMessage", text: answer },
+      },
+    });
+
+    expect(
+      events
+        .filter((event) => event.kind === "assistant_text")
+        .map((event) => event.text)
+        .join(""),
+    ).toBe(answer);
+    expect(events.some((event) => event.kind === "assistant_memory_citations")).toBe(false);
+  });
+
   it("steers an active turn through the native app-server method", async () => {
     const client = new FakeAppServer();
     const driver = new CodexAppServerDriver(client);
@@ -239,6 +354,71 @@ describe("CodexAppServerDriver", () => {
     expect(client.requests.at(-1)).toMatchObject({
       method: "turn/steer",
       params: { threadId: id, expectedTurnId: "turn-1" },
+    });
+  });
+
+  it("steers the Goal turn the provider actually started, not the turn/start echo", async () => {
+    const client = new GoalTurnAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo" });
+
+    // `thread/goal/set` starts its own turn; our turn/start is absorbed into it
+    // and answers with an id that was never live.
+    await driver.setGoal(id, "ship a verified fix");
+    expect(driver.send(id, { text: "start the goal" })).toBe(true);
+
+    expect(await driver.steer(id, { text: "guide the goal" })).toBe(true);
+    expect(client.requests.at(-1)).toMatchObject({
+      method: "turn/steer",
+      params: { threadId: id, expectedTurnId: "goal-turn" },
+    });
+    expect(client.requests.some((request) => request.method === "thread/read")).toBe(false);
+  });
+
+  it("repairs a stale turn id from thread/read instead of refusing every guide", async () => {
+    const client = new StaleTurnAppServer();
+    client.nextTurn = "turn-stale";
+    client.threadTurns = [{ id: "turn-live", status: "inProgress" }];
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "run a long task" });
+
+    expect(await driver.steer(id, { text: "guide" })).toBe(true);
+    expect(client.requests.map((request) => request.method).slice(-3)).toEqual([
+      "turn/steer",
+      "thread/read",
+      "turn/steer",
+    ]);
+    expect(client.requests.at(-1)).toMatchObject({
+      method: "turn/steer",
+      params: { threadId: id, expectedTurnId: "turn-live" },
+    });
+
+    // The run keeps the repaired id, so the next call costs one round trip.
+    expect(await driver.steer(id, { text: "guide again" })).toBe(true);
+    expect(client.requests.at(-1)).toMatchObject({
+      method: "turn/steer",
+      params: { expectedTurnId: "turn-live" },
+    });
+    expect(client.requests.at(-2)?.method).toBe("turn/steer");
+  });
+
+  it("stops a live run whose tracked turn id the provider rejects", async () => {
+    const client = new FakeAppServer();
+    client.nextTurn = "turn-stale";
+    client.rejectInterruptFor = "turn-stale";
+    client.threadTurns = [{ id: "turn-live", status: "inProgress" }];
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "run a long task" });
+
+    expect(await driver.interrupt(id)).toBe(true);
+    expect(client.requests.map((request) => request.method).slice(-3)).toEqual([
+      "turn/interrupt",
+      "thread/read",
+      "turn/interrupt",
+    ]);
+    expect(client.requests.at(-1)).toEqual({
+      method: "turn/interrupt",
+      params: { threadId: id, turnId: "turn-live" },
     });
   });
 

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { extractMemoryCitationTrailer } from "../../chat/memory-citations.js";
 import { visiblePromptText } from "../../chat/transcript.js";
 import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
@@ -100,13 +101,14 @@ function assistantOutputTextLength(item: Payload): number {
   if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content)) {
     return 0;
   }
-  return item.content.reduce((total, part) => {
+  const text = item.content.reduce((output, part) => {
     if (!part || typeof part !== "object" || (part as { type?: string }).type !== "output_text") {
-      return total;
+      return output;
     }
     const text = (part as { text?: unknown }).text;
-    return total + (typeof text === "string" ? text.length : 0);
-  }, 0);
+    return output + (typeof text === "string" ? text : "");
+  }, "");
+  return extractMemoryCitationTrailer(text).text.length;
 }
 
 /**

@@ -508,14 +508,23 @@ const STYLE = `
   .todohub-box { position: absolute; z-index: 70; top: calc(100% + 0.4rem); left: 1rem; right: 1rem; max-height: calc(100dvh - 8rem); overflow: hidden; padding: 0.75rem; border: 1px solid var(--line-2); border-radius: var(--radius); display: none; flex-direction: column; gap: 0.55rem; background: var(--newbox-gradient); box-shadow: var(--shadow-pop); }
   .todohub-box.panel-hosted { position: fixed; right: auto; width: min(32rem, calc(100vw - 1rem)); max-width: 32rem; }
   .todohub-box.open { display: flex; animation: newboxIn 0.18s ease; }
+  .todohub-tabs { min-width: 0; display: flex; align-items: center; gap: 0.08rem; }
+  .todohub-tab { display: inline-flex; align-items: baseline; gap: 0.22rem; padding: 0.2rem 0.42rem; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink-4); box-shadow: none; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.66rem; font-weight: 700; }
+  .todohub-tab:hover { border: 0; background: var(--button-hover); color: var(--ink-2); box-shadow: none; }
+  .todohub-tab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+  .todohub-tab-count { font-size: 0.58rem; font-weight: 820; opacity: 0.78; font-variant-numeric: tabular-nums; }
+  .todohub-tab-count[hidden] { display: none; }
   .todohub-add { display: flex; align-items: stretch; gap: 0.38rem; }
+  .todohub-add input:disabled { opacity: 0.62; }
   .todohub-add input { flex: 1; min-width: 0; padding: 0.45rem 0.58rem; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink-2); font: inherit; font-size: 0.76rem; }
   .todohub-add button { flex-shrink: 0; min-width: 3.3rem; border-color: var(--primary-bg); background: var(--primary-bg); color: var(--primary-fg); font-size: 0.7rem; font-weight: 700; }
   .todohub-add button:hover:not(:disabled) { border-color: var(--primary-hover); background: var(--primary-hover); }
   .todohub-add button:disabled { opacity: 0.48; }
   .todohub-body { flex: 1 1 auto; min-height: 5rem; overflow-y: auto; overscroll-behavior: contain; margin: 0 -0.25rem -0.2rem; padding: 0 0.25rem 0.2rem; }
   .todohub-items { display: flex; flex-direction: column; gap: 0.14rem; }
-  .todohub-item { display: grid; grid-template-columns: 1.15rem minmax(0,1fr) auto; align-items: start; gap: 0.4rem; padding: 0.42rem 0.38rem; border: 1px solid transparent; border-radius: 8px; }
+  /* content + actions; only a completable list (todo) prepends a checkbox column */
+  .todohub-item { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 0.4rem; padding: 0.42rem 0.38rem; border: 1px solid transparent; border-radius: 8px; }
+  .todohub-item.checkable { grid-template-columns: 1.15rem minmax(0,1fr) auto; }
   .todohub-item:hover, .todohub-item:focus-within { border-color: color-mix(in srgb, var(--line-2) 72%, transparent); background: color-mix(in srgb, var(--surface) 76%, transparent); }
   .todohub-item.done { opacity: 0.68; }
   .rail-todo-check.todohub-check { margin: 0.13rem 0 0; }
@@ -528,7 +537,8 @@ const STYLE = `
   .todohub-scope:hover { border: 0; background: transparent; color: var(--accent); box-shadow: none; }
   .todohub-actions { display: flex; align-items: center; gap: 0.04rem; opacity: 0; transition: opacity 0.12s; }
   .todohub-item:hover .todohub-actions, .todohub-item:focus-within .todohub-actions { opacity: 1; }
-  .todohub-edit { grid-column: 2 / 4; display: flex; align-items: center; gap: 0.35rem; }
+  .todohub-edit { grid-column: 1 / 3; display: flex; align-items: center; gap: 0.35rem; }
+  .todohub-item.checkable .todohub-edit { grid-column: 2 / 4; }
   .todohub-edit input { flex: 1; min-width: 0; padding: 0.36rem 0.5rem; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink); font: inherit; font-size: 0.74rem; }
   .todohub-edit button { min-height: 1.75rem; padding: 0.25rem 0.52rem; font-size: 0.65rem; }
   .todohub-empty { padding: 1.2rem 0.6rem; color: var(--ink-4); font-size: 0.72rem; line-height: 1.45; text-align: center; }
@@ -780,7 +790,7 @@ const STYLE = `
   .it-queue.parked { background: #fffbeb; color: #b45309; }
   .it-workbadges { flex-shrink: 0; display: inline-flex; align-items: baseline; gap: 0.28rem; margin-left: auto; }
   .it-workbadges .it-queue { margin-left: 0; }
-  .it-todo { flex-shrink: 0; display: inline-flex; align-items: baseline; gap: 0.18rem; padding: 0.04rem 0.3rem; border: 1px solid var(--todo-border); border-radius: var(--radius-pill); background: var(--todo-bg); color: var(--todo-fg); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.58rem; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .it-todo { flex-shrink: 0; display: inline-flex; align-items: baseline; gap: 0.18rem; padding: 0.04rem 0.3rem; border: 0; border-radius: var(--radius-pill); background: var(--todo-bg); color: var(--todo-fg); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.58rem; line-height: 1.15; font-variant-numeric: tabular-nums; }
   .it-todo[hidden] { display: none; }
   .it-todo-count { font-weight: 820; }
   .it-todo-label { font-weight: 680; opacity: 0.76; }
@@ -1536,6 +1546,28 @@ const STYLE = `
   .msgref-kind { flex-shrink: 0; color: var(--accent); font-size: 0.76rem; font-weight: 800; }
   .msgref-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .msgref-comments { flex-shrink: 0; color: var(--accent); font-size: 0.6rem; font-weight: 700; }
+  .memory-citation-footer { display: flex; align-items: center; margin-top: 0.52rem; padding-top: 0.42rem; border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); }
+  .memory-citation-trigger { min-height: 1.5rem; display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.12rem 0.4rem 0.12rem 0.28rem; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--ink-4); box-shadow: none; font-size: 0.65rem; line-height: 1; font-weight: 700; }
+  .memory-citation-trigger:hover, .memory-citation-trigger[aria-expanded="true"] { border: 0; background: var(--button-hover); color: var(--accent); box-shadow: none; }
+  .memory-citation-trigger svg { width: 0.88rem; height: 0.88rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .memory-citation-popover { position: fixed; z-index: 128; width: min(27rem, calc(100vw - 1rem)); max-height: min(30rem, calc(100dvh - 1rem)); overflow: auto; padding: 0.58rem; border: 1px solid var(--line-2); border-radius: 12px; background: color-mix(in srgb, var(--surface) 97%, transparent); color: var(--ink); box-shadow: var(--shadow-pop); backdrop-filter: blur(14px) saturate(1.08); }
+  .memory-citation-popover[hidden] { display: none; }
+  .memory-citation-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.08rem 0.12rem 0.48rem; }
+  .memory-citation-title { flex: 1; min-width: 0; font-size: 0.78rem; line-height: 1.2; font-weight: 780; }
+  .memory-citation-close { width: 1.45rem; height: 1.45rem; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--ink-4); box-shadow: none; }
+  .memory-citation-close:hover { border: 0; background: var(--button-hover); color: var(--ink); box-shadow: none; }
+  .memory-citation-close svg { width: 0.72rem; height: 0.72rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  .memory-citation-list { display: flex; flex-direction: column; gap: 0.34rem; }
+  .memory-citation-item { min-width: 0; padding: 0.48rem 0.55rem; border: 1px solid var(--line-2); border-radius: 9px; background: var(--surface-2); }
+  .memory-citation-note { color: var(--ink-2); font-size: 0.75rem; line-height: 1.42; }
+  .memory-citation-source { margin-top: 0.24rem; overflow: hidden; color: var(--ink-4); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.59rem; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+  .memory-rollouts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.28rem; margin-top: 0.5rem; padding: 0.45rem 0.08rem 0.02rem; border-top: 1px solid var(--line-2); }
+  .memory-rollouts-label { margin-right: 0.08rem; color: var(--ink-4); font-size: 0.6rem; font-weight: 720; }
+  .memory-rollout { min-height: 1.45rem; max-width: 100%; padding: 0.16rem 0.42rem; border: 1px solid var(--line-2); border-radius: var(--radius-pill); background: transparent; color: var(--ink-3); box-shadow: none; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.58rem; line-height: 1; }
+  .memory-rollout:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); box-shadow: none; }
+  @media (max-width: 600px) {
+    .memory-citation-popover { left: 0.5rem !important; right: 0.5rem; bottom: 0.5rem; top: auto !important; width: auto; max-height: min(70dvh, 30rem); }
+  }
   .attachmsg { display: none; font-size: 0.72rem; line-height: 1.4; color: #64748b; }
   .attachmsg.show { display: block; }
   .attachmsg.err { color: #b91c1c; }
@@ -2070,16 +2102,20 @@ export function renderConsole(v: ConsoleView): string {
     </div>
     <div class="nmsg" id="nmsg"></div>
   </div>
-  <section class="todohub-box" id="todoHub" role="dialog" aria-modal="false" aria-labelledby="todoHubTitle">
+  <section class="todohub-box" id="todoHub" role="dialog" aria-modal="false" aria-label="Shortcuts, notes and todos">
     <div class="newhead">
-      <div class="newttl" id="todoHubTitle">Todos</div>
-      <button id="todoHubClose" class="newclose" type="button" aria-label="close todos">✕</button>
+      <div class="todohub-tabs" id="todoHubTabs" role="tablist" aria-label="List">
+        <button class="todohub-tab" type="button" role="tab" data-hub-kind="shortcuts" aria-selected="false" aria-controls="todoHubBody"><span class="todohub-tab-label">shortcuts</span><span class="todohub-tab-count" hidden>0</span></button>
+        <button class="todohub-tab" type="button" role="tab" data-hub-kind="notes" aria-selected="false" aria-controls="todoHubBody"><span class="todohub-tab-label">notes</span><span class="todohub-tab-count" hidden>0</span></button>
+        <button class="todohub-tab" type="button" role="tab" data-hub-kind="todo" aria-selected="true" aria-controls="todoHubBody"><span class="todohub-tab-label">todo</span><span class="todohub-tab-count" hidden>0</span></button>
+      </div>
+      <button id="todoHubClose" class="newclose" type="button" aria-label="close lists">✕</button>
     </div>
     <div class="todohub-add">
       <input id="todoHubAddInput" type="text" autocomplete="off" placeholder="Add a todo…">
       <button id="todoHubAddButton" type="button" disabled>add</button>
     </div>
-    <div class="todohub-body" id="todoHubBody"></div>
+    <div class="todohub-body" id="todoHubBody" role="tabpanel"></div>
   </section>
   </div>
   <div class="tagbar">
@@ -2172,6 +2208,7 @@ export function renderConsole(v: ConsoleView): string {
       <button class="msg-reference-add" id="msgReferenceAdd" type="button">add to prompt</button>
     </div>
   </div>
+  <div class="memory-citation-popover" id="memoryCitationPopover" role="dialog" aria-modal="false" aria-label="Memories used" hidden></div>
   <div id="avoidPanel" hidden></div>
   <div id="queue"></div>
   <button class="scrollbottom chat-scrollbottom" id="chatScrollBottom" type="button" aria-label="scroll to bottom" title="Scroll to bottom" hidden></button>
@@ -2648,6 +2685,10 @@ window.__CHANGELOG__ = ${changelogJson};
           existing.lastAssistantOutputAt=liveActivity.lastAssistantOutputAt;
         }
       }
+      // The scan just restated this session's model/effort/speed. Anything the
+      // user staged and already sent is now history — drop it so the rail cannot
+      // keep offering a tier this session no longer runs with.
+      if(!runConfigStaged(existing)) clearStagedRunConfig(existing);
       listed[matched]=existing;
     });
     var hiddenCurrent=cur&&(hiddenSessionIds[providerSessionId(cur)]||hiddenSessionIds[String(cur.sessionId||'')]) ? cur : null;
@@ -2671,6 +2712,11 @@ window.__CHANGELOG__ = ${changelogJson};
     sortSessions();
     renderTagFilters();
     renderSidebar();
+    // The scan can restate the open session's model/effort/speed. Repaint the
+    // rail so the composer stops advertising the previous scan's config (see
+    // clearStagedRunConfig). Safe with a panel open: renderComposerRail touches
+    // buttons only, so it can neither swallow a click nor drop a keystroke.
+    if(cur) refreshRunConfigButton();
     if(latestLiveSnapshot) applyLiveSnapshot(latestLiveSnapshot);
     // The connection handshake's live snapshot can predate the cold scan.
     // Let the newer authoritative index win for scan-derived throughput.
@@ -2812,6 +2858,17 @@ window.__CHANGELOG__ = ${changelogJson};
   function saveTagHiddenExpanded(){
     try{ localStorage.setItem(TAG_HIDDEN_EXPANDED_KEY, tagHiddenExpanded?'true':'false'); }catch(e){}
   }
+  // Which list the hub was last left on. Browser-local (like the panel/tag view
+  // preferences) — it is a viewing preference, not shared workspace state.
+  function loadHubKind(){
+    try{
+      var saved=String(localStorage.getItem(HUB_KIND_KEY)||'');
+      return HUB_KINDS.indexOf(saved)>=0 ? saved : 'todo';
+    }catch(e){ return 'todo'; }
+  }
+  function saveHubKind(){
+    try{ localStorage.setItem(HUB_KIND_KEY, todoHubKind); }catch(e){}
+  }
   function loadPinnedTags(){
     var out=[], seen={};
     (VAULT_STATE && Array.isArray(VAULT_STATE.pinnedTags) ? VAULT_STATE.pinnedTags : []).forEach(function(raw){
@@ -2935,6 +2992,12 @@ window.__CHANGELOG__ = ${changelogJson};
   var newTagPickerActive = -1;
   var todoHubEditing = null;
   var todoHubShowCompleted = false;
+  // The hub browses the three UI text collections. They differ only in scope —
+  // shortcuts are machine-global, notes/todos hang off a session, and todos add a
+  // scope-local inbox for the ones not attached to any session yet.
+  var HUB_KINDS = ['shortcuts','notes','todo'];
+  var HUB_KIND_KEY = 'attend.hubKind.v1';
+  var todoHubKind = loadHubKind();
   var titleEditing = false;
   var WORK_STATS_RANGE_KEY = 'attend.workStatsRange';
   var SESSION_PANEL_OPEN_KEY = 'attend.sessionPanelOpen';
@@ -2974,6 +3037,10 @@ window.__CHANGELOG__ = ${changelogJson};
   var newSessionOperation = 0;
   var composerRailKind = '';
   var composerRailEditing = null;
+  // Which kind the rail panel's live DOM was last built for. A rebuild replays the
+  // previous panel's caret/draft/scroll only when that kind is unchanged — see
+  // renderComposerRailPanel.
+  var composerRailRenderedKind = '';
   var composerShortcutComposing = false;
   var commentShortcutComposing = false;
   var newShortcutComposing = false;
@@ -3032,6 +3099,13 @@ window.__CHANGELOG__ = ${changelogJson};
   // naturally-finished turn advance into it automatically. Stopping a turn keeps
   // the queue intact.
   var pendingQueue = [];
+  // The comment drawer queues mid-turn drafts the same way, against the same
+  // server-side chatQueue and the same /chat/queue routes. It needs no per-key
+  // stash because only one thread is open at a time; openCommentThread resets it.
+  var commentPendingQueue = [];
+  var commentQueueParked = false;
+  var commentQueueSteerable = false;
+  var sendingCommentQueueItems = {};
   var schedulePopoverState = null;
   var forkingQueueItems = {};
   var sendingQueueItems = {};
@@ -3060,6 +3134,9 @@ window.__CHANGELOG__ = ${changelogJson};
   function transcriptCacheCost(messages){
     return (messages||[]).reduce(function(total,message){
       var chars=String(message&&message.text||'').length;
+      var memory=message&&message.memoryCitations;
+      (memory&&memory.entries||[]).forEach(function(entry){ chars+=String(entry&&entry.path||'').length+String(entry&&entry.note||'').length+32; });
+      (memory&&memory.rolloutIds||[]).forEach(function(id){ chars+=String(id||'').length; });
       (message&&message.tools||[]).forEach(function(tool){
         chars+=String(tool&&tool.result||'').length;
         try{ chars+=String(JSON.stringify(tool&&tool.input)||'').length; }catch(_err){ chars+=1024; }
@@ -3179,6 +3256,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var transcriptPaneCache = new Map();
   var transcriptPaneCacheCost = 0;
   var bindTranscriptFloatingActions = function(){};
+  var memoryCitationPopoverState = null;
   // Catch-up dedup: when you (re)open a session whose turn is still live, the
   // server replays the run's buffered events on top of the JSONL/rollout history
   // we just rendered — re-adding assistant blocks that are already on screen
@@ -3243,6 +3321,10 @@ window.__CHANGELOG__ = ${changelogJson};
       path('M8 17v-5H6l3-4V3h6v5l3 4h-2v5H8z', 'pin-body');
     } else if(name==='collapse'){
       path('M6 12h12');
+    } else if(name==='memory'){
+      path('M6.5 4.5h9a2 2 0 0 1 2 2v12h-9a2 2 0 0 1-2-2v-12z');
+      path('M9.5 8h5M9.5 11h5M9.5 14h3');
+      path('M6.5 7H5a1.5 1.5 0 0 0-1.5 1.5v10A1.5 1.5 0 0 0 5 20h8.5');
     } else if(name==='comment'){
       path('M4 5.5h16v11H9l-5 4v-15z');
     } else if(name==='fork'){
@@ -3469,7 +3551,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var coverageSection=el('section','work-section');
     var coverageHead=el('div','work-section-head');
     coverageHead.appendChild(el('div','work-section-title','Data coverage'));
-    coverageHead.appendChild(el('div','work-section-note','prompt history is backfilled · resource and outcome history starts when recorded'));
+    coverageHead.appendChild(el('div','work-section-note','prompt history includes Attend activity only · resource and outcome history starts when recorded'));
     coverageSection.appendChild(coverageHead);
     coverageSection.appendChild(el('div','work-readout',String(coverage.sessionsWithPromptHistory||0)+' sessions with prompt history · daemon state '+String(coverage.sessionsWithState||0)+' covered / '+String(coverage.sessionsWithoutState||0)+' missing · turns since '+formatWorkDate(coverage.turnSince)+' · states since '+formatWorkDate(coverage.stateSince)));
     body.appendChild(coverageSection);
@@ -5576,6 +5658,11 @@ window.__CHANGELOG__ = ${changelogJson};
       var turnScoped=k==='state'||k==='stateset'||k==='etaMin'||k==='etaset';
       if(next[k]!==undefined && !(s.generating&&turnScoped)) s[k]=next[k];
     });
+    // Same rule as the index hydration: an authoritative run config retires the
+    // staged one, so the rail button and the rail menu cannot drift apart.
+    var runConfigApplied=options.source!=='status' && options.source!=='engagement' &&
+      (next.model!==undefined || next.effort!==undefined || next.speed!==undefined);
+    if(runConfigApplied && !runConfigStaged(s)) clearStagedRunConfig(s);
     if(Array.isArray(next.userPromptTs)){
       var currentPromptTs=validPromptTs(s), incomingPromptTs=validPromptTs(next);
       var currentLatest=currentPromptTs.length?Math.max.apply(null,currentPromptTs):0;
@@ -5594,8 +5681,14 @@ window.__CHANGELOG__ = ${changelogJson};
       syncActivitySortTs(s, next.sortTs!=null ? next.sortTs : next.lastTs);
       sortSessions();
     }
-    if(cur && cur.sessionId===s.sessionId){ syncOpenHeader(); renderAvoidancePanel(); }
-    renderSidebar();
+    if(cur && cur.sessionId===s.sessionId){
+      syncOpenHeader(); renderAvoidancePanel();
+      // Repaint the rail so the open tab shows the config that just arrived
+      // (buttons only — an open rail panel is never rebuilt from inbound data).
+      if(runConfigApplied) refreshRunConfigButton();
+    }
+    if(options.source==='status'||options.source==='engagement') syncSessionListsAfterProjection(s,options.source);
+    else renderSidebar();
   }
   var RUN_START_TIMEOUT_MS=120000;
   function sessionAwaitingLiveStart(s, now){
@@ -5846,6 +5939,19 @@ window.__CHANGELOG__ = ${changelogJson};
   function markTranscriptBaseline(s){
     transcriptStateKeys(s).forEach(function(key){ transcriptBaselines[key]=true; });
   }
+  function cloneMemoryCitations(value){
+    if(!value||!Array.isArray(value.entries)||!value.entries.length) return null;
+    var entries=value.entries.map(function(entry){
+      return {
+        path:String(entry&&entry.path||''),
+        lineStart:Math.max(1,Math.floor(Number(entry&&entry.lineStart)||1)),
+        lineEnd:Math.max(1,Math.floor(Number(entry&&entry.lineEnd)||1)),
+        note:String(entry&&entry.note||'')
+      };
+    }).filter(function(entry){ return !!entry.path&&!!entry.note; });
+    if(!entries.length) return null;
+    return {entries:entries,rolloutIds:(Array.isArray(value.rolloutIds)?value.rolloutIds:[]).map(function(id){ return String(id||''); }).filter(Boolean)};
+  }
   function cloneTranscriptMsgs(msgs){
     return Array.isArray(msgs) ? msgs.map(function(m){
       var ts=transcriptTs(m);
@@ -5854,6 +5960,7 @@ window.__CHANGELOG__ = ${changelogJson};
         text: m && m.text || '',
         attachments: cloneAttachments(m && m.attachments),
         references: clonePinReferences(m && m.references),
+        memoryCitations: cloneMemoryCitations(m && m.memoryCitations)||undefined,
         tools: Array.isArray(m && m.tools) ? m.tools.map(function(t){ return Object.assign({}, t); }) : [],
         historyId: String(m&&m.historyId||'')||undefined,
         historyOrdinal: Number.isFinite(Number(m&&m.historyOrdinal)) ? Number(m.historyOrdinal) : undefined,
@@ -5904,6 +6011,12 @@ window.__CHANGELOG__ = ${changelogJson};
     // A virtual transcript intentionally omits earlier turns from the DOM.
     // Falling back to the cached transcript preserves the complete Fork prefix.
     if(msgs.classList.contains('transcript-virtualized')) return null;
+    // So does a paged one: the chat opens on the newest page and older turns are
+    // simply not here yet. What the DOM can report then is a prefix that stops
+    // at the top of the loaded page, which is indistinguishable from a complete
+    // one — an empty array most of all. Answering with it forked branches that
+    // silently carried none of the conversation, with no error to notice.
+    if(transcriptHasEarlierHistory(cur)) return null;
     var out=[], node=msgs.firstChild;
     while(node && node!==msgEl){
       if(node.nodeType===1 && node.classList){
@@ -5977,7 +6090,17 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   // A virtualized transcript renders only a small window, while the initial
   // history request is paged. Editing a message needs every preceding message
-  // as the fork context, so fill the older pages before deciding it is missing.
+  // as the fork context, so fill in the older messages before deciding it is
+  // missing.
+  //
+  // This deliberately does not walk the pages backwards. Each page is sliced out
+  // of a freshly-read bounded tail, so a session that is still generating shifts
+  // that window between requests and the cursor/history indices of the page
+  // already held stop denoting the same rows. The walk could only detect that
+  // (via the file version) and give up — the "could not find the transcript
+  // point" report, reproducible on any live long session. One full read is a
+  // single self-consistent snapshot carrying the same 200-message bound the walk
+  // had, so there is no window left to race.
   function loadCompleteTranscriptForFork(s){
     if(!s) return Promise.resolve(null);
     var loadKey=transcriptLoadKey(s)+'\\ncomplete-fork-history';
@@ -5985,20 +6108,14 @@ window.__CHANGELOG__ = ${changelogJson};
     function collect(){
       var page=transcriptPageFor(s),history=cachedTranscriptFor(s)||[];
       if(!page||!page.hasMore) return Promise.resolve(history);
-      var expectedVersion=String(page.version||''),seenBefore={};
-      function next(before,merged){
-        var cursor=String(before==null?'':before);
-        if(!cursor || seenBefore[cursor]) return Promise.resolve(null);
-        seenBefore[cursor]=true;
-        return fetch(transcriptHistoryUrl(s,before)).then(function(r){ return r.json(); }).then(function(response){
-          var parsed=parseTranscriptHistoryResponse(response),nextPage=parsed.page||{};
-          if(expectedVersion&&nextPage.version&&String(nextPage.version)!==expectedVersion) return null;
-          var combined=mergeTranscriptHistoryMessages(merged,parsed.messages);
-          if(nextPage.hasMore) return next(nextPage.before,combined);
-          return combined;
-        });
-      }
-      return next(page.before,history).then(function(complete){
+      return fetch(transcriptHistoryUrl(s)+'&full=1').then(function(r){ return r.json(); }).then(function(response){
+        var parsed=parseTranscriptHistoryResponse(response);
+        if(!parsed.messages.length) return null;
+        // Snapshot first: it carries the authoritative history metadata, so the
+        // cached copies of those same rows dedupe away and only the live tail
+        // that has not reached disk yet is appended after it.
+        return mergeTranscriptHistoryMessages(parsed.messages,history);
+      }).then(function(complete){
         // Do not replace a live SSE cache with a potentially older snapshot.
         if(complete && !s.generating) cacheTranscript(s,complete);
         return complete;
@@ -6064,6 +6181,17 @@ window.__CHANGELOG__ = ${changelogJson};
       if(createsMessage) bumpTranscriptVersion(s);
       else patchTranscriptVirtualAssistantText(s,text);
     }
+  }
+  function cacheTranscriptAssistantMemoryCitations(s,text,memoryCitations){
+    var state=ensureTranscriptState(s),memory=cloneMemoryCitations(memoryCitations);
+    if(!state||!memory) return null;
+    var msg=state[state.length-1];
+    if(!msg||msg.role!=='assistant') msg=ensureAssistantTranscriptMsg(s);
+    if(!msg) return null;
+    msg.text=String(text||'').replace(/\s+$/,'');
+    msg.memoryCitations=memory;
+    bumpTranscriptVersion(s);
+    return msg;
   }
   function cacheTranscriptToolUse(s, tc){
     if(!tc) return;
@@ -6251,7 +6379,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     var text=String(entry.text||''),lines=Math.max(1,text.split('\\n').length);
     var charsPerLine=entry.role==='user'?58:82;
-    return 54+Math.min(1100,Math.max(lines,Math.ceil(text.length/charsPerLine))*22);
+    return 54+(entry.memoryCitations?34:0)+Math.min(1100,Math.max(lines,Math.ceil(text.length/charsPerLine))*22);
   }
   function buildTranscriptVirtualModel(msgs,sessionId){
     msgs=Array.isArray(msgs)?msgs:[];
@@ -6289,11 +6417,11 @@ window.__CHANGELOG__ = ${changelogJson};
       addPendingAt(i);
       if(i>=msgs.length) continue;
       var message=msgs[i]||{};
-      if(message.text){
+      if(message.text||message.memoryCitations){
         var historyMessageOrdinal=Number(message.historyOrdinal);
         var messageOrdinal=Number.isFinite(historyMessageOrdinal)?historyMessageOrdinal:msgIndex;
         var key=String(message.role||'assistant')+':'+messageOrdinal;
-        addEntry({kind:'msg',key:key,ordinal:messageOrdinal,role:message.role||'assistant',text:message.text,attachments:message.attachments,references:message.references,historyId:message.historyId,historyIndex:message.historyIndex});
+        addEntry({kind:'msg',key:key,ordinal:messageOrdinal,role:message.role||'assistant',text:message.text,memoryCitations:message.memoryCitations,attachments:message.attachments,references:message.references,historyId:message.historyId,historyIndex:message.historyIndex});
         msgIndex=Math.max(msgIndex,messageOrdinal+1);
       }
       (message.tools||[]).forEach(function(tool){
@@ -6381,7 +6509,7 @@ window.__CHANGELOG__ = ${changelogJson};
       return tool;
     }
     msgOrdinal=entry.ordinal;
-    var message=addMsg(entry.role,entry.text,true,entry.attachments,entry.references);
+    var message=addMsg(entry.role,entry.text,true,entry.attachments,entry.references,entry.memoryCitations);
     if(message){
       message.setAttribute('data-msg-key',entry.key);
       if(entry.historyId) message.setAttribute('data-history-id',entry.historyId);
@@ -6395,8 +6523,9 @@ window.__CHANGELOG__ = ${changelogJson};
         var tool=entry.tool||{},payload=String(tool.name||'')+'\\n'+fmt(tool.input)+'\\n'+String(tool.result||'')+'\\n'+String(!!tool.isError);
         return entry.key+':'+String(entry.historyId||'')+':'+payload.length+':'+hashText(payload);
       }
-      var text=String(entry.text||''),attachments=entry.attachments||[],references=entry.references||[];
-      return entry.key+':'+String(entry.historyId||'')+':'+text.length+':'+hashText(text)+':'+attachments.length+':'+references.length;
+      var text=String(entry.text||''),attachments=entry.attachments||[],references=entry.references||[],memory='';
+      try{ memory=JSON.stringify(entry.memoryCitations||null); }catch(_err){ memory=''; }
+      return entry.key+':'+String(entry.historyId||'')+':'+text.length+':'+hashText(text)+':'+attachments.length+':'+references.length+':'+hashText(memory);
     }).join('|');
   }
   function renderTranscriptVirtualTurn(turn,index,reusable){
@@ -7920,7 +8049,7 @@ window.__CHANGELOG__ = ${changelogJson};
     syncCommentUserEditActions();
     syncScrollBottomButton(byId('commentMsgs'),byId('commentScrollBottom'));
   }
-  function appendCommentMessage(role,text,historyOrdinal,historyId,historyIndex){
+  function appendCommentMessage(role,text,historyOrdinal,historyId,historyIndex,memoryCitations){
     var host=byId('commentMsgs'); if(!host) return null;
     var node=el('div','msg '+role), bubble=el('div','bubble');
     var ordinal=Number(historyOrdinal);
@@ -7930,6 +8059,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(historyId) node.setAttribute('data-history-id',String(historyId));
     if(Number.isFinite(Number(historyIndex))) node.setAttribute('data-history-index',String(historyIndex));
     setBubbleText(bubble,text||'',role==='user'||role==='assistant');
+    if(role==='assistant') appendMemoryCitations(bubble,memoryCitations);
     if(role==='user'){
       var edit=el('button','msg-edit comment-msg-edit');
       setIconButton(edit,'edit','Edit stopped comment and resend');
@@ -7964,7 +8094,7 @@ window.__CHANGELOG__ = ${changelogJson};
         var bubble=node.querySelector('.bubble');
         var key=String(node.getAttribute('data-msg-key')||''),ordinal=Number(key.split(':').pop());
         var historyIndexRaw=node.getAttribute('data-history-index'),historyIndex=historyIndexRaw==null?NaN:Number(historyIndexRaw);
-        messages.push({role:node.classList.contains('user')?'user':'assistant',text:bubble&&(bubble.getAttribute('data-raw')||bubble.textContent)||'',tools:[],historyId:String(node.getAttribute('data-history-id')||'')||undefined,historyOrdinal:Number.isFinite(ordinal)?ordinal:undefined,historyIndex:Number.isFinite(historyIndex)?historyIndex:undefined});
+        messages.push({role:node.classList.contains('user')?'user':'assistant',text:bubble&&(bubble.getAttribute('data-raw')||bubble.textContent)||'',memoryCitations:cloneMemoryCitations(bubble&&bubble._memoryCitations)||undefined,tools:[],historyId:String(node.getAttribute('data-history-id')||'')||undefined,historyOrdinal:Number.isFinite(ordinal)?ordinal:undefined,historyIndex:Number.isFinite(historyIndex)?historyIndex:undefined});
         return;
       }
       if(!node.classList.contains('toolrow')&&!node.classList.contains('toolc')) return;
@@ -7994,8 +8124,8 @@ window.__CHANGELOG__ = ${changelogJson};
       if(!message || (message.role!=='user' && message.role!=='assistant')) return;
       // Preserve the ordinal used by persisted pin keys even though blank
       // transcript records do not deserve a visible bubble.
-      if(!String(message.text||'').trim()) commentMsgOrdinal++;
-      else appendCommentMessage(message.role,message.text||'',message.historyOrdinal,message.historyId,message.historyIndex);
+      if(!String(message.text||'').trim()&&!message.memoryCitations) commentMsgOrdinal++;
+      else appendCommentMessage(message.role,message.text||'',message.historyOrdinal,message.historyId,message.historyIndex,message.memoryCitations);
       if(message.role==='assistant') (message.tools||[]).forEach(appendCommentTool);
     });
     if(remember!==false) cacheOpenCommentMessages();
@@ -8206,12 +8336,20 @@ window.__CHANGELOG__ = ${changelogJson};
     var drawerEpoch=++commentDrawerEpoch;
     commentDrawerState={epoch:drawerEpoch,threadId:(thread&&thread.id)||'',parentSessionId:parentId,anchorKey:key,anchorText:text,anchorData:anchorData,anchorMsg:msgEl,anchorSelectionStart:anchorOverride&&anchorOverride.selectionStart,busy:false,generating:false,stopping:false,stoppedByUser:false,pendingStop:null,promoting:false,assistant:null,lastAssistantOutputAt:null};
     commentStick=true;
+    // The drawer holds one thread at a time, so the queue view is rebuilt per
+    // open rather than stashed per key.
+    // The drawer holds one thread at a time, so the queue view is rebuilt per
+    // open rather than stashed per key. Clearing in-flight optimistic rows also
+    // keeps them from suppressing the refresh below.
+    commentPendingQueue=[]; commentQueueParked=false; commentQueueSteerable=false;
+    sendingCommentQueueItems={};
     renderCommentAnchorBlock(text,key,anchorData);
     drawer.hidden=false; drawer.setAttribute('aria-hidden','false');
     scheduleCommentOverlayOffsets();
     renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false); renderCommentQueue(); setCommentBusy(false); setCommentGenerating(!!(thread&&thread.status==='generating'));
     if(input){ input.value=''; input.focus(); }
     if(thread&&thread.providerSessionId){
+      refreshCommentQueue(thread);
       var knownVersion=String(commentHistoryVersions[thread.id]||'');
       if(knownVersion&&commentHistoryLoadedVersions[thread.id]===knownVersion){
         if(thread.status!=='generating') markCommentRead(thread);
@@ -8256,6 +8394,15 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!question) return;
     ensureCommentAnchorPinned();
     var thread=commentDrawerState.threadId ? commentThreads[commentDrawerState.threadId] : null;
+    // Mid-turn: queue the draft instead of sending it, exactly as the main
+    // composer does. No bubble is drawn here — the queue row stands in until the
+    // server drains it, and queued_turn_started turns it into a real message.
+    // A resend is a retry of an existing bubble, so it never queues.
+    if(!options.userMessage && commentDrawerState.generating && thread && thread.providerSessionId){
+      if(input){ input.value=''; syncCommentShortcutGhost(); }
+      enqueueComment(thread,question);
+      return;
+    }
     var commentConfig=commentRunConfig(thread,targetSession);
     var userMessageAt=Date.now();
     if(!thread){
@@ -8264,14 +8411,15 @@ window.__CHANGELOG__ = ${changelogJson};
       commentDrawerState.threadId=id;
       syncCommentPromoteButton();
     } else thread=rememberCommentThread(Object.assign({},thread,{lastUserMessageAt:userMessageAt}))||thread;
-    var resendMessage=options.userMessage;
+    var resendMessage=options.userMessage, optimisticUserMsg=null;
     if(resendMessage&&resendMessage.parentNode===byId('commentMsgs')){
       var resendBubble=options.bubble||resendMessage.querySelector('.bubble');
       if(resendBubble) setBubbleText(resendBubble,question,true);
       while(resendMessage.nextSibling) resendMessage.nextSibling.remove();
       commentLatestUserMsgEl=resendMessage;
       scheduleCommentLatestPin();
-    } else appendCommentMessage('user',question);
+      optimisticUserMsg=resendMessage;
+    } else optimisticUserMsg=appendCommentMessage('user',question);
     commentDrawerState.assistant=null;
     commentDrawerState.stoppedByUser=false;
     cacheOpenCommentMessages();
@@ -8310,6 +8458,15 @@ window.__CHANGELOG__ = ${changelogJson};
       if(saved) commentDrawerState.threadId=saved.id;
       syncCommentPromoteButton();
       setCommentBusy(false);
+      // The turn ended between this draft being typed and the request landing,
+      // so the server queued it after all. Take the optimistic bubble back down
+      // and let the queue row represent it, as the mid-turn path already does.
+      if(res.queued){
+        if(optimisticUserMsg&&optimisticUserMsg.parentNode) optimisticUserMsg.remove();
+        commentLatestUserMsgEl=latestCommentUserMessage();
+        cacheOpenCommentMessages();
+        refreshCommentQueue(saved||thread);
+      }
       if(commentDrawerState.stopping) stopCommentTurn();
       else setCommentGenerating(!!(saved&&saved.status==='generating'));
     }).catch(function(err){ failComment({message:err&&err.message?err.message:'Comment failed.',retryable:true}); });
@@ -8887,6 +9044,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function setBubbleText(bubble, text, markdown){
     if(!bubble) return;
+    if(memoryCitationPopoverState&&memoryCitationPopoverState.button&&bubble.contains(memoryCitationPopoverState.button)) closeMemoryCitationPopover(false);
     var raw=String(text||'');
     if(bubble._attendStream) delete bubble._attendStream;
     bubble.setAttribute('data-raw', raw);
@@ -9507,142 +9665,153 @@ window.__CHANGELOG__ = ${changelogJson};
   function openTodoCount(s){
     return composerTextItems('todo',s).filter(function(item){ return item && item.completed!==true; }).length;
   }
-  function todoSessionForKey(key){
-    key=String(key||'');
-    for(var i=0;i<SESS.length;i++) if(sessionTextKey(SESS[i])===key) return SESS[i];
-    return null;
-  }
-  function todoOwnerItems(ownerKey){
+  // Owner keys name the scope a list belongs to: 'global' for shortcuts, 'inbox'
+  // for todos not attached to a session, otherwise a session text key.
+  function hubOwnerItems(kind,ownerKey){
     ensureComposerCollections();
-    if(ownerKey==='inbox') return VAULT_STATE.inboxTodos;
-    return Array.isArray(VAULT_STATE.sessionTodos[ownerKey]) ? VAULT_STATE.sessionTodos[ownerKey] : [];
+    if(kind==='shortcuts') return VAULT_STATE.shortcuts;
+    if(ownerKey==='inbox') return kind==='todo' ? VAULT_STATE.inboxTodos : [];
+    var store=kind==='notes' ? VAULT_STATE.sessionNotes : VAULT_STATE.sessionTodos;
+    return Array.isArray(store[ownerKey]) ? store[ownerKey] : [];
   }
-  function persistInboxTodos(items){
+  // Every item the hub can show, tagged with the scope it lives in. Shortcuts are
+  // one unscoped list; notes/todos are gathered across every known session, and
+  // todos additionally carry the inbox.
+  function todoHubEntries(kind){
     ensureComposerCollections();
-    VAULT_STATE.inboxTodos=Array.isArray(items)?items:[];
-    saveVaultUiState({inboxTodos:VAULT_STATE.inboxTodos});
-    renderTodoHub();
-    renderTodoHubSummary();
-  }
-  function persistSessionTodoKey(key,items){
-    ensureComposerCollections();
-    key=String(key||''); if(!key) return;
-    items=Array.isArray(items)?items:[];
-    if(items.length) VAULT_STATE.sessionTodos[key]=items;
-    else delete VAULT_STATE.sessionTodos[key];
-    var patch={}; patch[key]=items.length?items:null;
-    saveVaultUiState({sessionTodos:patch});
-    renderSidebar();
-    renderComposerRail();
-    renderTodoHub();
-    renderTodoHubSummary();
-  }
-  function todoHubEntries(){
-    ensureComposerCollections();
+    if(kind==='shortcuts'){
+      return VAULT_STATE.shortcuts.map(function(item){ return {ownerKey:'global',session:null,item:item}; });
+    }
     var entries=[],seenKeys={};
-    VAULT_STATE.inboxTodos.forEach(function(item){ entries.push({ownerKey:'inbox',session:null,item:item}); });
+    if(kind==='todo'){
+      VAULT_STATE.inboxTodos.forEach(function(item){ entries.push({ownerKey:'inbox',session:null,item:item}); });
+    }
     SESS.forEach(function(s){
       var key=sessionTextKey(s); if(!key||seenKeys[key]) return;
       seenKeys[key]=true;
-      var items=Array.isArray(VAULT_STATE.sessionTodos[key])?VAULT_STATE.sessionTodos[key]:[];
-      items.forEach(function(item){ entries.push({ownerKey:key,session:s,item:item}); });
+      hubOwnerItems(kind,key).forEach(function(item){ entries.push({ownerKey:key,session:s,item:item}); });
     });
     return entries;
   }
   function todoHubOpenCount(){
-    return todoHubEntries().filter(function(entry){ return entry.item&&entry.item.completed!==true; }).length;
+    return todoHubEntries('todo').filter(function(entry){ return entry.item&&entry.item.completed!==true; }).length;
   }
   function renderTodoHubSummary(){
     var count=todoHubOpenCount(),badge=byId('todoHubCount'),button=byId('todoHubToggle');
     if(badge){ badge.textContent=count>99?'99+':String(count); badge.hidden=count===0; }
     if(button){
-      var label='Todos'+(count?' · '+count+' open':'');
-      button.setAttribute('aria-label',(todoHubOpen()?'close ':'open ')+label.toLowerCase());
+      // The button opens all three lists, but the badge stays a todo count — the
+      // one number that means "work still open".
+      button.setAttribute('aria-label',(todoHubOpen()?'close ':'open ')+'lists');
       button.removeAttribute('title');
-      button.setAttribute('data-hover-tip',label);
+      button.setAttribute('data-hover-tip','Lists'+(count?' · '+count+' open todos':''));
     }
   }
-  function updateTodoEntry(ownerKey,id,updater){
-    var items=todoOwnerItems(ownerKey).slice(),index=items.findIndex(function(item){ return item.id===id; });
+  function updateTodoEntry(kind,ownerKey,id,updater){
+    var items=hubOwnerItems(kind,ownerKey).slice(),index=items.findIndex(function(item){ return item.id===id; });
     if(index<0) return;
     var next=updater(items[index]);
     if(next) items[index]=next; else items.splice(index,1);
-    if(ownerKey==='inbox') persistInboxTodos(items); else persistSessionTodoKey(ownerKey,items);
+    persistUiTextItems(kind,ownerKey,items);
+  }
+  // Where a new item lands. Shortcuts are global and todos fall back to the
+  // inbox, but a note only means something against a session — with none open
+  // the hub says so rather than inventing an owner for it.
+  function todoHubAddOwner(){
+    if(todoHubKind==='shortcuts') return 'global';
+    if(todoHubKind==='todo') return 'inbox';
+    return cur ? sessionTextKey(cur) : '';
   }
   function addTodoHubItem(){
     var input=byId('todoHubAddInput'),text=String(input&&input.value||'').trim();
-    if(!text) return;
-    var now=Date.now(),items=todoOwnerItems('inbox').slice();
-    items.unshift({id:makeUiTextId('todo'),text:text,createdAt:now,updatedAt:now,completed:false});
+    var kind=todoHubKind,ownerKey=todoHubAddOwner();
+    if(!text||!ownerKey) return;
+    var now=Date.now(),item={id:makeUiTextId(kind),text:text,createdAt:now,updatedAt:now};
+    if(kind==='todo') item.completed=false;
+    var items=hubOwnerItems(kind,ownerKey).slice(); items.push(item);
     if(input) input.value='';
-    persistInboxTodos(items);
-    syncTodoHubAddButton();
+    persistUiTextItems(kind,ownerKey,items);
+    syncTodoHubAddRow();
     setTimeout(function(){ if(todoHubOpen()&&input) input.focus(); },0);
   }
   function toggleTodoHubItem(ownerKey,id,completed){
     var now=Date.now();
-    updateTodoEntry(ownerKey,id,function(item){
+    updateTodoEntry('todo',ownerKey,id,function(item){
       var next=Object.assign({},item,{completed:completed===true,updatedAt:now});
       if(completed) next.completedAt=now; else delete next.completedAt;
       return next;
     });
   }
-  function startTodoHubEdit(ownerKey,id){
-    todoHubEditing={ownerKey:ownerKey,id:id};
+  function moveTodoHubItem(id,direction){
+    var items=hubOwnerItems('shortcuts','global').slice();
+    var index=items.findIndex(function(item){ return item.id===id; });
+    var target=index+(direction<0?-1:1);
+    if(index<0 || target<0 || target>=items.length) return;
+    items.splice(target,0,items.splice(index,1)[0]);
+    persistUiTextItems('shortcuts','global',items);
+    var row=todoHubRowFor(id);
+    if(row){
+      var action=row.querySelector(direction<0?'.qmove-up':'.qmove-down');
+      if(!action || action.disabled) action=row.querySelector(direction<0?'.qmove-down':'.qmove-up');
+      if(action){ try{ action.focus({preventScroll:true}); }catch(e){ action.focus(); } }
+    }
+  }
+  function todoHubRowFor(id){
+    var body=byId('todoHubBody'); if(!body) return null;
+    var rows=body.querySelectorAll('.todohub-item');
+    for(var i=0;i<rows.length;i++) if(rows[i].getAttribute('data-todo-id')===String(id||'')) return rows[i];
+    return null;
+  }
+  function startTodoHubEdit(kind,ownerKey,id){
+    todoHubEditing={kind:kind,ownerKey:ownerKey,id:id};
     renderTodoHub();
     setTimeout(function(){ var input=byId('todoHubEditInput'); if(input){ input.focus(); input.select(); } },0);
   }
-  function commitTodoHubEdit(ownerKey,id){
+  function commitTodoHubEdit(kind,ownerKey,id){
     var input=byId('todoHubEditInput'),text=String(input&&input.value||'').trim();
     if(!text) return;
     todoHubEditing=null;
-    updateTodoEntry(ownerKey,id,function(item){ return Object.assign({},item,{text:text,updatedAt:Date.now()}); });
+    updateTodoEntry(kind,ownerKey,id,function(item){ return Object.assign({},item,{text:text,updatedAt:Date.now()}); });
   }
-  function deleteTodoHubItem(ownerKey,id){
+  function deleteTodoHubItem(kind,ownerKey,id){
     todoHubEditing=null;
-    updateTodoEntry(ownerKey,id,function(){ return null; });
+    updateTodoEntry(kind,ownerKey,id,function(){ return null; });
   }
   function clearTodoHubCompleted(){
-    var entries=todoHubEntries(),owners={};
-    entries.forEach(function(entry){ if(entry.item&&entry.item.completed===true) owners[entry.ownerKey]=true; });
-    Object.keys(owners).forEach(function(ownerKey){
-      var items=todoOwnerItems(ownerKey).filter(function(item){ return item.completed!==true; });
-      if(ownerKey==='inbox') VAULT_STATE.inboxTodos=items;
-      else if(items.length) VAULT_STATE.sessionTodos[ownerKey]=items;
-      else delete VAULT_STATE.sessionTodos[ownerKey];
-    });
-    if(!Object.keys(owners).length) return;
+    var owners={};
+    todoHubEntries('todo').forEach(function(entry){ if(entry.item&&entry.item.completed===true) owners[entry.ownerKey]=true; });
+    var ownerKeys=Object.keys(owners);
+    if(!ownerKeys.length) return;
     todoHubEditing=null;
     todoHubShowCompleted=false;
-    var sessionTodos={};
-    Object.keys(owners).forEach(function(ownerKey){
-      if(ownerKey!=='inbox') sessionTodos[ownerKey]=VAULT_STATE.sessionTodos[ownerKey]||null;
+    var patch={};
+    ownerKeys.forEach(function(ownerKey){
+      applyUiTextItems('todo',ownerKey,hubOwnerItems('todo',ownerKey).filter(function(item){ return item.completed!==true; }),patch);
     });
-    var patch={sessionTodos:sessionTodos};
-    if(owners.inbox) patch.inboxTodos=VAULT_STATE.inboxTodos;
     saveVaultUiState(patch);
-    renderSidebar();
-    renderComposerRail();
-    renderTodoHub();
-    renderTodoHubSummary();
+    renderAfterUiTextChange('todo');
   }
   function todoHubSessionLabel(s){
     if(!s) return 'Session unavailable';
     return [s.customTitle||s.brief||s.title||'(new session)',s.project||basename(s.cwd||'')].filter(Boolean).join(' · ');
   }
-  function renderTodoHubItem(host,entry){
-    var item=entry.item,row=el('div','todohub-item'+(item.completed?' done':''));
+  function hubItemNoun(kind){ return kind==='shortcuts' ? 'shortcut' : kind==='notes' ? 'note' : 'todo'; }
+  function renderTodoHubItem(host,kind,entry,index,total){
+    var item=entry.item,noun=hubItemNoun(kind);
+    var row=el('div','todohub-item'+(kind==='todo'?' checkable':'')+(item.completed?' done':''));
     row.setAttribute('data-todo-id',String(item.id||''));
     row.setAttribute('data-todo-owner',entry.ownerKey);
-    var check=document.createElement('input'); check.type='checkbox'; check.className='rail-todo-check todohub-check'; check.checked=item.completed===true;
-    check.setAttribute('aria-label',(item.completed?'Reopen ':'Complete ')+item.text);
-    check.onchange=function(){ toggleTodoHubItem(entry.ownerKey,item.id,check.checked); };
-    row.appendChild(check);
-    if(todoHubEditing&&todoHubEditing.ownerKey===entry.ownerKey&&todoHubEditing.id===item.id){
+    if(kind==='todo'){
+      var check=document.createElement('input'); check.type='checkbox'; check.className='rail-todo-check todohub-check'; check.checked=item.completed===true;
+      check.setAttribute('aria-label',(item.completed?'Reopen ':'Complete ')+item.text);
+      check.onchange=function(){ toggleTodoHubItem(entry.ownerKey,item.id,check.checked); };
+      row.appendChild(check);
+    }
+    if(todoHubEditing&&todoHubEditing.kind===kind&&todoHubEditing.ownerKey===entry.ownerKey&&todoHubEditing.id===item.id){
       var edit=el('div','todohub-edit'),input=el('input'); input.id='todoHubEditInput'; input.value=item.text;
       var save=el('button',null,'save'); save.type='button';
-      var cancel=editCancelButton('Cancel todo edit (Esc)');
-      function commit(){ commitTodoHubEdit(entry.ownerKey,item.id); }
+      var cancel=editCancelButton('Cancel '+noun+' edit (Esc)');
+      function commit(){ commitTodoHubEdit(kind,entry.ownerKey,item.id); }
       save.onclick=commit; cancel.onclick=function(){ todoHubEditing=null; renderTodoHub(); };
       input.onkeydown=function(ev){
         if(ev.key==='Enter'&&!isImeConfirming(ev)){ ev.preventDefault(); commit(); }
@@ -9655,8 +9824,8 @@ window.__CHANGELOG__ = ${changelogJson};
     if(entry.session){
       text.onclick=function(){ closeTodoHub(); select(entry.session); };
     } else {
-      text.title='Edit todo';
-      text.onclick=function(){ startTodoHubEdit(entry.ownerKey,item.id); };
+      text.title='Edit '+noun;
+      text.onclick=function(){ startTodoHubEdit(kind,entry.ownerKey,item.id); };
     }
     content.appendChild(text);
     var meta=el('div','todohub-meta');
@@ -9669,29 +9838,67 @@ window.__CHANGELOG__ = ${changelogJson};
     meta.appendChild(el('span','',ageLabelAt(item.updatedAt)));
     content.appendChild(meta); row.appendChild(content);
     var actions=el('div','todohub-actions');
-    var editButton=el('button','qaction qedit'); setIconButton(editButton,'edit','Edit todo'); editButton.onclick=function(ev){ ev.stopPropagation(); startTodoHubEdit(entry.ownerKey,item.id); }; actions.appendChild(editButton);
-    var del=el('button','qaction qdel'); setIconButton(del,'delete','Delete todo'); del.onclick=function(ev){ ev.stopPropagation(); deleteTodoHubItem(entry.ownerKey,item.id); }; actions.appendChild(del);
+    // Shortcut order is the completion priority (see shortcutMatch), so this list
+    // is the one place where position is data rather than presentation.
+    if(kind==='shortcuts'){
+      var moveLabel=String(item.text||'').slice(0,80);
+      var up=el('button','qaction qmove qmove-up'); setIconButton(up,'up','Move shortcut up: '+moveLabel); up.disabled=index===0;
+      up.onclick=function(ev){ ev.stopPropagation(); moveTodoHubItem(item.id,-1); }; actions.appendChild(up);
+      var down=el('button','qaction qmove qmove-down'); setIconButton(down,'down','Move shortcut down: '+moveLabel); down.disabled=index===total-1;
+      down.onclick=function(ev){ ev.stopPropagation(); moveTodoHubItem(item.id,1); }; actions.appendChild(down);
+    }
+    var editButton=el('button','qaction qedit'); setIconButton(editButton,'edit','Edit '+noun); editButton.onclick=function(ev){ ev.stopPropagation(); startTodoHubEdit(kind,entry.ownerKey,item.id); }; actions.appendChild(editButton);
+    var del=el('button','qaction qdel'); setIconButton(del,'delete','Delete '+noun); del.onclick=function(ev){ ev.stopPropagation(); deleteTodoHubItem(kind,entry.ownerKey,item.id); }; actions.appendChild(del);
     row.appendChild(actions); host.appendChild(row);
   }
-  function renderTodoHubItems(body,entries){
+  function renderTodoHubItems(body,kind,entries){
     if(!entries.length) return;
-    var list=el('div','todohub-items'); entries.forEach(function(entry){ renderTodoHubItem(list,entry); }); body.appendChild(list);
+    var list=el('div','todohub-items');
+    entries.forEach(function(entry,index){ renderTodoHubItem(list,kind,entry,index,entries.length); });
+    body.appendChild(list);
+  }
+  function renderTodoHubTabs(){
+    var tabs=byId('todoHubTabs'); if(!tabs) return;
+    Array.prototype.forEach.call(tabs.querySelectorAll('.todohub-tab'),function(tab){
+      var kind=tab.getAttribute('data-hub-kind'),selected=kind===todoHubKind;
+      tab.setAttribute('aria-selected',selected?'true':'false');
+      var count=todoHubEntries(kind).filter(function(entry){ return entry.item&&entry.item.completed!==true; }).length;
+      var badge=tab.querySelector('.todohub-tab-count');
+      if(badge){ badge.textContent=count>99?'99+':String(count); badge.hidden=count===0; }
+    });
+  }
+  // Placeholder doubles as the answer to "where does this land?" — the three
+  // lists genuinely differ, so the add row says which scope it writes to.
+  function syncTodoHubAddRow(){
+    var input=byId('todoHubAddInput'),button=byId('todoHubAddButton'),ownerKey=todoHubAddOwner();
+    if(input){
+      input.placeholder=todoHubKind==='shortcuts' ? 'Add a shortcut…'
+        : todoHubKind==='todo' ? 'Add a todo…'
+        : ownerKey ? 'Add a note to '+todoHubSessionLabel(cur)+'…'
+        : 'Open a session to add a note';
+      input.disabled=!ownerKey;
+    }
+    if(button) button.disabled=!ownerKey||!String(input&&input.value||'').trim();
   }
   function renderTodoHub(){
     renderTodoHubSummary();
+    renderTodoHubTabs();
+    syncTodoHubAddRow();
     var body=byId('todoHubBody'); if(!body) return;
-    var entries=todoHubEntries();
-    entries.sort(function(a,b){
-      return Number(b.item.updatedAt||0)-Number(a.item.updatedAt||0);
-    });
+    var kind=todoHubKind,entries=todoHubEntries(kind);
+    // Shortcuts keep their authored order; the session-scoped lists have no
+    // meaningful order of their own, so the freshest entry leads.
+    if(kind!=='shortcuts'){
+      entries.sort(function(a,b){ return Number(b.item.updatedAt||0)-Number(a.item.updatedAt||0); });
+    }
     var open=entries.filter(function(entry){ return entry.item.completed!==true; });
-    var completed=entries.filter(function(entry){ return entry.item.completed===true; });
+    var completed=kind==='todo' ? entries.filter(function(entry){ return entry.item.completed===true; }) : [];
     body.innerHTML='';
     if(!open.length&&!completed.length){
-      body.appendChild(el('div','todohub-empty','Nothing to do yet.'));
+      body.appendChild(el('div','todohub-empty',kind==='shortcuts' ? 'No shortcuts yet.' : kind==='notes' ? 'No notes yet.' : 'Nothing to do yet.'));
       return;
     }
-    renderTodoHubItems(body,open);
+    renderTodoHubItems(body,kind,open);
     if(completed.length){
       var completedRow=el('div','todohub-completed-row');
       var toggle=el('button','todohub-completed',(todoHubShowCompleted?'Hide ':'Show ')+'completed · '+completed.length); toggle.type='button';
@@ -9700,34 +9907,58 @@ window.__CHANGELOG__ = ${changelogJson};
       clear.setAttribute('aria-label','Clear completed todos');
       clear.onclick=clearTodoHubCompleted; completedRow.appendChild(clear);
       body.appendChild(completedRow);
-      if(todoHubShowCompleted) renderTodoHubItems(body,completed);
+      if(todoHubShowCompleted) renderTodoHubItems(body,kind,completed);
     }
   }
-  function syncTodoHubAddButton(){
-    var input=byId('todoHubAddInput'),button=byId('todoHubAddButton');
-    if(button) button.disabled=!String(input&&input.value||'').trim();
+  function selectTodoHubKind(kind){
+    if(HUB_KINDS.indexOf(kind)<0 || kind===todoHubKind) return;
+    todoHubKind=kind; todoHubEditing=null; todoHubShowCompleted=false;
+    saveHubKind();
+    renderTodoHub();
+    var input=byId('todoHubAddInput'); if(input && !input.disabled) input.focus();
   }
-  function persistComposerTextItems(kind,s,items){
+  // One writer for every UI text collection, shared by the composer rail and the
+  // hub. Split into apply/save/repaint so a bulk edit across many owners (clear
+  // completed) still writes and repaints exactly once.
+  function applyUiTextItems(kind,ownerKey,items,patch){
     ensureComposerCollections();
     items=Array.isArray(items) ? items : [];
     if(kind==='shortcuts'){
       VAULT_STATE.shortcuts=items;
-      saveVaultUiState({shortcuts:items});
-    } else {
-      var key=sessionTextKey(s);
-      if(!key) return;
-      var field=kind==='notes' ? 'sessionNotes' : 'sessionTodos';
-      var store=field==='sessionNotes' ? VAULT_STATE.sessionNotes : VAULT_STATE.sessionTodos;
-      if(items.length) store[key]=items;
-      else delete store[key];
-      var patch={}; patch[key]=items.length ? items : null;
-      var body={}; body[field]=patch;
-      saveVaultUiState(body);
+      patch.shortcuts=items;
+      return true;
     }
+    if(ownerKey==='inbox'){
+      if(kind!=='todo') return false;
+      VAULT_STATE.inboxTodos=items;
+      patch.inboxTodos=items;
+      return true;
+    }
+    if(!ownerKey) return false;
+    var field=kind==='notes' ? 'sessionNotes' : 'sessionTodos';
+    var store=kind==='notes' ? VAULT_STATE.sessionNotes : VAULT_STATE.sessionTodos;
+    if(items.length) store[ownerKey]=items;
+    else delete store[ownerKey];
+    patch[field]=patch[field]||{};
+    patch[field][ownerKey]=items.length ? items : null;
+    return true;
+  }
+  function renderAfterUiTextChange(kind){
     if(kind==='todo') renderSidebar();
     if(kind==='shortcuts'){ syncComposerShortcutGhost(); syncCommentShortcutGhost(); syncNewShortcutGhost(); }
     renderComposerRail();
-    if(kind==='todo'){ renderTodoHub(); renderTodoHubSummary(); }
+    // The list this panel renders just changed — one of the few reasons to rebuild it.
+    renderComposerRailPanel();
+    renderTodoHub();
+  }
+  function persistUiTextItems(kind,ownerKey,items){
+    var patch={};
+    if(!applyUiTextItems(kind,ownerKey,items,patch)) return;
+    saveVaultUiState(patch);
+    renderAfterUiTextChange(kind);
+  }
+  function persistComposerTextItems(kind,s,items){
+    persistUiTextItems(kind, kind==='shortcuts' ? 'global' : sessionTextKey(s), items);
   }
   function mergeUiTextItems(first,second){
     var out=[],seen={};
@@ -9797,6 +10028,9 @@ window.__CHANGELOG__ = ${changelogJson};
       renderComposerRail();
       refreshGoalToggle();
     }
+    // The notes/todos this session owns just moved to a new owner key; an open hub
+    // still holds rows bound to the old one, whose edits would silently no-op.
+    if(todoHubOpen()) renderTodoHub();
     drainOrphanAnalysis(s);
   }
   // A provider can roll a live session's id mid-turn — Claude /clear reinitializes with a
@@ -9848,17 +10082,18 @@ window.__CHANGELOG__ = ${changelogJson};
     if(opts.title) button.title=opts.title; else button.removeAttribute('title');
   }
   function renderComposerRail(){
-    var config=currentForkDefaults();
-    var display=currentRunDisplayConfig(config);
+    var display=currentRunSelection();
     var configurable=canConfigureRun();
-    var model=config.model||cliDefault(config.vendor,'model');
-    var effort=config.effort||defaultEffortValue(config.vendor,model);
-    var speed=config.speed||defaultSpeedValue(config.vendor,model);
-    var speedSupported=modelSupportsSpeed(config.vendor,model)||!!display.speed||!modelMetaFor(config.vendor,model);
-    var modelLabel=display.model ? railOptionLabel(modelOptionsFor(config.vendor),display.model,display.model) : 'unknown';
-    var effortLabel=display.effort ? railOptionLabel(effortOptionsFor(config.vendor,model,speed),display.effort,display.effort) : 'unknown';
-    var speedLabel=speedSupported ? (display.speed ? railOptionLabel(speedOptionsFor(config.vendor,model,effort),display.speed,display.speed) : 'unknown') : '—';
-    setRailButton('railVendor',config.vendor||'—',null,{kind:'vendor',vendor:config.vendor,disabled:!configurable});
+    // Label lookups still need a concrete model/tier to index the option tables;
+    // that fallback decides which table to read, never what the button claims.
+    var model=display.model||cliDefault(display.vendor,'model');
+    var effort=display.effort||defaultEffortValue(display.vendor,model);
+    var speed=display.speed||defaultSpeedValue(display.vendor,model);
+    var speedSupported=modelSupportsSpeed(display.vendor,model)||!!display.speed||!modelMetaFor(display.vendor,model);
+    var modelLabel=display.model ? railOptionLabel(modelOptionsFor(display.vendor),display.model,display.model) : 'unknown';
+    var effortLabel=display.effort ? railOptionLabel(effortOptionsFor(display.vendor,model,speed),display.effort,display.effort) : 'unknown';
+    var speedLabel=speedSupported ? (display.speed ? railOptionLabel(speedOptionsFor(display.vendor,model,effort),display.speed,display.speed) : 'unknown') : '—';
+    setRailButton('railVendor',display.vendor||'—',null,{kind:'vendor',vendor:display.vendor,disabled:!configurable});
     setRailButton('railModel',compactRailLabel(modelLabel),null,{kind:'model',disabled:!configurable,title:modelLabel});
     setRailButton('railEffort',compactRailLabel(effortLabel),null,{kind:'effort',disabled:!configurable,title:effortLabel});
     setRailButton('railSpeed',compactRailLabel(speedLabel),null,{kind:'speed',disabled:!configurable||!speedSupported,title:speedSupported?speedLabel:'Speed is unavailable for this model'});
@@ -9869,7 +10104,15 @@ window.__CHANGELOG__ = ${changelogJson};
     syncComposerShortcutGhost();
     var pop=byId('composerRailPop');
     if(!composerRailKind){ if(pop) pop.hidden=true; return; }
-    renderComposerRailPanel();
+    // INVARIANT: session data flowing in (index revisions every few seconds,
+    // daemon verdicts, run_config events) repaints the rail BUTTONS only. The
+    // panel owns focus — an open add/edit textarea, possibly mid-IME-composition —
+    // and rebuilding it under the user's hands drops the caret and the keystrokes.
+    // Panel rebuilds are driven by interaction instead (open/switch kind, edit
+    // toggle, item mutation, config-source refresh), each calling
+    // renderComposerRailPanel directly. A repainted button can change width, so
+    // re-anchor the open panel: that moves it without touching its DOM.
+    alignComposerRailPanel();
   }
   // Lane A — the daemon's most-likely next message. Surfaced as a ghost in the
   // EMPTY composer even before it owns focus; Tab accepts it once focused.
@@ -9922,7 +10165,7 @@ window.__CHANGELOG__ = ${changelogJson};
     pop.style.left=Math.round(left)+'px';
   }
   function closeComposerRail(){
-    composerRailKind=''; composerRailEditing=null;
+    composerRailKind=''; composerRailEditing=null; composerRailRenderedKind='';
     var pop=byId('composerRailPop'); if(pop) pop.hidden=true;
     var foot=document.querySelector('.foot'); if(foot) foot.classList.remove('rail-open');
     renderComposerRail();
@@ -9931,41 +10174,67 @@ window.__CHANGELOG__ = ${changelogJson};
     if(composerRailKind===kind){ closeComposerRail(); return; }
     if((kind==='vendor'||kind==='model'||kind==='effort'||kind==='speed') && !canConfigureRun()) return;
     if(!cur) return;
-    if((kind==='vendor'||kind==='model'||kind==='effort'||kind==='speed') && !(byId('rvendor')||{}).options.length) populateRunConfigControls();
+    // Re-seed on EVERY open, not just the first. These selects are the channel a
+    // rail pick travels through (chooseRailConfig assigns onto them), while the
+    // menu itself is computed live from the model catalog. Populating once left
+    // them pinned to whichever session/catalog was current at first open, so a
+    // later catalog (or another tab's model) could offer a tier the select had no
+    // <option> for — and assigning an absent value to a <select> yields "".
+    if(kind==='vendor'||kind==='model'||kind==='effort'||kind==='speed') populateRunConfigControls();
     composerRailKind=kind; composerRailEditing=null;
     var foot=document.querySelector('.foot'); if(foot) foot.classList.add('rail-open');
     renderComposerRail();
+    renderComposerRailPanel();
     if(kind==='shortcuts'||kind==='notes'||kind==='todo') setTimeout(function(){ var input=byId('railAddInput'); if(input) input.focus(); },0);
+  }
+  // A <select> silently discards an assignment for which it holds no <option>,
+  // leaving value === "". The rail menu is built live from the model catalog, so
+  // it can legitimately offer a value this select has not been populated with;
+  // dropping it there would make applyRunConfig read "" back out of the DOM and
+  // store it as the session's real model/effort (rendered as "unknown"). Carry
+  // the pick through by materializing the option instead.
+  function setRailSelectValue(id,value){
+    var sel=byId(id); if(!sel) return;
+    var want=String(value==null?'':value);
+    sel.value=want;
+    if(sel.value===want) return;
+    var option=document.createElement('option');
+    option.value=want; option.textContent=want;
+    sel.appendChild(option);
+    sel.value=want;
+    syncCustomSelect(sel);
   }
   function chooseRailConfig(kind,value){
     if(kind==='vendor'){
-      var vendor=byId('rvendor'); if(vendor) vendor.value=value;
+      setRailSelectValue('rvendor',value);
       refreshRunConfigControls(true); applyRunConfig();
     } else if(kind==='model'){
-      var model=byId('rmodel'); if(model) model.value=value;
+      setRailSelectValue('rmodel',value);
       syncRunConfigurationToModel();
     } else if(kind==='effort'){
-      var effort=byId('reffort'); if(effort) effort.value=value;
+      setRailSelectValue('reffort',value);
       syncRunEffortSelection();
     } else {
-      var speed=byId('rspeed'); if(speed) speed.value=value;
+      setRailSelectValue('rspeed',value);
       syncRunSpeedSelection();
     }
     closeComposerRail();
   }
   function renderRailConfigOptions(body,kind){
-    var config=currentForkDefaults(),options=[],selected='';
+    // Same source as the rail button. The "current" note marks what this session
+    // actually runs with — when that is unknown, nothing is marked rather than
+    // promoting a default (or another session's leftover) to look current.
+    var display=currentRunSelection(),options=[],selected='';
+    var model=display.model||cliDefault(display.vendor,'model');
     if(kind==='vendor'){
       options=forkVendorChoices().map(function(info){ return {value:info.vendor,label:info.vendor}; });
-      selected=config.vendor;
+      selected=display.vendor;
     } else if(kind==='model'){
-      options=modelOptionsFor(config.vendor); selected=config.model||cliDefault(config.vendor,'model');
+      options=modelOptionsFor(display.vendor); selected=display.model;
     } else if(kind==='effort'){
-      var model=config.model||cliDefault(config.vendor,'model');
-      options=effortOptionsFor(config.vendor,model,config.speed); selected=config.effort||defaultEffortValue(config.vendor,model);
+      options=effortOptionsFor(display.vendor,model,display.speed); selected=display.effort;
     } else {
-      var model=config.model||cliDefault(config.vendor,'model');
-      options=speedOptionsFor(config.vendor,model,config.effort); selected=config.speed||defaultSpeedValue(config.vendor,model);
+      options=speedOptionsFor(display.vendor,model,display.effort); selected=display.speed;
     }
     if(!options.length){ body.appendChild(el('div','rail-empty','No options available')); return; }
     options.forEach(function(option){
@@ -10104,30 +10373,26 @@ window.__CHANGELOG__ = ${changelogJson};
     if(composerRailEditing&&composerRailEditing.id===id) composerRailEditing=null;
     persistComposerTextItems(kind,cur,items);
   }
-  function restoreMovedRailItem(id,direction,scrollTop){
-    var pop=byId('composerRailPop'),body=pop&&pop.querySelector('.railpop-body');
-    if(body) body.scrollTop=scrollTop;
-    var rows=pop ? pop.querySelectorAll('.rail-item') : [];
-    for(var i=0;i<rows.length;i++){
-      var row=rows[i];
-      if(row.getAttribute('data-rail-item-id')!==String(id||'')) continue;
-      var action=row.querySelector(direction<0?'.qmove-up':'.qmove-down');
-      if(!action || action.disabled) action=row.querySelector(direction<0?'.qmove-down':'.qmove-up');
-      if(!action) action=row.querySelector('.rail-item-text');
-      if(action){ try{ action.focus({preventScroll:true}); }catch(e){ action.focus(); } }
-      break;
-    }
+  // The panel rebuild already replays scroll and focus generically. A moved row
+  // wants one thing more: keeping focus on a MOVE control, since reaching the end
+  // of the list disables the one that was just clicked.
+  function restoreMovedRailItem(id,direction){
+    var pop=byId('composerRailPop'),row=pop&&railRowFor(pop,String(id||''));
+    if(!row) return;
+    var action=row.querySelector(direction<0?'.qmove-up':'.qmove-down');
+    if(!action || action.disabled) action=row.querySelector(direction<0?'.qmove-down':'.qmove-up');
+    if(!action) action=row.querySelector('.rail-item-text');
+    if(action){ try{ action.focus({preventScroll:true}); }catch(e){ action.focus(); } }
   }
   function moveRailItem(kind,id,direction){
     var items=composerTextItems(kind,cur).slice();
     var index=items.findIndex(function(item){return item.id===id;});
     var target=index+(direction<0?-1:1);
     if(index<0 || target<0 || target>=items.length) return;
-    var pop=byId('composerRailPop'),body=pop&&pop.querySelector('.railpop-body'),scrollTop=body?body.scrollTop:0;
     var moved=items.splice(index,1)[0];
     items.splice(target,0,moved);
     persistComposerTextItems(kind,cur,items);
-    restoreMovedRailItem(id,direction,scrollTop);
+    restoreMovedRailItem(id,direction);
   }
   function toggleRailTodo(id,completed){
     var now=Date.now();
@@ -10237,14 +10502,78 @@ window.__CHANGELOG__ = ${changelogJson};
     syncAdd();
     add.appendChild(input); add.appendChild(button); body.appendChild(add); pop.appendChild(body);
   }
+  function railRowControls(row){ return row.querySelectorAll('button,input,textarea'); }
+  function railRowFor(pop,itemId){
+    var rows=pop.querySelectorAll('.rail-item');
+    for(var i=0;i<rows.length;i++) if(rows[i].getAttribute('data-rail-item-id')===itemId) return rows[i];
+    return null;
+  }
+  // The panel is rebuilt wholesale, so without this every rebuild would cost the
+  // caret, the typed-but-unsubmitted line and the scroll position. Read that state
+  // off the live nodes and replay it onto the fresh ones, making a rebuild
+  // invisible to whoever is typing. Drafts are captured regardless of focus: a
+  // click on some other row's checkbox must not discard the half-written add line.
+  function captureRailPanelState(pop){
+    var body=pop.querySelector('.railpop-body'),active=document.activeElement;
+    var state={scrollTop:body?body.scrollTop:0,drafts:[],focusId:'',focusItemId:'',focusIndex:-1};
+    // Only the add/edit textareas carry text the user has not committed yet.
+    Array.prototype.forEach.call(pop.querySelectorAll('textarea[id]'),function(field){
+      state.drafts.push({id:field.id,value:field.value,start:field.selectionStart,end:field.selectionEnd});
+    });
+    if(active && pop.contains(active)){
+      state.focusId=String(active.id||'');
+      var row=active.closest('.rail-item');
+      if(row){
+        state.focusItemId=row.getAttribute('data-rail-item-id')||'';
+        state.focusIndex=Array.prototype.indexOf.call(railRowControls(row),active);
+      }
+    }
+    return state;
+  }
+  function restoreRailPanelState(pop,state){
+    if(!state) return;
+    var body=pop.querySelector('.railpop-body');
+    if(body && state.scrollTop) body.scrollTop=state.scrollTop;
+    state.drafts.forEach(function(draft){
+      var field=byId(draft.id);
+      if(!field || !pop.contains(field) || field.value===draft.value) return;
+      field.value=draft.value;
+      // Replay through the real listener so the textarea's height and the
+      // add/save enablement re-derive exactly as they would from typing.
+      field.dispatchEvent(new Event('input',{bubbles:true}));
+    });
+    var target=state.focusId ? byId(state.focusId) : null;
+    if(!target && state.focusItemId && state.focusIndex>=0){
+      var row=railRowFor(pop,state.focusItemId),controls=row?railRowControls(row):[];
+      target=controls[state.focusIndex]||null;
+      // A rebuild can disable the control that held focus (a moved row reaching
+      // the end of the list). Stay inside the same row rather than drop to <body>.
+      if(target && target.disabled){
+        target=null;
+        for(var i=0;i<controls.length;i++) if(!controls[i].disabled){ target=controls[i]; break; }
+      }
+    }
+    if(!target || !pop.contains(target)) return;
+    try{ target.focus({preventScroll:true}); }catch(e){ target.focus(); }
+    var focused=state.focusId ? state.drafts.filter(function(draft){ return draft.id===state.focusId; })[0] : null;
+    if(focused && focused.start!=null && target.setSelectionRange){
+      try{ target.setSelectionRange(focused.start,focused.end); }catch(e){}
+    }
+  }
   function renderComposerRailPanel(){
     var pop=byId('composerRailPop'); if(!pop || !composerRailKind) return;
+    // Carry state across a rebuild of the SAME list only — a draft belongs to the
+    // list it was typed into, so switching kind starts clean.
+    var state=composerRailRenderedKind===composerRailKind ? captureRailPanelState(pop) : null;
+    composerRailRenderedKind=composerRailKind;
     pop.hidden=false; pop.className='railpop kind-'+composerRailKind; pop.innerHTML='';
     if(composerRailKind==='shortcuts'||composerRailKind==='notes'||composerRailKind==='todo'){
-      renderRailTextPanel(pop,composerRailKind); alignComposerRailPanel(); return;
+      renderRailTextPanel(pop,composerRailKind);
+    } else {
+      var body=el('div','railpop-body'); renderRailConfigOptions(body,composerRailKind); pop.appendChild(body);
     }
-    var body=el('div','railpop-body'); renderRailConfigOptions(body,composerRailKind); pop.appendChild(body);
     alignComposerRailPanel();
+    restoreRailPanelState(pop,state);
   }
   function optionListWithCurrent(options, current){
     var list=(options||[]).slice();
@@ -10875,14 +11204,54 @@ window.__CHANGELOG__ = ${changelogJson};
     var opts=speedOptionsFor(vendor,model,effort);
     return opts.some(function(opt){ return opt.value===want; }) ? want : '';
   }
-  function currentForkDefaults(){
+  // A staged selection is one the user picked but has not sent yet: either an
+  // explicit edit for this session, or a vendor switch that only Fork can apply.
+  function runConfigStaged(s){
+    return !!s && (s.runConfigDirty===true || (s.runVendor!==undefined && s.runVendor!==s.vendor));
+  }
+  // Staged values must not outlive their turn. /chat/send clears the dirty flag
+  // while the next authoritative snapshot rewrites model/effort/speed, so a
+  // surviving run* would pin the rail menu to the last hand-picked tier while
+  // the rail button already shows the provider's truth.
+  function clearStagedRunConfig(s){
+    if(!s) return false;
+    if(!s.runConfigDirty && s.runVendor===undefined && s.runModel===undefined &&
+       s.runEffort===undefined && s.runSpeed===undefined) return false;
+    delete s.runVendor; delete s.runModel; delete s.runEffort; delete s.runSpeed;
+    s.runConfigDirty=false;
+    return true;
+  }
+  // THE display source — the rail button and the rail menu must never read
+  // different values. A staged selection wins; otherwise this session's own
+  // recorded config, and nothing else. The remembered "last used" preference is
+  // deliberately absent: borrowing it here is what made a freshly opened tab
+  // claim the effort of whichever session was sent last.
+  function currentRunSelection(){
     var vendor=(cur&&(cur.runVendor||cur.vendor))||'claude';
-    var model=String((cur&&(cur.runModel!==undefined ? cur.runModel : cur.model))||'').trim();
+    if(!cur) return {vendor:vendor,model:'',effort:'',speed:'',staged:false};
+    var staged=runConfigStaged(cur);
+    function pick(stagedValue,sessionValue){
+      return String((staged&&stagedValue!==undefined ? stagedValue : sessionValue)||'').trim();
+    }
+    return {
+      vendor:vendor,
+      model:pick(cur.runModel,cur.model),
+      effort:pick(cur.runEffort,cur.effort),
+      speed:pick(cur.runSpeed,cur.speed),
+      staged:staged
+    };
+  }
+  // Fork and resume need a concrete runnable tuple even when the session never
+  // recorded one — execution is the only place the remembered per-model
+  // preference may fill a gap that display leaves honestly empty.
+  function currentForkDefaults(){
+    var selection=currentRunSelection();
+    var vendor=selection.vendor, model=selection.model;
     var selected=modelConfigurationFor(
       vendor,
       model,
-      (cur&&(cur.runEffort!==undefined ? cur.runEffort : cur.effort))||linkedEffortFor(vendor,model),
-      (cur&&(cur.runSpeed!==undefined ? cur.runSpeed : cur.speed))||linkedSpeedFor(vendor,model)
+      selection.effort||linkedEffortFor(vendor,model),
+      selection.speed||linkedSpeedFor(vendor,model)
     );
     return {
       vendor:vendor,
@@ -10890,25 +11259,6 @@ window.__CHANGELOG__ = ${changelogJson};
       effort:selected.effort,
       speed:selected.speed
     };
-  }
-  function currentRunDisplayConfig(selected){
-    selected=selected||currentForkDefaults();
-    if(!cur) return {vendor:selected.vendor,model:'',effort:'',speed:''};
-    var staged=cur.runConfigDirty===true || (cur.runVendor!==undefined && cur.runVendor!==cur.vendor);
-    if(staged) return selected;
-    return {
-      vendor:selected.vendor,
-      model:String(cur.model||'').trim(),
-      effort:String(cur.effort||'').trim(),
-      speed:String(cur.speed||'').trim()
-    };
-  }
-  function runConfigLabel(s){
-    if(!s) return 'model · effort · speed';
-    var config=currentRunDisplayConfig(currentForkDefaults());
-    return (config.model || 'unknown')+' · '+
-      (config.effort || 'unknown')+' · '+
-      (config.speed || 'unknown');
   }
   function canConfigureRun(){
     var info=cur&&vendorInfo(cur.vendor);
@@ -10936,6 +11286,10 @@ window.__CHANGELOG__ = ${changelogJson};
     syncCustomSelect(byId('rvendor'));
     syncModelWarnings();
     setRunMsg(vendor===cur.vendor ? 'Send continues this session; Fork creates a new branch.' : 'Vendor changed: Send is unavailable. Use Fork to create a '+vendor+' branch.', false);
+    // The rail's config lists read the same tables these selects just re-derived
+    // (a late /models fetch can extend them). Rebuild the open config panel so it
+    // cannot advertise a stale list — config panels hold no draft to lose.
+    if(runPopOpen()) renderComposerRailPanel();
   }
   function refreshRunConfigurationOptions(preferredEffort,preferredSpeed,preferredAxis){
     var vendor=String((byId('rvendor')||{}).value || (cur&&cur.vendor) || 'claude').trim().toLowerCase();
@@ -13051,11 +13405,161 @@ window.__CHANGELOG__ = ${changelogJson};
     });
     scheduleOverlayOffsets();
   }
+  // Mirrors renderQueue() for the drawer. The action set is deliberately a
+  // subset — send-now and delete — because a comment draft carries no
+  // attachments, goal or fork target to edit.
   function renderCommentQueue(){
     var q=byId('commentQueue'); if(!q) return;
     q.innerHTML='';
     scheduledCommentsForThread(commentDrawerState.threadId).forEach(function(item){ q.appendChild(makeScheduledQueueRow(item)); });
+    var thread=commentDrawerState.threadId?commentThreads[commentDrawerState.threadId]:null;
+    commentPendingQueue.forEach(function(turn,i){
+      var preview=turnPreview(turn), immediate=queuedImmediateActionCopy(thread,turn,false);
+      var row=el('div','qitem');
+      row.appendChild(el('span','qtag','queued'));
+      var tx=el('div','qtext',preview); tx.title=preview; row.appendChild(tx);
+      var sb;
+      if(commentDrawerState.generating && !commentQueueSteerable){
+        sb=el('span','qdispatch qwaiting','waiting');
+        sb.title=immediate.unavailable;
+      } else {
+        sb=el('button','qdispatch qsend',commentDrawerState.generating?immediate.label:'send');
+        setActionVendor(sb,(turn&&turn.vendor)||(thread&&thread.vendor));
+        var ready=String(turn.id||'').indexOf('pending-')!==0;
+        sb.disabled=!ready||!!sendingCommentQueueItems[turn.id];
+        sb.title=!ready?'Waiting for this queued comment to be saved'
+          :commentDrawerState.generating?immediate.title:'Send this queued comment now';
+        sb.onclick=function(){ sendCommentQueued(i); };
+      }
+      var db=el('button','qaction qdel');
+      setIconButton(db,'delete','Delete queued comment');
+      db.onclick=function(){ delCommentQueued(i); };
+      row.appendChild(sb); row.appendChild(db);
+      q.appendChild(row);
+    });
     scheduleCommentOverlayOffsets();
+  }
+  function applyCommentServerQueue(threadId,res){
+    if(!res||!res.ok) return;
+    if(String(commentDrawerState.threadId||'')!==String(threadId||'')) return;
+    commentPendingQueue=Array.isArray(res.items)?res.items.map(cloneTurn):[];
+    commentQueueParked=res.parked===true;
+    commentQueueSteerable=res.steerable===true;
+    renderCommentQueue();
+  }
+  function refreshCommentQueue(thread){
+    var target=thread||(commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId]);
+    if(!target||!target.providerSessionId) return Promise.resolve();
+    // An optimistic row has no server id yet; reconciling now would drop it.
+    if(commentPendingQueue.some(function(item){ return String(item.id||'').indexOf('pending-')===0; })) return Promise.resolve();
+    var threadId=target.id, operation=beginOperation('comment-queue-view',threadId);
+    return fetch('/chat/queue?session='+encodeURIComponent(target.providerSessionId))
+      .then(function(r){ return r.json(); })
+      .then(function(res){ if(operationIsCurrent(operation)) applyCommentServerQueue(threadId,res); })
+      .catch(function(){});
+  }
+  function dropCommentQueueItem(itemId){
+    if(!itemId) return;
+    var before=commentPendingQueue.length;
+    commentPendingQueue=commentPendingQueue.filter(function(item){ return String(item.id||'')!==String(itemId); });
+    if(commentPendingQueue.length!==before) renderCommentQueue();
+  }
+  // Queue a comment draft on the same server-side store the main composer uses.
+  function enqueueComment(thread,text){
+    if(!thread||!thread.providerSessionId) return;
+    var threadId=thread.id, providerId=thread.providerSessionId;
+    var temp={id:'pending-'+Date.now(),text:String(text||''),vendor:thread.vendor};
+    commentPendingQueue.push(temp);
+    renderCommentQueue();
+    var operation=beginOperation('comment-queue-view',threadId);
+    serializeMutation('comment-queue-write',threadId,function(){
+      return fetch('/chat/queue?session='+encodeURIComponent(providerId)+'&cwd='+encodeURIComponent(thread.cwd||'')+'&vendor='+encodeURIComponent(thread.vendor||'claude'),{
+        method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({text:temp.text,attachments:[],references:[],goal:false})
+      }).then(function(r){ return r.json(); });
+    }).then(function(res){
+      // A delete can beat the enqueue response, while the row still holds its
+      // client-only id. Remove the real item as soon as its id arrives.
+      if(temp.cancelled){
+        if(res.ok&&res.item&&res.item.id) deleteCommentQueueItem(thread,res.item.id);
+        return;
+      }
+      if(!operationIsCurrent(operation)) return;
+      if(res.ok) applyCommentServerQueue(threadId,res);
+      else {
+        dropCommentQueueItem(temp.id);
+        showToast(res.error||'Could not queue this comment','warn');
+        refreshCommentQueue(thread);
+      }
+    }).catch(function(){
+      if(!operationIsCurrent(operation)) return;
+      dropCommentQueueItem(temp.id);
+      showToast('Could not queue this comment','warn');
+      refreshCommentQueue(thread);
+    });
+  }
+  function deleteCommentQueueItem(thread,itemId){
+    if(!thread||!thread.providerSessionId||!itemId) return Promise.resolve();
+    var threadId=thread.id, providerId=thread.providerSessionId;
+    var operation=beginOperation('comment-queue-view',threadId);
+    return serializeMutation('comment-queue-write',threadId,function(){
+      return fetch('/chat/queue?session='+encodeURIComponent(providerId)+'&item='+encodeURIComponent(itemId),{method:'DELETE'})
+        .then(function(r){ return r.json(); });
+    }).then(function(res){
+      if(!operationIsCurrent(operation)) return;
+      if(res.ok) applyCommentServerQueue(threadId,res);
+      else { showToast(res.error||'Could not delete queued comment','warn'); refreshCommentQueue(thread); }
+    }).catch(function(){
+      if(operationIsCurrent(operation)){ showToast('Could not delete queued comment','warn'); refreshCommentQueue(thread); }
+    });
+  }
+  function delCommentQueued(i){
+    var item=commentPendingQueue[i];
+    var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+    if(!item||!thread||!thread.providerSessionId) return;
+    if(String(item.id||'').indexOf('pending-')===0){
+      item.cancelled=true;
+      commentPendingQueue.splice(i,1);
+      renderCommentQueue();
+      return;
+    }
+    commentPendingQueue.splice(i,1);
+    renderCommentQueue();
+    deleteCommentQueueItem(thread,item.id);
+  }
+  // Send a queued comment now. Mid-turn this steers the live turn where the
+  // vendor supports it; otherwise it promotes the item, which also un-parks a
+  // queue that a manual stop left stopped.
+  function sendCommentQueued(i){
+    var item=commentPendingQueue[i];
+    var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
+    if(!item||!item.id||!thread||!thread.providerSessionId) return;
+    if(String(item.id).indexOf('pending-')===0) return;
+    if(commentDrawerState.generating&&!commentQueueSteerable) return;
+    if(sendingCommentQueueItems[item.id]) return;
+    sendingCommentQueueItems[item.id]=true;
+    var threadId=thread.id, providerId=thread.providerSessionId, steering=commentDrawerState.generating;
+    var operation=beginOperation('comment-queue-send',threadId);
+    if(!steering) setCommentGenerating(true);
+    renderCommentQueue();
+    function recover(errorMessage){
+      delete sendingCommentQueueItems[item.id];
+      if(!operationIsCurrent(operation)) return;
+      if(!steering&&String(commentDrawerState.threadId||'')===String(threadId)) setCommentGenerating(false);
+      showToast(errorMessage,'warn');
+      refreshCommentQueue(thread);
+    }
+    fetch('/chat/queue/send?session='+encodeURIComponent(providerId)+'&item='+encodeURIComponent(item.id),{method:'POST'})
+      .then(function(r){ return r.json(); })
+      .then(function(res){
+        if(res.ok){
+          delete sendingCommentQueueItems[item.id];
+          if(operationIsCurrent(operation)) applyCommentServerQueue(threadId,res);
+          return;
+        }
+        recover(res.error||'Could not send this queued comment');
+      })
+      .catch(function(){ recover('Could not send this queued comment'); });
   }
   // Edit a queued draft in place (NOT back in the bottom composer, which may hold
   // an unrelated draft): only the text slot becomes a single-line input, so the
@@ -15355,6 +15859,32 @@ window.__CHANGELOG__ = ${changelogJson};
     for(var i=0;i<a.length;i++) if(a[i]!==b[i]) return false;
     return true;
   }
+  function paintSessionAvoidanceRows(s){
+    var id=String(s&&s.sessionId||''),avoidance=!!(s&&s.pattern==='avoidance');
+    if(!id) return;
+    [byId('list'),byId('sessionPanelList')].forEach(function(host){
+      if(!host) return;
+      Array.prototype.forEach.call(host.querySelectorAll('.item[data-session-id]'),function(row){
+        if(row.getAttribute('data-session-id')!==id) return;
+        row.classList.toggle('avoidance',avoidance);
+        if(avoidance) row.title='avoidance';
+        else if(row.title==='avoidance') row.removeAttribute('title');
+      });
+    });
+  }
+  function syncSessionListsAfterProjection(s,source){
+    var visible=SESS.filter(matchesFilter);
+    if(!sameSessionSequence(sidebarVisibleSessions,visible)){ renderSidebar(); return; }
+    sidebarVisibleSessions=visible;
+    // Status and engagement responses arrive just after navigation. Their
+    // projection changes only status lights or the avoidance rail, so keep the
+    // existing cards alive instead of repainting the whole middle panel.
+    if(source==='engagement') paintSessionAvoidanceRows(s);
+    applyGenerating(s);
+    renderViewTabs();
+    syncBulkArchiveSeenButton();
+    renderChatTabs();
+  }
   function paintCachedSessionSelection(previous,next){
     function paint(node,s){ if(node) node.classList.toggle('active',!!(next&&sameChatSession(next,s))); }
     Object.keys(sidebarRowCache).forEach(function(key){ var cached=sidebarRowCache[key]; if(cached) paint(cached.node,cached.session); });
@@ -15874,7 +16404,85 @@ window.__CHANGELOG__ = ${changelogJson};
     });
     bubble.appendChild(tray);
   }
-  function addMsg(role, text, markdown, attachments, references){
+  function closeMemoryCitationPopover(returnFocus){
+    var state=memoryCitationPopoverState,pop=byId('memoryCitationPopover');
+    if(state&&state.button) state.button.setAttribute('aria-expanded','false');
+    if(pop){ pop.hidden=true; pop.textContent=''; }
+    memoryCitationPopoverState=null;
+    if(returnFocus!==false&&state&&state.button&&state.button.isConnected) state.button.focus();
+  }
+  function positionMemoryCitationPopover(){
+    var state=memoryCitationPopoverState,pop=byId('memoryCitationPopover');
+    if(!state||!pop||!state.button||!state.button.isConnected){ closeMemoryCitationPopover(false); return; }
+    if(window.innerWidth<=600){ pop.style.removeProperty('width'); pop.style.removeProperty('left'); pop.style.removeProperty('top'); pop.style.removeProperty('bottom'); return; }
+    var rect=state.button.getBoundingClientRect(),width=Math.min(432,window.innerWidth-24);
+    pop.style.width=width+'px'; pop.style.left=Math.max(12,Math.min(window.innerWidth-width-12,rect.left))+'px';
+    pop.style.top='auto'; pop.style.bottom='auto';
+    var height=pop.getBoundingClientRect().height||220;
+    if(rect.top>height+16) pop.style.top=Math.max(8,rect.top-height-8)+'px';
+    else pop.style.top=Math.min(window.innerHeight-height-8,rect.bottom+8)+'px';
+  }
+  function openMemoryCitationPopover(button,value){
+    var memory=cloneMemoryCitations(value),pop=byId('memoryCitationPopover');
+    if(!button||!memory||!pop) return;
+    if(memoryCitationPopoverState&&memoryCitationPopoverState.button===button){ closeMemoryCitationPopover(); return; }
+    closeMemoryCitationPopover(false); memoryCitationPopoverState={button:button,memory:memory};
+    button.setAttribute('aria-expanded','true'); pop.textContent='';
+    var head=el('div','memory-citation-head');
+    head.appendChild(el('div','memory-citation-title','Memories used'));
+    var close=el('button','memory-citation-close'); setIconButton(close,'close','Close memories used');
+    close.onclick=function(){ closeMemoryCitationPopover(); }; head.appendChild(close); pop.appendChild(head);
+    var list=el('div','memory-citation-list'); list.setAttribute('role','list');
+    memory.entries.forEach(function(entry){
+      var item=el('div','memory-citation-item'); item.setAttribute('role','listitem');
+      item.appendChild(el('div','memory-citation-note',entry.note));
+      item.appendChild(el('div','memory-citation-source',entry.path+' · L'+entry.lineStart+'–'+entry.lineEnd));
+      list.appendChild(item);
+    });
+    pop.appendChild(list);
+    if(memory.rolloutIds.length){
+      var rollouts=el('div','memory-rollouts'); rollouts.appendChild(el('span','memory-rollouts-label','Source sessions'));
+      memory.rolloutIds.forEach(function(id){
+        var sourceSession=findSessionById(id),source=el('button','memory-rollout');
+        source.type='button';
+        source.textContent=sourceSession?String(sourceSession.title||sourceSession.brief||id).slice(0,42):id.slice(0,8);
+        source.title=sourceSession?'Open source session · '+id:'Copy source session id · '+id;
+        source.onclick=function(){
+          if(sourceSession){ closeMemoryCitationPopover(false); select(sourceSession); }
+          else copyPlainText(id).then(function(){ showToast('Source session id copied'); }).catch(function(){ showToast('Could not copy source session id','warn'); });
+        };
+        rollouts.appendChild(source);
+      });
+      pop.appendChild(rollouts);
+    }
+    pop.hidden=false; positionMemoryCitationPopover(); close.focus();
+  }
+  function appendMemoryCitations(bubble,value){
+    if(!bubble) return;
+    var existing=bubble.querySelector('.memory-citation-footer'); if(existing) existing.remove();
+    var memory=cloneMemoryCitations(value); bubble._memoryCitations=memory;
+    if(!memory) return;
+    var footer=el('div','memory-citation-footer'),button=el('button','memory-citation-trigger');
+    button.type='button'; button.setAttribute('aria-haspopup','dialog'); button.setAttribute('aria-expanded','false');
+    button.setAttribute('aria-label','Show '+memory.entries.length+' memor'+(memory.entries.length===1?'y':'ies')+' used');
+    button.appendChild(svgIcon('memory'));
+    button.appendChild(document.createTextNode('Memories · '+memory.entries.length));
+    button.onclick=function(ev){ ev.stopPropagation(); openMemoryCitationPopover(button,memory); };
+    footer.appendChild(button); bubble.appendChild(footer);
+  }
+  function latestAssistantMessage(host){
+    if(!host) return null;
+    var messages=host.querySelectorAll('.msg.assistant:not(.thinking)');
+    return messages.length?messages[messages.length-1]:null;
+  }
+  function applyAssistantMemoryCitations(message,text,value){
+    if(!message) return;
+    var bubble=message.querySelector&&message.querySelector('.bubble'); if(!bubble) return;
+    finalizeStreamingMessage(message);
+    setBubbleText(bubble,String(text||'').replace(/\s+$/,''),true);
+    appendMemoryCitations(bubble,value);
+  }
+  function addMsg(role, text, markdown, attachments, references, memoryCitations){
     clearPh();
     var m=el('div','msg '+role);
     m.setAttribute('data-msg-key', role+':'+(msgOrdinal++));
@@ -15884,6 +16492,7 @@ window.__CHANGELOG__ = ${changelogJson};
     setBubbleText(b, displayText||'', markdown!==false && (role==='user' || role==='assistant'));
     appendAttachmentCards(b, atts);
     if(role==='user') appendMessageReferences(b,references);
+    if(role==='assistant') appendMemoryCitations(b,memoryCitations);
     if(role==='user'){
       var eb=el('button','msg-edit');
       setIconButton(eb, 'edit', 'Edit message');
@@ -16643,7 +17252,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var restoreBottom=!!(savedScrollState&&savedScrollState.atBottom);
     var restoreReadingPosition=!s.generating&&!restoreBottom&&savedScrollTop!=null;
     var selectionScrollMode=restoreReadingPosition ? {top:savedScrollTop,anchor:savedScrollState&&savedScrollState.anchor||null} : null;
-    closeSessionTagPopover();
+    closeSessionTagPopover(); closeMemoryCitationPopover(false);
     cur=s; activateChatGroupForSession(s); goalArmed=false; editingScheduleId='';
     var restoredPane=restoreTranscriptPane(s);
     clearGen(); turnActive=false; msgOrdinal=0; toolOrdinal=0; setInputEnabled(true); updateSendLabel();
@@ -16660,6 +17269,8 @@ window.__CHANGELOG__ = ${changelogJson};
     refreshForkButton();
     syncGoalFromServer(s);
     closeComposerRail(); populateRunConfigControls(); refreshRunConfigButton();
+    // A hub left open on Notes writes to whichever session is open; say which.
+    syncTodoHubAddRow();
     stick=restoredPane?(s.generating?true:!!restoredPane.stick):!restoreReadingPosition; assistantEl=null; toolEls={}; endCatchup(); restoreQueueState(s);
     if(restoredPane&&stick){ var restoredHost=byId('msgs'); if(restoredHost) restoredHost.scrollTop=restoredHost.scrollHeight; }
     if(restoredPane){
@@ -16961,7 +17572,12 @@ window.__CHANGELOG__ = ${changelogJson};
     var openId=String(commentDrawerState.threadId||''),openThread=openId&&commentThreads[openId];
     if(openThread&&openThread.providerSessionId&&nextKnown[openId]){
       var loaded=String(commentHistoryLoadedVersions[openId]||''),expected=String(nextVersions[openId]||'');
-      if(epochChanged||!expected||loaded!==expected) syncOpenCommentHistory(openThread,false);
+      if(epochChanged||!expected||loaded!==expected){
+        syncOpenCommentHistory(openThread,false);
+        // The queue feeds historyVersion, so a bumped version is also how this
+        // tab learns another tab (or a schedule) changed the queue.
+        refreshCommentQueue(openThread);
+      }
     }
   }
   function openLiveStateStream(){
@@ -17146,6 +17762,7 @@ window.__CHANGELOG__ = ${changelogJson};
       s.generatingStartedAt=s.generatingStartedAt||emittedAt;
       reviveAttention(s);
     } else if(ev.kind==='assistant_text') cacheTranscriptAssistantText(s, ev.text);
+    else if(ev.kind==='assistant_memory_citations') cacheTranscriptAssistantMemoryCitations(s,ev.text,ev.memoryCitations);
     else if(ev.kind==='tool_use') cacheTranscriptToolUse(s, {id:ev.id,name:ev.name,input:ev.input});
     else if(ev.kind==='tool_result') cacheTranscriptToolResult(s, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
     else if(ev.kind==='result' || ev.kind==='error'){
@@ -17179,6 +17796,23 @@ window.__CHANGELOG__ = ${changelogJson};
     var open=commentDrawerState.threadId===thread.id && !(byId('commentDrawer')||{}).hidden;
     if(ev.kind==='user_turn_started' || ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered'){
       thread=rememberCommentThread(Object.assign({},thread,{status:'generating',lastUserMessageAt:emittedAt}))||thread;
+      // A queued turn was never drawn as a bubble (only as a queue row), so the
+      // drain/steer event is what materializes it — the same handoff the main
+      // transcript makes in onEvent().
+      if(ev.kind!=='user_turn_started'){
+        if(String(commentDrawerState.threadId||'')===String(thread.id)){
+          // A drained turn means the queue is moving again, so it is no longer
+          // parked by an earlier manual stop.
+          if(ev.kind==='queued_turn_started') commentQueueParked=false;
+          dropCommentQueueItem(ev.queueId);
+        }
+        if(open){
+          finalizeStreamingMessage(commentDrawerState.assistant);
+          commentDrawerState.assistant=null;
+          appendCommentMessage('user',String(ev.text||''));
+          cacheOpenCommentMessages();
+        }
+      }
       if(open) setCommentGenerating(true,ev.startedAt||ev.steeredAt);
     } else if(ev.kind==='assistant_text'){
       if(open){
@@ -17190,6 +17824,13 @@ window.__CHANGELOG__ = ${changelogJson};
         appendStreamingBubbleText(bubble,delta);
         keepCommentGeneratingLast();
         cacheOpenCommentMessages();
+      }
+    } else if(ev.kind==='assistant_memory_citations'){
+      if(open){
+        var citedComment=commentDrawerState.assistant||latestAssistantMessage(byId('commentMsgs'));
+        applyAssistantMemoryCitations(citedComment,ev.text,ev.memoryCitations);
+        if(citedComment) commentDrawerState.assistant=citedComment;
+        cacheOpenCommentMessages(); keepCommentGeneratingLast();
       }
     } else if(ev.kind==='tool_use'){
       if(open){
@@ -17222,6 +17863,8 @@ window.__CHANGELOG__ = ${changelogJson};
         if(ev.kind==='error') appendCommentProviderError(ev);
         setCommentBusy(false); setCommentGenerating(status==='generating');
         if(status==='read') markCommentRead(thread);
+        // Queue advancement is server-owned; reconcile what it actually did.
+        refreshCommentQueue(thread);
       }
       commentDrawerState.assistant=null;
     }
@@ -17268,7 +17911,14 @@ window.__CHANGELOG__ = ${changelogJson};
         addMsg('user', userShown, true, userTurn.attachments);
       }
       assistantEl=null;
-      if(!turnActive) beginTurn(emittedAt);
+      // A very early Stop can finish its HTTP round-trip before the live bus
+      // delivers this same local turn's start event. Starting a "new" turn here
+      // would clear lastGenerationStoppedByUser, so editing the unanswered
+      // message would incorrectly offer Fork instead of Send. A genuinely new
+      // local send already calls beginTurn() optimistically; external starts do
+      // not match a local receipt and continue through this branch normally.
+      var delayedStoppedLocalStart=!!(localUserEvent && cur.lastGenerationStoppedByUser && !turnActive);
+      if(!turnActive && !delayedStoppedLocalStart) beginTurn(emittedAt);
     }
     else if(ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered'){
       var queueIndex=pendingQueue.findIndex(function(item){ return item.id===ev.queueId; });
@@ -17291,6 +17941,13 @@ window.__CHANGELOG__ = ${changelogJson};
       if(!assistantEl) assistantEl=addMsg('assistant','');
       var b=assistantEl.querySelector('.bubble');
       appendStreamingBubbleText(b,ev.text);
+    }
+    else if(ev.kind==='assistant_memory_citations'){
+      cacheTranscriptAssistantMemoryCitations(cur,ev.text,ev.memoryCitations);
+      var citedAssistant=assistantEl||latestAssistantMessage(byId('msgs'));
+      applyAssistantMemoryCitations(citedAssistant,ev.text,ev.memoryCitations);
+      if(citedAssistant) assistantEl=citedAssistant;
+      keepGenLast(); scroll(); scheduleLatestPin();
     }
     else if(ev.kind==='tool_use'){
       finalizeStreamingMessage(assistantEl);
@@ -17452,7 +18109,6 @@ window.__CHANGELOG__ = ${changelogJson};
     touchSession(target); // sending is an interaction → float this session to the top
     var uiId=target.sessionId, id=providerSessionId(target), cwd=target.cwd||'', vendor=target.vendor||'claude';
     if(!id){ target._awaitingLiveStart=false; target._awaitingLiveStartAt=null; endTurn('failed'); return; }
-    rememberModelConfiguration(vendor, target.model||'', target.effort||'', target.speed||'');
     // shownText contains the UI-only attachment summary. Sending it as the real
     // prompt makes the server echo that summary together with attachments, then
     // shownTurnText() appends it again and defeats optimistic-event de-duplication.
@@ -17463,6 +18119,10 @@ window.__CHANGELOG__ = ${changelogJson};
       body.model=target.model||undefined;
       body.effort=target.effort||undefined;
       body.speed=target.speed||undefined;
+      // "Last used" means last *chosen*. Remembering the config of every session
+      // the user merely replied in would make the next new session inherit a
+      // tier nobody picked — and used to leak into other tabs' rail as well.
+      rememberModelConfiguration(vendor, target.model||'', target.effort||'', target.speed||'');
     }
     function failSend(rawError){
       if(sessionRunWasAcknowledged(target,runEpoch)) return;
@@ -17494,7 +18154,9 @@ window.__CHANGELOG__ = ${changelogJson};
     sendRequest.then(function(res){ if(res.ok){
       if(res.view) patchSessionView(res.view,{source:'send'});
       if(goalRequested && res.goal) applyGoalState(target,res.goal);
-      target.runConfigDirty=false;
+      // Applied, so no longer staged. applyRunConfig already mirrored the choice
+      // onto the session fields, and the next scan restates them authoritatively.
+      clearStagedRunConfig(target);
       if(cur===target) refreshRunConfigButton();
     } else failSend(res); })
       .catch(function(e){ failSend({message:'Network error: '+(e&&e.message?e.message:e),retryable:true}); });
@@ -18178,10 +18840,13 @@ window.__CHANGELOG__ = ${changelogJson};
   byId('todoHubToggle').onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); toggleTodoHub(); };
   byId('todoHubClose').onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); closeTodoHub(); };
   byId('todoHubAddButton').onclick=addTodoHubItem;
-  byId('todoHubAddInput').addEventListener('input',syncTodoHubAddButton);
+  byId('todoHubAddInput').addEventListener('input',syncTodoHubAddRow);
   byId('todoHubAddInput').addEventListener('keydown',function(ev){
     if(ev.key==='Enter'&&!isImeConfirming(ev)){ ev.preventDefault(); addTodoHubItem(); }
     else if(ev.key==='Escape'){ ev.preventDefault(); closeTodoHub(); }
+  });
+  byId('todoHubTabs').querySelectorAll('.todohub-tab').forEach(function(tab){
+    tab.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); selectTodoHubKind(tab.getAttribute('data-hub-kind')); };
   });
   byId('newTagAdd').onclick=function(ev){
     ev.preventDefault(); ev.stopPropagation(); newTagPickerOpen=!newTagPickerOpen; newTagPickerActive=-1; renderNewTagPicker();
@@ -18737,6 +19402,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   document.addEventListener('keydown',function(e){
     if(e.defaultPrevented||isTextEditingTarget(e.target)) return;
+    if(e.key==='Escape' && memoryCitationPopoverState){ closeMemoryCitationPopover(); return; }
     if(e.key==='Escape' && headerTagSessionMenu){ closeHeaderTagSessionMenu(); return; }
     if(e.key==='Escape' && !byId('tagAction').hidden){ closeGlobalTagAction(); return; }
     if(e.key==='Escape' && !byId('forkTree').hidden){ closeForkTree(); return; }
@@ -18773,6 +19439,13 @@ window.__CHANGELOG__ = ${changelogJson};
     closeSchedulePopover();
   });
   window.addEventListener('resize',function(){ if(schedulePopoverState) positionSchedulePopover(schedulePopoverState.button); });
+  document.addEventListener('pointerdown',function(ev){
+    var pop=byId('memoryCitationPopover'),button=memoryCitationPopoverState&&memoryCitationPopoverState.button;
+    if(!memoryCitationPopoverState||!pop||pop.contains(ev.target)||(button&&button.contains(ev.target))) return;
+    closeMemoryCitationPopover(false);
+  });
+  window.addEventListener('resize',function(){ if(memoryCitationPopoverState) positionMemoryCitationPopover(); });
+  window.addEventListener('scroll',function(){ if(memoryCitationPopoverState) positionMemoryCitationPopover(); },true);
   // The shared session-tag picker is portalled to the page root, so it never
   // changes a sidebar row, middle-panel card, or chat-header height.
   document.addEventListener('pointerdown',function(ev){

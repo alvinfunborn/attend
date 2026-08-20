@@ -41,10 +41,26 @@ function textOf(message: CursorEvent["message"]): string {
   const content = message?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .filter((block) => block?.type === "text" && typeof block.text === "string")
-    .map((block) => block.text ?? "")
-    .join("");
+  return joinCursorTextBlocks(
+    content
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text ?? ""),
+  );
+}
+
+/** Cursor can split one assistant sentence across multiple text content blocks.
+ * Some CLI versions omit the separating space at a block boundary even though
+ * the native transcript represents distinct prose blocks. Preserve explicit
+ * whitespace and repair only unambiguous ASCII word-to-word boundaries; CJK
+ * text and token-like punctuation remain byte-for-byte unchanged. */
+export function joinCursorTextBlocks(blocks: string[]): string {
+  let out = "";
+  for (const block of blocks) {
+    if (!block) continue;
+    const separator = /[A-Za-z0-9]$/.test(out) && /^[A-Za-z0-9]/.test(block) ? " " : "";
+    out += separator + block;
+  }
+  return out;
 }
 
 function toolOf(ev: CursorEvent): { name: string; args?: unknown; result?: unknown } {

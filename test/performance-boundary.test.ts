@@ -14,6 +14,7 @@ describe("server main-thread performance boundary", () => {
     expect(source).not.toMatch(/\bspawnSync\b/);
     expect(source).not.toMatch(/\b(?:existsSync|realpathSync|readdirSync|statSync)\b/);
     expect(source).not.toMatch(/\.backfillPrompts\(/);
+    expect(source).not.toMatch(/WorkPromptIndex/);
     expect(source).not.toMatch(/readSessionTranscript/);
     expect(source).toContain("await providerForkPrompt(transcriptHistory");
     expect(source).toContain("await resolvePinReferenceContext");
@@ -22,7 +23,6 @@ describe("server main-thread performance boundary", () => {
     expect(source).toContain("new WorkerAnalyzerContext()");
     expect(source).toContain("new WorkerSessionSearch(");
     expect(source).toContain("new WorkerAlignmentModel(");
-    expect(source).toContain("new WorkerWorkPromptIndex(");
     expect(source).toContain("analyzerContext,");
     expect(source).toContain("inspectCursorModelsAsync");
     expect(source).toContain("inspectCodexModelsAsync");

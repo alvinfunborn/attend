@@ -53,7 +53,8 @@ Attend keeps those signals next to the actual conversations, so organizing work 
   message scheduled on the resulting session; there is no separate scheduling inbox.
 - Edit a session title, state, priority, and estimated re-entry time.
 - Manage machine-wide shortcuts and session notes or todos beside the composer; arm supported Goals
-  and accept analyzer-drafted messages.
+  and accept analyzer-drafted messages. The sidebar's list button browses the same three collections
+  across every session — it opens on todos and remembers whichever list you left it on.
 - Comment on a response or a selected passage, including while it is generating; continue in an
   isolated side session, queue replies, or promote the discussion with its parent configuration and
   context. Stop, edit, and resend the latest comment message when needed.

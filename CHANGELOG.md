@@ -2,6 +2,33 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.1 — 2026-08-20
+
+### Added
+
+- Structured Codex memory citations are separated from assistant text and shown in a dedicated
+  source popover without exposing the raw protocol trailer in conversations or work statistics.
+- The sidebar list hub now browses shortcuts, notes, and todos across sessions, remembers its last
+  collection, and supports the same editing and ordering controls as the composer rail.
+- Per-session model, reasoning, and speed selections can be staged directly in the composer rail
+  and remain stable while provider catalogs and session projections refresh.
+
+### Changed
+
+- Work statistics now use Attend-owned live activity instead of rebuilding prompt attribution from
+  external transcript history, removing the dedicated work-prompt index worker.
+- Cursor history recovery prefers the more complete Attend capture when a native transcript is
+  replaced by an incomplete continuation, while preserving spacing across streamed text blocks.
+
+### Fixed
+
+- Codex steering and interruption recover stale provider turn ids from authoritative thread state,
+  and a quiet turn can resume when the provider emits new model activity after a background task.
+- Comments typed during an active response queue reliably, stopped turns remain resendable through
+  delayed lifecycle events, and growing fork transcripts are resolved from one consistent read.
+- Streaming session refreshes preserve focused rail inputs, staged run configuration, middle-panel
+  cards, and todo controls instead of replacing the live DOM with stale projections.
+
 ## 1.3.0 — 2026-08-06
 
 ### Added

@@ -169,6 +169,202 @@ describe("ChatEngine", () => {
     ]);
   });
 
+  it("revives the turn when the model resumes on its own after a settled background task", async () => {
+    // Real sequence from a live session (2026-08-10): the subagent settles and the
+    // clearing background_tasks_changed arrives BEFORE the turn's result, so that result
+    // passes through and the turn ends. The CLI then injects the task notification and
+    // the model resumes with no user input — spawning its next subagent and producing the
+    // real conclusion. Before the fix, every event of that self-driven turn (including
+    // its final result) was dropped by the turnActive gate: the UI stayed "generated",
+    // the daemon never re-analyzed, and a working session looked idle for ~50 minutes.
+    let releaseWake: () => void = () => {};
+    const wake = new Promise<void>((resolve) => {
+      releaseWake = resolve;
+    });
+    let releaseThinking: () => void = () => {};
+    const thinkingSeen = new Promise<void>((resolve) => {
+      releaseThinking = resolve;
+    });
+    const query = ((_args: unknown) =>
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-revive" };
+        yield {
+          type: "assistant",
+          session_id: "sess-revive",
+          message: { content: [{ type: "text", text: "spawned the investigator" }] },
+        };
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-revive",
+          tasks: [{ task_id: "t1", task_type: "subagent", description: "investigate" }],
+        };
+        // Settling: the level clears first, so the result below is NOT deferred.
+        yield {
+          type: "system",
+          subtype: "background_tasks_changed",
+          session_id: "sess-revive",
+          tasks: [],
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "waiting on the agent",
+          terminal_reason: "completed",
+          session_id: "sess-revive",
+        };
+        await wake; // the test observes the idle gap before the self-resume
+        // CLI injects the task notification; the model wakes thinking-only first —
+        // no visible block yet, but proof the turn is live again.
+        yield {
+          type: "assistant",
+          session_id: "sess-revive",
+          message: { content: [{ type: "thinking", thinking: "agent came back" }] },
+        };
+        releaseThinking();
+        yield {
+          type: "assistant",
+          session_id: "sess-revive",
+          message: { content: [{ type: "text", text: "conclusion from the agent" }] },
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "done",
+          terminal_reason: "completed",
+          session_id: "sess-revive",
+        };
+      })()) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const turnEnds: string[] = [];
+    engine.onTurnEnd((id) => turnEnds.push(id));
+    const received: UiEvent[] = [];
+    engine.onEvent((_id, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "investigate" });
+    await vi.waitFor(() => expect(turnEnds).toEqual(["sess-revive"]), {
+      timeout: 1_000,
+      interval: 5,
+    });
+    expect(engine.activeSessions()).toEqual([]); // genuinely idle between turns
+
+    releaseWake();
+    await thinkingSeen;
+    // The thinking-only wake already revived the turn — before any visible block.
+    await vi.waitFor(() => expect(engine.activeSessions()).toEqual(["sess-revive"]), {
+      timeout: 1_000,
+      interval: 5,
+    });
+    await vi.waitFor(() => expect(turnEnds).toEqual(["sess-revive", "sess-revive"]), {
+      timeout: 1_000,
+      interval: 5,
+    });
+    // The self-driven turn is fully visible: its output, its terminal result, and the
+    // sync that tells an open panel to flip back to generating.
+    expect(received).toContainEqual({ kind: "assistant_text", text: "conclusion from the agent" });
+    expect(received.filter((event) => event.kind === "result")).toEqual([
+      { kind: "result", ok: true, text: "waiting on the agent" },
+      { kind: "result", ok: true, text: "done" },
+    ]);
+    expect(received).toContainEqual({
+      kind: "sync",
+      turnActive: true,
+      startedAt: expect.any(Number),
+    });
+  });
+
+  it("does not revive the turn for a trailing result after the turn already ended", async () => {
+    // An interrupt emits a manual terminal result; the SDK's own result for that turn
+    // can still trail in afterwards. A bare result is not proof of a self-resumed turn,
+    // so it must stay dropped — reviving here would fabricate a ghost turn end.
+    let releaseTail: () => void = () => {};
+    const tail = new Promise<void>((resolve) => {
+      releaseTail = resolve;
+    });
+    const query = ((_args: unknown) =>
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-tail" };
+        yield {
+          type: "assistant",
+          session_id: "sess-tail",
+          message: { content: [{ type: "text", text: "answer" }] },
+        };
+        yield { type: "result", subtype: "success", result: "ok", session_id: "sess-tail" };
+        await tail;
+        yield {
+          type: "result",
+          subtype: "error_during_execution",
+          session_id: "sess-tail",
+          errors: [],
+        };
+      })()) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const turnEnds: string[] = [];
+    engine.onTurnEnd((id) => turnEnds.push(id));
+    const received: UiEvent[] = [];
+    engine.onEvent((_id, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "hello" });
+    await vi.waitFor(() => expect(turnEnds).toEqual(["sess-tail"]), {
+      timeout: 1_000,
+      interval: 5,
+    });
+    releaseTail();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(turnEnds).toEqual(["sess-tail"]);
+    expect(engine.activeSessions()).toEqual([]);
+    expect(received.filter((event) => event.kind === "result")).toEqual([
+      { kind: "result", ok: true, text: "ok" },
+    ]);
+  });
+
+  it("does not revive the turn while an AskUserQuestion is pending", async () => {
+    // A parked question is the user's move. A background task settling in that window
+    // wakes the model, but surfacing that as a live turn would yank the question UI.
+    const query = ((_args: unknown) =>
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-parked" };
+        yield {
+          type: "assistant",
+          session_id: "sess-parked",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "q1",
+                name: "AskUserQuestion",
+                input: { question: "pick one" },
+              },
+            ],
+          },
+        };
+        // Model output while the question is still unanswered.
+        yield {
+          type: "assistant",
+          session_id: "sess-parked",
+          message: { content: [{ type: "text", text: "premature" }] },
+        };
+        await new Promise(() => {}); // question stays pending
+      })()) as unknown as QueryFn;
+
+    const engine = new ChatEngine(query);
+    const received: UiEvent[] = [];
+    engine.onEvent((_id, event) => received.push(event));
+
+    await engine.start({ cwd: ".", firstText: "hello" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(engine.activeSessions()).toEqual([]); // parked, not generating
+    expect(received.some((event) => event.kind === "assistant_text")).toBe(false);
+    expect(received.some((event) => event.kind === "sync" && event.turnActive === true)).toBe(
+      false,
+    );
+    engine.shutdown();
+  });
+
   it("starts a run, resolves the session id, and does not replay finished-turn buffer to late subscribers", async () => {
     const engine = new ChatEngine(fakeQuery);
     const id = await engine.start({ cwd: ".", firstText: "hello" });

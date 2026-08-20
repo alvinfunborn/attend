@@ -8,7 +8,6 @@ export default defineConfig({
     "analyzer-context-worker": "src/chat/analyzer/context-worker.ts",
     "search-worker": "src/chat/search-worker.ts",
     "alignment-model-worker": "src/core/alignment-model-worker.ts",
-    "work-prompt-index-worker": "src/core/work-prompt-index-worker.ts",
   },
   format: ["esm"],
   target: "node22",

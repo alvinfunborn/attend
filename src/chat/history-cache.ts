@@ -96,6 +96,7 @@ function withHistoryMetadata(messages: TranscriptMsg[]): TranscriptMsg[] {
       message.role,
       message.ts ?? null,
       message.text,
+      message.memoryCitations ?? null,
       message.text ? null : (message.tools ?? []).map((tool) => [tool.id, tool.name, tool.input]),
     ]);
     const messageDuplicate = duplicateMessages.get(messageBase) ?? 0;
@@ -131,6 +132,10 @@ function snapshotCost(messages: TranscriptMsg[]): number {
   let chars = 0;
   for (const message of messages) {
     chars += message.text.length;
+    for (const citation of message.memoryCitations?.entries ?? []) {
+      chars += citation.path.length + citation.note.length + 32;
+    }
+    for (const rolloutId of message.memoryCitations?.rolloutIds ?? []) chars += rolloutId.length;
     for (const tool of message.tools ?? []) {
       try {
         chars += JSON.stringify(tool).length;

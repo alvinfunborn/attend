@@ -1,5 +1,6 @@
 import type { ProviderSessionRunConfig } from "../core/session-run-config.js";
 import type { ChatAttachment, ChatReference, SessionGoal } from "./driver.js";
+import type { MemoryCitationBundle } from "./memory-citations.js";
 import type { PublicProviderError } from "./provider-errors.js";
 
 /** Normalized transport events rendered by Attend, independent of provider SDKs. */
@@ -25,6 +26,11 @@ export type UiEvent =
       steeredAt?: number;
     }
   | { kind: "assistant_text"; text: string }
+  | {
+      kind: "assistant_memory_citations";
+      text: string;
+      memoryCitations: MemoryCitationBundle;
+    }
   | { kind: "tool_use"; id: string | null; name: string; input: unknown }
   | { kind: "tool_result"; id: string | null; text: string; isError: boolean }
   | { kind: "result"; ok: boolean; text?: string }

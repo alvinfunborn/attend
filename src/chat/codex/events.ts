@@ -1,4 +1,5 @@
 import type { UiEvent } from "../events.js";
+import { extractMemoryCitationTrailer } from "../memory-citations.js";
 
 /**
  * The `codex exec --json` event stream (codex-cli 0.133). One JSON object per
@@ -60,6 +61,18 @@ function errText(error: CodexEvent["error"]): string | null {
   return msg.trim() || null;
 }
 
+function appendAssistantText(out: UiEvent[], raw: string): void {
+  const parsed = extractMemoryCitationTrailer(raw.trim());
+  if (parsed.text) out.push({ kind: "assistant_text", text: parsed.text });
+  if (parsed.memoryCitations) {
+    out.push({
+      kind: "assistant_memory_citations",
+      text: parsed.text,
+      memoryCitations: parsed.memoryCitations,
+    });
+  }
+}
+
 function textOf(content: unknown, kind: string): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -103,7 +116,7 @@ export function toUiEventsFromCodex(ev: CodexEvent): UiEvent[] {
       if (!p) break;
       if (p.type === "message" && p.role === "assistant") {
         const text = textOf(p.content, "output_text").trim();
-        if (text) out.push({ kind: "assistant_text", text });
+        if (text) appendAssistantText(out, text);
       } else if (
         p.type === "function_call" ||
         p.type === "custom_tool_call" ||
@@ -152,7 +165,7 @@ export function toUiEventsFromCodex(ev: CodexEvent): UiEvent[] {
       const done = ev.type === "item.completed";
       if (it.type === "agent_message") {
         // text is only final on completion; the started variant carries none.
-        if (done && it.text) out.push({ kind: "assistant_text", text: it.text });
+        if (done && it.text) appendAssistantText(out, it.text);
       } else if (it.type === "command_execution") {
         if (done) {
           out.push({

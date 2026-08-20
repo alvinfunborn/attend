@@ -51,6 +51,36 @@ describe("toUiEventsFromCodex", () => {
     expect(done).toEqual([{ kind: "assistant_text", text: "pong" }]);
   });
 
+  it("emits memory provenance separately from completed assistant text", () => {
+    const text = `Remembered answer.\n\n<oai-mem-citation>
+<citation_entries>
+MEMORY.md:4-8|note=[Used a prior decision]
+</citation_entries>
+<rollout_ids>
+</rollout_ids>
+</oai-mem-citation>`;
+    expect(
+      toUiEventsFromCodex({ type: "item.completed", item: { type: "agent_message", text } }),
+    ).toEqual([
+      { kind: "assistant_text", text: "Remembered answer." },
+      {
+        kind: "assistant_memory_citations",
+        text: "Remembered answer.",
+        memoryCitations: {
+          entries: [
+            {
+              path: "MEMORY.md",
+              lineStart: 4,
+              lineEnd: 8,
+              note: "Used a prior decision",
+            },
+          ],
+          rolloutIds: [],
+        },
+      },
+    ]);
+  });
+
   it("maps a command_execution to tool_use (start) then tool_result (complete)", () => {
     const start = toUiEventsFromCodex({
       type: "item.started",

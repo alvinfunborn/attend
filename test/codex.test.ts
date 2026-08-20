@@ -101,6 +101,27 @@ describe("parseCodexTranscript (RolloutLine schema)", () => {
     expect(s.chars).toBe(2);
   });
 
+  it("excludes memory citation trailers from assistant activity character counts", () => {
+    const text = `visible\n\n<oai-mem-citation>
+<citation_entries>
+MEMORY.md:1-2|note=[Used prior context]
+</citation_entries>
+<rollout_ids>
+</rollout_ids>
+</oai-mem-citation>`;
+    const raw = jsonl({
+      timestamp: "2026-05-01T10:00:00Z",
+      type: "response_item",
+      payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] },
+    });
+
+    const session = parseCodexTranscript("r.jsonl", raw);
+    expect(session.chars).toBe("visible".length);
+    expect(session.assistantTextActivity).toEqual([
+      { at: Date.parse("2026-05-01T10:00:00Z"), chars: "visible".length },
+    ]);
+  });
+
   it("skips synthetic <…>-wrapped user turns so title/lastPrompt are the real prompts", () => {
     const raw = jsonl(
       {

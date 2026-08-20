@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { extractMemoryCitationTrailer } from "../memory-citations.js";
 import { type ToolCall, type TranscriptMsg, visiblePromptText } from "../transcript.js";
 
 /**
@@ -91,8 +92,21 @@ function applyItem(
     const text = visibleUserText(p.content);
     if (text) msgs.push(withTs({ role: "user", text, tools: [] }, ts));
   } else if (p.type === "message" && p.role === "assistant") {
-    const text = textOf(p.content, "output_text").trim();
-    if (text) msgs.push(withTs({ role: "assistant", text, tools: [] }, ts));
+    const parsed = extractMemoryCitationTrailer(textOf(p.content, "output_text").trim());
+    const text = parsed.text.trim();
+    if (text || parsed.memoryCitations) {
+      msgs.push(
+        withTs(
+          {
+            role: "assistant",
+            text,
+            tools: [],
+            ...(parsed.memoryCitations ? { memoryCitations: parsed.memoryCitations } : {}),
+          },
+          ts,
+        ),
+      );
+    }
   } else if (
     p.type === "function_call" ||
     p.type === "custom_tool_call" ||

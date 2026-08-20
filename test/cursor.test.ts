@@ -7,7 +7,7 @@ import {
   cursorToProcessEvent,
   descendantPidsFromPs,
 } from "../src/chat/cursor/exec.js";
-import { parseCursorTranscript } from "../src/chat/cursor/transcript.js";
+import { joinCursorTextBlocks, parseCursorTranscript } from "../src/chat/cursor/transcript.js";
 import { CursorSource, parseCursorSession } from "../src/core/vendor/cursor.js";
 
 const line = (event: object, timestamp: number) =>
@@ -120,6 +120,27 @@ describe("Cursor CLI adapter", () => {
     });
     expect(parseCursorTranscript(raw)).toEqual([
       { role: "user", text: "Actual prompt", tools: [] },
+    ]);
+  });
+
+  it("preserves English word spacing across Cursor text blocks", () => {
+    expect(joinCursorTextBlocks(["Thank you for using", "the app."])).toBe(
+      "Thank you for using the app.",
+    );
+    expect(joinCursorTextBlocks(["already ", "spaced"])).toBe("already spaced");
+    expect(joinCursorTextBlocks(["中文", "回复"])).toBe("中文回复");
+
+    const raw = JSON.stringify({
+      role: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Please contact" },
+          { type: "text", text: "support for help." },
+        ],
+      },
+    });
+    expect(parseCursorTranscript(raw)).toMatchObject([
+      { role: "assistant", text: "Please contact support for help." },
     ]);
   });
 
@@ -249,6 +270,42 @@ describe("Cursor CLI adapter", () => {
         sessionId: id,
         title: "native",
         runConfig: { model: "Composer 2.5", source: "provider-observed" },
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the complete Attend capture when Cursor replaces native history", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-cursor-native-error-"));
+    const workspace = path.join(root, "workspace");
+    const projects = path.join(root, "projects");
+    const captured = path.join(root, "captured");
+    const id = "cursor-history-id";
+    const encoded = workspace.slice(path.parse(workspace).root.length).split(path.sep).join("-");
+    const transcriptDir = path.join(projects, encoded, "agent-transcripts", id);
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    fs.mkdirSync(captured, { recursive: true });
+    fs.writeFileSync(
+      path.join(transcriptDir, `${id}.jsonl`),
+      JSON.stringify({ type: "turn_ended", status: "error", error: "usage limit" }),
+    );
+    fs.writeFileSync(
+      path.join(captured, `${id}.jsonl`),
+      [
+        line({ type: "system", subtype: "init", session_id: id, model: "Auto" }, 1),
+        line({ type: "user", message: { content: "Keep this history" } }, 2),
+        line({ type: "assistant", message: { content: "Still visible" } }, 3),
+      ].join("\n"),
+    );
+    try {
+      expect(new CursorSource(projects, captured).scan()[0]).toMatchObject({
+        sessionId: id,
+        path: path.join(captured, `${id}.jsonl`),
+        cwd: "/work/repo",
+        title: "Keep this history",
+        prompts: 1,
       });
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

@@ -5,7 +5,6 @@ import { DatabaseSync } from "node:sqlite";
 import type { AnalysisState } from "./daemon/cache.js";
 import { WORK_EVENT_MAX_ROWS, WORK_EVENT_RETENTION_MS } from "./retention-policy.js";
 import { configureStateDatabase } from "./state-database.js";
-import type { RawSession } from "./types.js";
 
 const ASSISTANT_OUTPUT_BUCKET_MS = 5 * 60_000;
 const DEFAULT_BUSY_TIMEOUT_MS = 10_000;
@@ -102,10 +101,6 @@ function normalizeFile(value: unknown): WorkEventFile {
   return { version: 1, events };
 }
 
-function promptId(sessionId: string, at: number): string {
-  return `prompt:${sessionId}:${Math.floor(at)}`;
-}
-
 function assistantOutputBucket(at: number): number {
   return Math.floor(at / ASSISTANT_OUTPUT_BUCKET_MS) * ASSISTANT_OUTPUT_BUCKET_MS;
 }
@@ -190,12 +185,16 @@ export class WorkEventStore {
     this.db.close();
   }
 
-  list(since?: number): WorkEvent[] {
-    const rows = (since === undefined
-      ? this.db.prepare("SELECT * FROM work_events ORDER BY at, id").all()
-      : this.db
-          .prepare("SELECT * FROM work_events WHERE at >= ? ORDER BY at, id")
-          .all(since)) as unknown as EventRow[];
+  list(since?: number, source?: WorkEvent["source"]): WorkEvent[] {
+    const rows = (source === undefined
+      ? since === undefined
+        ? this.db.prepare("SELECT * FROM work_events ORDER BY at, id").all()
+        : this.db.prepare("SELECT * FROM work_events WHERE at >= ? ORDER BY at, id").all(since)
+      : since === undefined
+        ? this.db.prepare("SELECT * FROM work_events WHERE source = ? ORDER BY at, id").all(source)
+        : this.db
+            .prepare("SELECT * FROM work_events WHERE source = ? AND at >= ? ORDER BY at, id")
+            .all(source, since)) as unknown as EventRow[];
     return rows.map(rowEvent);
   }
 
@@ -206,42 +205,6 @@ export class WorkEventStore {
     const at = validAt(event.at) ?? Date.now();
     const dedupeWithinMs = Math.max(0, opts.dedupeWithinMs ?? 0);
     return this.transaction(() => {
-      if (event.kind === "user_prompt" && event.source === "live") {
-        const chars = Math.max(0, Math.floor(event.chars ?? 0));
-        const transcript = this.db
-          .prepare(
-            `SELECT * FROM work_events
-             WHERE source = 'transcript' AND kind = 'user_prompt' AND session_id = ?
-               AND at BETWEEN ? AND ?
-             ORDER BY at DESC LIMIT 1`,
-          )
-          .get(event.sessionId, at - 5_000, at + 5_000) as unknown as EventRow | undefined;
-        // Transcript indexing and live event delivery race in either order.
-        // Promote the materialized row to the more precise live timestamp /
-        // visible-user character count rather than counting one turn twice.
-        if (transcript) {
-          const merged = this.db
-            .prepare(
-              `UPDATE work_events
-               SET at = ?,
-                   vendor = COALESCE(?, vendor),
-                   queue_id = COALESCE(?, queue_id),
-                   chars = CASE WHEN ? > 0 THEN ? ELSE chars END,
-                   source = 'live'
-               WHERE id = ?
-               RETURNING *`,
-            )
-            .get(
-              at,
-              event.vendor ?? null,
-              event.queueId ?? null,
-              chars,
-              chars,
-              transcript.id,
-            ) as unknown as EventRow;
-          return rowEvent(merged);
-        }
-      }
       if (dedupeWithinMs > 0) {
         const duplicate = this.db
           .prepare(
@@ -281,79 +244,6 @@ export class WorkEventStore {
       this.prune(Date.now());
       return rowEvent(row);
     });
-  }
-
-  backfillPrompts(sessions: RawSession[], opts: { lockTimeoutMs?: number } = {}): number {
-    return this.transaction(() => {
-      let added = 0;
-      const nearbyLivePrompt = this.db.prepare(
-        `SELECT id, chars FROM work_events
-         WHERE source = 'live' AND kind = 'user_prompt' AND session_id = ?
-           AND at BETWEEN ? AND ?
-         ORDER BY at DESC LIMIT 1`,
-      );
-      const enrichLivePrompt = this.db.prepare(
-        "UPDATE work_events SET chars = ? WHERE id = ? AND COALESCE(chars, 0) = 0",
-      );
-      const insertPrompt = this.db.prepare(
-        `INSERT OR IGNORE INTO work_events
-           (id, kind, at, session_id, vendor, chars, source)
-         VALUES (?, 'user_prompt', ?, ?, ?, ?, 'transcript')`,
-      );
-      const hasLiveOutput = this.db.prepare("SELECT 1 FROM work_events WHERE id = ?");
-      const upsertTranscriptOutput = this.db.prepare(
-        `INSERT INTO work_events (id, kind, at, session_id, vendor, chars, source)
-         VALUES (?, 'assistant_output', ?, ?, ?, ?, 'transcript')
-         ON CONFLICT(id) DO UPDATE SET chars = excluded.chars, vendor = excluded.vendor
-         WHERE COALESCE(work_events.chars, 0) != excluded.chars`,
-      );
-
-      for (const session of sessions) {
-        if (!session.sessionId) continue;
-        const promptActivity = session.userPromptActivity?.length
-          ? session.userPromptActivity
-          : (session.userPromptTs ?? []).map((at) => ({ at, chars: 0 }));
-        for (const prompt of promptActivity) {
-          const at = validAt(prompt.at);
-          if (!at) continue;
-          const chars = Math.max(0, Math.floor(prompt.chars));
-          const live = nearbyLivePrompt.get(session.sessionId, at - 5_000, at + 5_000) as
-            | { id: string; chars: number | null }
-            | undefined;
-          if (live) {
-            if (!live.chars && chars > 0) added += changed(enrichLivePrompt.run(chars, live.id));
-            continue;
-          }
-          added += changed(
-            insertPrompt.run(
-              promptId(session.sessionId, at),
-              at,
-              session.sessionId,
-              session.vendor,
-              chars || null,
-            ),
-          );
-        }
-
-        const outputBuckets = new Map<number, number>();
-        for (const output of session.assistantTextActivity ?? []) {
-          const at = validAt(output.at);
-          if (!at || output.chars <= 0) continue;
-          const bucket = assistantOutputBucket(at);
-          outputBuckets.set(bucket, (outputBuckets.get(bucket) ?? 0) + Math.floor(output.chars));
-        }
-        for (const [at, chars] of outputBuckets) {
-          const transcriptId = assistantOutputId(session.sessionId, "transcript", at);
-          const liveId = assistantOutputId(session.sessionId, "live", at);
-          if (hasLiveOutput.get(liveId)) continue;
-          added += changed(
-            upsertTranscriptOutput.run(transcriptId, at, session.sessionId, session.vendor, chars),
-          );
-        }
-      }
-      this.prune(Date.now());
-      return added;
-    }, opts.lockTimeoutMs);
   }
 
   /** Idempotently import a legacy JSON ledger, retaining the source as a backup. */

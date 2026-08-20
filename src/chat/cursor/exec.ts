@@ -6,6 +6,7 @@ import readline from "node:readline";
 import type { CodexEvent } from "../codex/events.js";
 import type { ChatAttachment } from "../driver.js";
 import type { ProcessTurnFn, ProcessTurnHandle, ProcessTurnRequest } from "../process/types.js";
+import { joinCursorTextBlocks } from "./transcript.js";
 
 interface CursorContent {
   type?: string;
@@ -91,10 +92,11 @@ function contentText(message: CursorEvent["message"]): string {
   const content = message?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .filter((block) => block?.type === "text" && typeof block.text === "string")
-    .map((block) => block.text ?? "")
-    .join("");
+  return joinCursorTextBlocks(
+    content
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text ?? ""),
+  );
 }
 
 function toolShape(ev: CursorEvent): { name: string; body: { args?: unknown; result?: unknown } } {

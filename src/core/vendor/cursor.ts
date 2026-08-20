@@ -331,6 +331,21 @@ export class CursorSource implements SessionSource {
       const compatibility = session.sessionId ? capturedById.get(session.sessionId) : undefined;
       if (!compatibility) return session;
       capturedById.delete(session.sessionId as string);
+      // Cursor may replace its native transcript with a single turn_ended error
+      // after a failed resume (for example, when the account hits its usage
+      // limit). In that case the file still exists and used to shadow Attend's
+      // complete compatibility capture, producing a session with no title and
+      // "(no history yet)" after restart. Prefer whichever source contains more
+      // user turns; native remains canonical whenever it is at least as complete.
+      if (compatibility.prompts > session.prompts) {
+        return {
+          ...compatibility,
+          cwd: compatibility.cwd ?? session.cwd,
+          ...(!compatibility.runConfig && session.runConfig
+            ? { runConfig: session.runConfig }
+            : {}),
+        };
+      }
       // Native Cursor transcripts are the canonical conversation, while Attend's
       // compatibility capture contains the otherwise-missing init model.
       return {

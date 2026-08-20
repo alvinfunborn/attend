@@ -277,4 +277,46 @@ describe("readCodexTranscript", () => {
       { role: "user", text: "latest follow-up" },
     ]);
   });
+
+  it("separates a terminal memory citation trailer from visible assistant text", () => {
+    file = path.join(os.tmpdir(), `attend-rollout-${Math.random().toString(36).slice(2)}.jsonl`);
+    const answer = `Verified.\n\n<oai-mem-citation>
+<citation_entries>
+MEMORY.md:10-12|note=[Used prior verification guidance]
+</citation_entries>
+<rollout_ids>
+019fcf92-6aa8-71d2-b503-9dbc27a54228
+</rollout_ids>
+</oai-mem-citation>`;
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: answer }],
+        },
+      }),
+    );
+
+    expect(readCodexTranscript(file)).toEqual([
+      {
+        role: "assistant",
+        text: "Verified.",
+        tools: [],
+        memoryCitations: {
+          entries: [
+            {
+              path: "MEMORY.md",
+              lineStart: 10,
+              lineEnd: 12,
+              note: "Used prior verification guidance",
+            },
+          ],
+          rolloutIds: ["019fcf92-6aa8-71d2-b503-9dbc27a54228"],
+        },
+      },
+    ]);
+  });
 });
