@@ -1730,7 +1730,7 @@ describe("tag routes", () => {
     });
   });
 
-  it("persists session tags under the daemon brief key", async () => {
+  it("persists session tags only under the canonical session id", async () => {
     const uniq = Math.random().toString(36).slice(2);
     const claudeProjects = fs.mkdtempSync(path.join(os.tmpdir(), `attend-test-claude-${uniq}-`));
     const tagFile = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
@@ -1779,17 +1779,17 @@ describe("tag routes", () => {
       sessions: Record<string, string[]>;
     };
     expect(persisted.sessions.s1).toEqual(["work"]);
-    expect(persisted.sessions[`brief:claude:${cwd}:Shared task`]).toEqual(["work"]);
+    expect(persisted.sessions[`brief:claude:${cwd}:Shared task`]).toBeUndefined();
     expect(
       Object.entries(persisted.sessions).some(
         ([key, value]) => key.startsWith(`title:claude:${cwd}:`) && value[0] === "work",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       Object.entries(persisted.sessions).some(
         ([key, value]) => key.startsWith("path:claude:") && value[0] === "work",
       ),
-    ).toBe(true);
+    ).toBe(false);
     fs.rmSync(claudeProjects, { recursive: true, force: true });
     fs.rmSync(cwd, { recursive: true, force: true });
   });
@@ -1883,7 +1883,7 @@ describe("tag routes", () => {
     expect(tagState.sessions[`scope-id:${firstConfig.scopeId}`]).toContain("shared");
     expect(tagState.sessions[`scope-id:${secondConfig.scopeId}`]).toContain("shared");
     expect(tagState.sessions).not.toHaveProperty(`scope-id:${combinedConfig.scopeId}`);
-    expect(tagState.sessions).not.toHaveProperty("second-session");
+    expect(tagState.sessions["second-session"]).toEqual([]);
 
     const uiState = readStateDocument<{
       scopes: Record<string, { hiddenTags?: string[] }>;

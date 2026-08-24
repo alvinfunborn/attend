@@ -4174,7 +4174,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function sessionPanelWidthBounds(){
     var side=document.querySelector('.side');
     var sideWidth=side ? side.getBoundingClientRect().width : 320;
-    return {min:320,max:Math.max(320,Math.min(1200,window.innerWidth-sideWidth-332))};
+    return {min:320,max:Math.max(320,window.innerWidth-sideWidth-332)};
   }
   function applySessionPanelWidth(){
     var panel=byId('sessionPanel'); if(!panel) return;
@@ -4216,7 +4216,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function initSessionPanelLayout(){
     try{
       var savedWidth=parseInt(localStorage.getItem(SESSION_PANEL_WIDTH_KEY)||'',10);
-      if(savedWidth>=320&&savedWidth<=1200) sessionPanelPreferredWidth=savedWidth;
+      if(Number.isFinite(savedWidth)&&savedWidth>=320) sessionPanelPreferredWidth=savedWidth;
       sessionPanelOpen=localStorage.getItem(SESSION_PANEL_OPEN_KEY)==='1';
     }catch(e){}
     setSessionPanelOpen(sessionPanelOpen,false);
@@ -10170,8 +10170,8 @@ window.__CHANGELOG__ = ${changelogJson};
     var foot=document.querySelector('.foot'); if(foot) foot.classList.remove('rail-open');
     renderComposerRail();
   }
-  function openComposerRail(kind){
-    if(composerRailKind===kind){ closeComposerRail(); return; }
+  function openComposerRail(kind,forceOpen){
+    if(composerRailKind===kind){ if(forceOpen) return; closeComposerRail(); return; }
     if((kind==='vendor'||kind==='model'||kind==='effort'||kind==='speed') && !canConfigureRun()) return;
     if(!cur) return;
     // Re-seed on EVERY open, not just the first. These selects are the channel a
@@ -10186,6 +10186,36 @@ window.__CHANGELOG__ = ${changelogJson};
     renderComposerRail();
     renderComposerRailPanel();
     if(kind==='shortcuts'||kind==='notes'||kind==='todo') setTimeout(function(){ var input=byId('railAddInput'); if(input) input.focus(); },0);
+  }
+  function focusComposerRailConfigOption(){
+    var pop=byId('composerRailPop');
+    if(!pop || pop.hidden) return false;
+    var option=pop.querySelector('.rail-option[aria-current="true"]')||pop.querySelector('.rail-option');
+    if(!option) return false;
+    option.focus();
+    return true;
+  }
+  function handleRailConfigOptionKey(ev){
+    var option=ev.target&&ev.target.closest&&ev.target.closest('.rail-option');
+    if(!option) return;
+    if(ev.key==='Escape'){
+      ev.preventDefault(); ev.stopPropagation();
+      closeComposerRail();
+      var input=byId('input'); if(input) input.focus();
+      return;
+    }
+    if(ev.key==='Enter'){
+      ev.preventDefault(); ev.stopPropagation();
+      option.click();
+      var composerInput=byId('input'); if(composerInput) composerInput.focus();
+      return;
+    }
+    if(ev.key!=='ArrowUp'&&ev.key!=='ArrowDown') return;
+    ev.preventDefault(); ev.stopPropagation();
+    var options=Array.prototype.slice.call(option.parentNode.querySelectorAll('.rail-option'));
+    if(!options.length) return;
+    var index=options.indexOf(option),delta=ev.key==='ArrowDown'?1:-1;
+    options[(index+delta+options.length)%options.length].focus();
   }
   // A <select> silently discards an assignment for which it holds no <option>,
   // leaving value === "". The rail menu is built live from the model catalog, so
@@ -10225,6 +10255,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // actually runs with — when that is unknown, nothing is marked rather than
     // promoting a default (or another session's leftover) to look current.
     var display=currentRunSelection(),options=[],selected='';
+    body.addEventListener('keydown',handleRailConfigOptionKey);
     var model=display.model||cliDefault(display.vendor,'model');
     if(kind==='vendor'){
       options=forkVendorChoices().map(function(info){ return {value:info.vendor,label:info.vendor}; });
@@ -13199,7 +13230,27 @@ window.__CHANGELOG__ = ${changelogJson};
     var parked=res.parked===true;
     var steerable=res.steerable===true;
     var key=draftKey(s);
+    // Queue snapshots are authoritative for persisted fields, but not for the
+    // text currently being typed into this tab's inline editor. Live generation
+    // snapshots can trigger a queue reconcile while that input is open; carry
+    // its draft across by stable item id instead of restoring the older server
+    // text. An enqueue response replaces a client-only pending id with item.id.
+    var saved=key&&sessionQueues[key], savedEditingIdx=key&&sessionQueueEditing[key];
+    var editingItems=cur&&cur.sessionId===s.sessionId ? pendingQueue : saved&&saved.items;
+    var editingTurn=savedEditingIdx!=null&&editingItems&&editingItems[savedEditingIdx];
+    var editingId=String(editingTurn&&editingTurn.id||'');
+    if(editingId.indexOf('pending-')===0 && res.item&&res.item.id) editingId=String(res.item.id);
+    var nextEditingIdx=editingId ? items.findIndex(function(item){ return String(item.id||'')===editingId; }) : -1;
+    if(nextEditingIdx>=0 && editingTurn && Object.prototype.hasOwnProperty.call(editingTurn,'_editingText')){
+      items[nextEditingIdx]._editingText=String(editingTurn._editingText||'');
+      items[nextEditingIdx]._editingSelectionStart=editingTurn._editingSelectionStart;
+      items[nextEditingIdx]._editingSelectionEnd=editingTurn._editingSelectionEnd;
+    }
     if(key) sessionQueues[key]={items:items.map(cloneTurn),parked:parked,steerable:steerable};
+    if(key){
+      if(nextEditingIdx>=0) sessionQueueEditing[key]=nextEditingIdx;
+      else delete sessionQueueEditing[key];
+    }
     s.queueCount=items.length;
     s.queueParked=parked;
     syncSessionQueueBadge(s);
@@ -13207,7 +13258,7 @@ window.__CHANGELOG__ = ${changelogJson};
     pendingQueue=items;
     queueParked=parked;
     queueSteerable=steerable;
-    if(editingQueueIdx>=pendingQueue.length) editingQueueIdx=-1;
+    editingQueueIdx=nextEditingIdx;
     renderQueue();
   }
   function refreshServerQueue(s){
@@ -13235,6 +13286,18 @@ window.__CHANGELOG__ = ${changelogJson};
   function queuedForkKey(s,itemId){ return draftKey(s)+'|'+String(itemId||''); }
   function queuedForkBusy(s,itemId){ return !!forkingQueueItems[queuedForkKey(s,itemId)]; }
   function queuedSendBusy(s,itemId){ return !!sendingQueueItems[queuedForkKey(s,itemId)]; }
+  function clearQueuedEditDraft(turn){
+    if(!turn || typeof turn!=='object') return;
+    delete turn._editingText;
+    delete turn._editingSelectionStart;
+    delete turn._editingSelectionEnd;
+  }
+  function captureQueuedEditDraft(turn,input){
+    if(!turn || !input) return;
+    turn._editingText=String(input.value||'');
+    turn._editingSelectionStart=input.selectionStart;
+    turn._editingSelectionEnd=input.selectionEnd;
+  }
   function queuedImmediateActionCopy(s,turn,edited){
     var vendor=String((turn&&turn.vendor)||(s&&s.vendor)||'').toLowerCase();
     var qualifier=edited?'edited queued message':'queued message';
@@ -13262,12 +13325,14 @@ window.__CHANGELOG__ = ${changelogJson};
     if(turn.goal) box.appendChild(el('span','qtag','goal'));
     if(atts.length) box.appendChild(el('span','qtag', atts.length+' file'+(atts.length>1?'s':'')));
     if(refs.length) box.appendChild(el('span','qtag', refs.length+' pin'+(refs.length>1?'s':'')));
-    var input=el('input','qeditta'); input.type='text'; input.value=String(text||'');
+    var input=el('input','qeditta'); input.type='text';
+    input.value=Object.prototype.hasOwnProperty.call(turn,'_editingText') ? String(turn._editingText||'') : String(text||'');
     box.appendChild(input);
-    function closeEditor(){ editingQueueIdx=-1; syncQueueState(); renderQueue(); }
+    function closeEditor(){ clearQueuedEditDraft(turn); editingQueueIdx=-1; syncQueueState(); renderQueue(); }
     function commit(sendNow){
       var next=input.value.trim();
       if(!next){ delQueued(i); return; }
+      clearQueuedEditDraft(turn);
       editingQueueIdx=-1;
       updateQueued(i, next, sendNow);
     }
@@ -13294,7 +13359,17 @@ window.__CHANGELOG__ = ${changelogJson};
       if(ev.key==='Enter'){ ev.preventDefault(); commit(true); }
       else if(ev.key==='Escape'){ ev.preventDefault(); closeEditor(); }
     };
-    setTimeout(function(){ try{ input.focus(); input.setSelectionRange(input.value.length, input.value.length); }catch(e){} }, 0);
+    input.oninput=function(){ captureQueuedEditDraft(turn,input); syncQueueState(); };
+    input.onselect=function(){ captureQueuedEditDraft(turn,input); syncQueueState(); };
+    setTimeout(function(){
+      try{
+        input.focus();
+        var start=Number(turn._editingSelectionStart),end=Number(turn._editingSelectionEnd);
+        if(!Number.isFinite(start)) start=input.value.length;
+        if(!Number.isFinite(end)) end=start;
+        input.setSelectionRange(start,end);
+      }catch(e){}
+    }, 0);
     return box;
   }
   // The send button doubles as Stop while a turn is in flight.
@@ -13360,7 +13435,10 @@ window.__CHANGELOG__ = ${changelogJson};
   // Render the pinned "queued" list (above the composer). Each row: the text plus
   // a Send/Edit/Delete control set — Codex-style.
   function renderQueue(){
-    var q=byId('queue'); if(!q) return; q.innerHTML='';
+    var q=byId('queue'); if(!q) return;
+    var openEditor=q.querySelector('.qeditta'), editingTurn=editingQueueIdx>=0&&pendingQueue[editingQueueIdx];
+    if(openEditor&&editingTurn){ captureQueuedEditDraft(editingTurn,openEditor); syncQueueState(); }
+    q.innerHTML='';
     scheduledItemsForSession(cur).forEach(function(item){ q.appendChild(makeScheduledQueueRow(item)); });
     pendingQueue.forEach(function(turn,i){
       var text=turnText(turn), atts=turnAttachments(turn), refs=turnPinReferences(turn), preview=turnPreview(turn);
@@ -13564,7 +13642,13 @@ window.__CHANGELOG__ = ${changelogJson};
   // Edit a queued draft in place (NOT back in the bottom composer, which may hold
   // an unrelated draft): only the text slot becomes a single-line input, so the
   // row height and action positions stay fixed. Empty → removes; cancel keeps it.
-  function editQueued(i){ if(pendingQueue[i]==null) return; editingQueueIdx=i; syncQueueState(); renderQueue(); }
+  function editQueued(i){
+    var turn=pendingQueue[i]; if(turn==null) return;
+    turn._editingText=turnText(turn);
+    turn._editingSelectionStart=turn._editingText.length;
+    turn._editingSelectionEnd=turn._editingText.length;
+    editingQueueIdx=i; syncQueueState(); renderQueue();
+  }
   function forkQueued(i){
     var item=pendingQueue[i];
     if(!cur || !cur.sessionId || !item || !item.id || String(item.id).indexOf('pending-')===0) return;
@@ -13626,6 +13710,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // the real server item as soon as its id arrives.
     if(String(item.id).indexOf('pending-')===0){
       item.cancelled=true;
+      clearQueuedEditDraft(item);
       pendingQueue.splice(i,1);
       if(editingQueueIdx===i) editingQueueIdx=-1;
       else if(editingQueueIdx>i) editingQueueIdx--;
@@ -13633,6 +13718,7 @@ window.__CHANGELOG__ = ${changelogJson};
       syncQueueState(); syncSessionQueueBadge(target); renderQueue();
       return;
     }
+    clearQueuedEditDraft(item);
     pendingQueue.splice(i,1);
     if(editingQueueIdx===i) editingQueueIdx=-1;
     else if(editingQueueIdx>i) editingQueueIdx--;
@@ -17923,7 +18009,12 @@ window.__CHANGELOG__ = ${changelogJson};
     else if(ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered'){
       var queueIndex=pendingQueue.findIndex(function(item){ return item.id===ev.queueId; });
       var queuedItem=queueIndex>=0?pendingQueue[queueIndex]:null;
-      if(queueIndex>=0) pendingQueue.splice(queueIndex,1);
+      if(queueIndex>=0){
+        if(editingQueueIdx===queueIndex){ clearQueuedEditDraft(queuedItem); editingQueueIdx=-1; }
+        else if(editingQueueIdx>queueIndex) editingQueueIdx--;
+        pendingQueue.splice(queueIndex,1);
+        syncQueueState();
+      }
       if(ev.kind==='queued_turn_started') queueParked=false;
       var queuedItemReferences=turnPinReferences(queuedItem);
       var queuedTurn={text:ev.text||'',attachments:Array.isArray(ev.attachments)?ev.attachments:[],references:clonePinReferences(queuedItemReferences.length?queuedItemReferences:(Array.isArray(ev.references)?ev.references:[]))};
@@ -18115,14 +18206,19 @@ window.__CHANGELOG__ = ${changelogJson};
     var body={ text: turn.text, attachments: turn.attachments || [], references:pinReferencePayload(turn.references) };
     if(goalRequested) body.goal=true;
     if(target.runConfigDirty){
+      // A session-index refresh may restate target.model/effort/speed while the
+      // user's unsent pick remains staged in runModel/runEffort/runSpeed. Send
+      // from the same source the rail displays so a refresh cannot silently
+      // revert this turn to the provider's previous configuration.
+      var selectedConfig=currentRunSelection();
       body.runConfig=true;
-      body.model=target.model||undefined;
-      body.effort=target.effort||undefined;
-      body.speed=target.speed||undefined;
+      body.model=selectedConfig.model||undefined;
+      body.effort=selectedConfig.effort||undefined;
+      body.speed=selectedConfig.speed||undefined;
       // "Last used" means last *chosen*. Remembering the config of every session
       // the user merely replied in would make the next new session inherit a
       // tier nobody picked — and used to leak into other tabs' rail as well.
-      rememberModelConfiguration(vendor, target.model||'', target.effort||'', target.speed||'');
+      rememberModelConfiguration(vendor, selectedConfig.model, selectedConfig.effort, selectedConfig.speed);
     }
     function failSend(rawError){
       if(sessionRunWasAcknowledged(target,runEpoch)) return;
@@ -19500,6 +19596,15 @@ window.__CHANGELOG__ = ${changelogJson};
     if(document.activeElement===byId('commentInput')) syncCommentShortcutGhost();
     if(document.activeElement===byId('np')) syncNewShortcutGhost();
   });
+  function consumeComposerEffortCommand(input){
+    if(composerShortcutComposing || !canConfigureRun() || String(input&&input.value||'')!=='/effort ') return false;
+    input.value='';
+    input.setSelectionRange(0,0);
+    resetComposerHistoryNavigation();
+    openComposerRail('effort',true);
+    focusComposerRailConfigOption();
+    return true;
+  }
   byId('input').addEventListener('keydown',function(e){
     if(handlePinReferencePickerKey(e)){
       e.preventDefault(); e.stopPropagation();
@@ -19521,6 +19626,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }
   });
   byId('input').addEventListener('input',function(){
+    consumeComposerEffortCommand(this);
     syncComposerHeight();
     syncPinReferencePicker();
     syncComposerShortcutGhost();

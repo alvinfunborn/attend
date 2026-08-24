@@ -3138,6 +3138,40 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it("restores middle panel widths beyond the legacy 1200px cap", async () => {
+    const page = await browser.newPage({
+      viewport: { width: 2200, height: 800 },
+    });
+    await page.addInitScript(() => {
+      localStorage.setItem("attend.sideW", "240");
+      localStorage.setItem("attend.sessionPanelW", "1500");
+      localStorage.setItem("attend.sessionPanelOpen", "1");
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", {
+        value: StubEventSource,
+      });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole(raceView),
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+    const panel = await page.locator("#sessionPanel").boundingBox();
+    expect(panel?.width).toBeCloseTo(1500, 0);
+    await page.close();
+  });
+
   it("opens ordinary sessions independently and groups only dropped sessions and forks", async () => {
     const page = await browser.newPage({
       viewport: { width: 1100, height: 800 },
@@ -6872,6 +6906,23 @@ describe("console browser behavior", () => {
 
     await queuedRows.nth(0).locator(".qedit").click();
     await expect.poll(() => page.locator("#queue .qeditbox .qsend").textContent()).toBe("append");
+    await page.locator("#queue .qeditta").fill("continue this edited answer");
+    await page.evaluate(() => {
+      const source = (globalThis as unknown as Record<string, unknown>).__attendEventSource as {
+        onmessage(event: { data: string }): void;
+      };
+      source.onmessage({
+        data: JSON.stringify({
+          active: ["s1"],
+          startedAt: { s1: Date.now() },
+          schedules: [],
+          queues: { s1: { count: 2, parked: false } },
+        }),
+      });
+    });
+    await expect.poll(() => page.locator("#queue .qeditta").inputValue()).toBe(
+      "continue this edited answer",
+    );
     await page.locator("#queue .qeditta").press("Escape");
     await queuedRows.nth(1).locator(".qedit").click();
     await expect.poll(() => page.locator("#queue .qeditbox .qsend").textContent()).toBe("guide");

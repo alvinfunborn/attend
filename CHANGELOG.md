@@ -2,6 +2,27 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.2 — 2026-08-24
+
+### Added
+
+- Typing the exact `/effort ` composer command opens the effort picker with focused keyboard
+  navigation, including Arrow keys, Enter, and Escape.
+
+### Changed
+
+- The middle session panel can use the full available viewport width and restores saved widths
+  beyond the previous 1200px limit.
+
+### Fixed
+
+- Session tags now persist under canonical session ids, keeping same-title forks isolated and
+  preserving explicit empty assignments instead of falling back to legacy aliases.
+- Sends use the model, effort, and speed currently staged in the composer rail even when an older
+  session-index refresh arrives before submission.
+- In-progress queued-message edits, including their selection, survive live queue refreshes instead
+  of reverting to the last server snapshot.
+
 ## 1.3.1 — 2026-08-20
 
 ### Added

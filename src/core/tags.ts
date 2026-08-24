@@ -36,7 +36,9 @@ function normalizeTagFile(value: unknown): TagFile {
       used.add(tag);
       assigned.push(tag);
     }
-    if (assigned.length) sessions[key] = assigned;
+    // Preserve an explicit empty assignment. A stable session id with no tags
+    // must still override any older title / brief / path aliases.
+    sessions[key] = assigned;
   }
   return { tags, sessions };
 }
@@ -72,6 +74,21 @@ export class TagStore {
     const data = this.data.read();
     const assigned = new Set<string>();
     for (const key of this.keys(sessionId)) {
+      for (const tag of data.sessions[key] ?? []) assigned.add(tag);
+    }
+    return data.tags.filter((tag) => assigned.has(tag));
+  }
+
+  /** Use the stable session id when present, with aliases as legacy fallback. */
+  tagsForSession(sessionId: string, legacyAliases: string[] = []): string[] {
+    const data = this.data.read();
+    const canonical = sessionId.trim();
+    if (canonical && Object.prototype.hasOwnProperty.call(data.sessions, canonical)) {
+      const assigned = new Set(data.sessions[canonical] ?? []);
+      return data.tags.filter((tag) => assigned.has(tag));
+    }
+    const assigned = new Set<string>();
+    for (const key of this.keys([canonical, ...legacyAliases])) {
       for (const tag of data.sessions[key] ?? []) assigned.add(tag);
     }
     return data.tags.filter((tag) => assigned.has(tag));
@@ -151,6 +168,25 @@ export class TagStore {
         if (next.length) data.sessions[key] = [...next];
         else delete data.sessions[key];
       }
+      return [...next];
+    });
+  }
+
+  /** Persist the exact assignment under the stable session id, including none. */
+  setCanonicalSessionTags(sessionId: string, tags: string[]): string[] {
+    const key = sessionId.trim();
+    if (!key) return [];
+    return this.data.update((data) => {
+      const next: string[] = [];
+      const used = new Set<string>();
+      for (const raw of tags) {
+        const tag = normalizeTag(raw);
+        if (!tag || used.has(tag)) continue;
+        used.add(tag);
+        next.push(tag);
+        if (!data.tags.includes(tag)) data.tags.push(tag);
+      }
+      data.sessions[key] = [...next];
       return [...next];
     });
   }

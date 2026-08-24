@@ -31,6 +31,24 @@ describe("TagStore", () => {
     ]);
   });
 
+  it("keeps same-title fork tags isolated behind canonical session ids", () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);
+    const store = new TagStore(file);
+    const sharedTitle = "title:codex:/tmp/project:same-title";
+
+    store.setSessionTags(sharedTitle, ["aicallsdk"]);
+    store.setCanonicalSessionTags("parent", ["aicallsdk"]);
+    store.setCanonicalSessionTags("fork", ["magiclinesdk"]);
+
+    expect(store.tagsForSession("parent", [sharedTitle])).toEqual(["aicallsdk"]);
+    expect(store.tagsForSession("fork", [sharedTitle])).toEqual(["magiclinesdk"]);
+
+    store.setCanonicalSessionTags("fork", []);
+    expect(new TagStore(file).tagsForSession("fork", [sharedTitle])).toEqual([]);
+    expect(new TagStore(file).tagsForSession("parent", [sharedTitle])).toEqual(["aicallsdk"]);
+  });
+
   it("reloads external changes before writing from another store instance", () => {
     const uniq = Math.random().toString(36).slice(2);
     const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);

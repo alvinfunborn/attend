@@ -1065,6 +1065,7 @@ describe("renderConsole", () => {
     expect(html).toContain("if(runConfigApplied && !runConfigStaged(s)) clearStagedRunConfig(s);");
     expect(html).toContain("if(!runConfigStaged(existing)) clearStagedRunConfig(existing);");
     expect(html).toContain("if(target.runConfigDirty)");
+    expect(html).toContain("var selectedConfig=currentRunSelection();");
     expect(html).toContain("body.runConfig=true;");
   });
 
@@ -1203,7 +1204,7 @@ describe("renderConsole", () => {
       "rememberModelConfiguration(config.vendor, config.model, config.effort, config.speed);",
     );
     expect(html).toContain(
-      "rememberModelConfiguration(vendor, target.model||'', target.effort||'', target.speed||'');",
+      "rememberModelConfiguration(vendor, selectedConfig.model, selectedConfig.effort, selectedConfig.speed);",
     );
   });
 

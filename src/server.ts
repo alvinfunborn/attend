@@ -282,6 +282,11 @@ function sessionTagKeys(s: RawSession, brief: string | null | undefined): string
   return keys;
 }
 
+function tagsForSession(tags: TagStore, s: RawSession, brief: string | null | undefined): string[] {
+  const keys = sessionTagKeys(s, brief);
+  return s.sessionId ? tags.tagsForSession(s.sessionId, keys.slice(1)) : tags.tagsFor(keys);
+}
+
 function scopeTagKey(scopeId: string): string {
   return `scope-id:${scopeId}`;
 }
@@ -608,7 +613,7 @@ function scopeTagList(
     wanted.add(tag);
   for (const s of sessions) {
     const a = s.sessionId ? orchestrator.analysis(s.sessionId) : null;
-    for (const tag of tags.tagsFor(sessionTagKeys(s, a?.brief))) wanted.add(tag);
+    for (const tag of tagsForSession(tags, s, a?.brief)) wanted.add(tag);
   }
   for (const sessionId of opts.extraSessionIds ?? []) {
     for (const tag of tags.tagsFor(sessionId)) wanted.add(tag);
@@ -1348,7 +1353,9 @@ function toSessionViews(
         reason: reason,
         etaMin: ov?.etaMin ?? baseEta,
         brief: a ? a.brief : null,
-        tags: tags.tagsFor(tagKeys),
+        tags: s.sessionId
+          ? tags.tagsForSession(s.sessionId, tagKeys.slice(1))
+          : tags.tagsFor(tagKeys),
         priorityset: ov?.priority !== undefined,
         etaset: ov?.etaMin !== undefined,
         stateset: ov?.state !== undefined,
@@ -3664,10 +3671,10 @@ export function createApp(
     if (!Array.isArray(body.tags)) return c.json({ ok: false, error: "missing tags" }, 400);
     const matched = visibleSessions().find((s) => s.sessionId === id) ?? null;
     const analysis = matched?.sessionId ? orchestrator.analysis(matched.sessionId) : null;
-    const keys = matched ? sessionTagKeys(matched, analysis?.brief) : id;
-    const previous = tags.tagsFor(keys);
-    const next = tags.setSessionTags(
-      keys,
+    const keys = matched ? sessionTagKeys(matched, analysis?.brief) : [id];
+    const previous = matched ? tags.tagsForSession(id, keys.slice(1)) : tags.tagsFor(id);
+    const next = tags.setCanonicalSessionTags(
+      id,
       body.tags.filter((x): x is string => typeof x === "string"),
     );
     for (const tag of [...previous, ...next])
@@ -4004,16 +4011,19 @@ export function createApp(
       // (mirrors the notes/todos/goal inheritance done above).
       const parentSession = scanned.find((s) => s.sessionId === thread.parentSessionId);
       if (parentSession) {
-        const parentTags = tags.tagsFor(
-          sessionTagKeys(parentSession, orchestrator.analysis(thread.parentSessionId)?.brief),
+        const parentTags = tagsForSession(
+          tags,
+          parentSession,
+          orchestrator.analysis(thread.parentSessionId)?.brief,
         );
         if (parentTags.length) {
-          const childKeys = sessionTagKeys(
+          const childTags = tagsForSession(
+            tags,
             promotedSession,
             orchestrator.analysis(thread.providerSessionId)?.brief,
           );
-          const merged = [...new Set([...tags.tagsFor(childKeys), ...parentTags])];
-          tags.setSessionTags(childKeys, merged);
+          const merged = [...new Set([...childTags, ...parentTags])];
+          tags.setCanonicalSessionTags(thread.providerSessionId, merged);
           for (const tag of merged)
             rememberScopeTag(tags, config.scopeRoots, config.scopeId, tag, promotedSession.cwd);
         }
@@ -5320,7 +5330,7 @@ export function createApp(
         null;
       const parentAnalysis = parent?.sessionId ? orchestrator.analysis(parent.sessionId) : null;
       const inheritedTags = parent
-        ? tags.tagsFor(sessionTagKeys(parent, parentAnalysis?.brief))
+        ? tagsForSession(tags, parent, parentAnalysis?.brief)
         : tags.tagsFor(id);
       const parentVendor =
         parent?.vendor ?? (isVendorId(body.parentVendor) ? body.parentVendor : null);
@@ -5398,7 +5408,7 @@ export function createApp(
           throw new Error("Codex could not start the Goal turn");
       }
       rememberSessionRunConfig(vendor, session, forkConfig);
-      if (inheritedTags.length) tags.setSessionTags(session, inheritedTags);
+      if (inheritedTags.length) tags.setCanonicalSessionTags(session, inheritedTags);
       // Fork no longer inherits the parent's Goal (inheritGoal=false); it only pursues
       // one when armed above, from this branch's own opening message.
       inheritDerivedSessionContext(id, session, vendor, false);

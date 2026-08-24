@@ -1,4 +1,4 @@
-import { type Browser, type Page, chromium } from "playwright";
+import { type Browser, type Page, type Request, chromium } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type ConsoleView, renderConsole } from "../src/ui/console.js";
 
@@ -95,7 +95,10 @@ const view: ConsoleView = {
   sessionIndexRevision: 0,
 };
 
-const openConsole = async (browser: Browser): Promise<Page> => {
+const openConsole = async (
+  browser: Browser,
+  onRequest?: (request: Request) => void,
+): Promise<Page> => {
   const page = await browser.newPage();
   await page.addInitScript(() => {
     const browserGlobal = globalThis as unknown as Record<string, unknown>;
@@ -110,6 +113,7 @@ const openConsole = async (browser: Browser): Promise<Page> => {
     Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
   });
   await page.route("**/*", async (route) => {
+    onRequest?.(route.request());
     const url = new URL(route.request().url());
     if (url.pathname === "/") {
       await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
@@ -251,6 +255,140 @@ describe("per-session run config in the composer rail", () => {
 
       await expect.poll(() => railEffort(page).textContent()).toBe("low");
       expect(await menuCurrentEffort(page)).toBe("low");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("sends the staged effort when an older session index arrives before send", async () => {
+    let sentBody: Record<string, unknown> | null = null;
+    const page = await openConsole(browser, (request) => {
+      if (new URL(request.url()).pathname === "/chat/send") {
+        sentBody = request.postDataJSON() as Record<string, unknown>;
+      }
+    });
+    try {
+      await page.locator("#list .item", { hasText: "High effort session" }).click();
+      await page.locator("#railEffort").click();
+      await page.locator(".rail-option", { hasText: "xhigh" }).click();
+
+      // The provider index still contains the configuration from the previous
+      // turn. It may refresh while the user is typing after choosing xhigh.
+      await page.evaluate(() => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__runConfigEventSource as { onmessage: ((event: { data: string }) => void) | null };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "run-config-epoch",
+            revision: 1,
+            pending: false,
+            sessions: [
+              {
+                vendor: "claude",
+                sessionId: "s-high",
+                title: "High effort session",
+                lastPrompt: "hello",
+                cwd: "/tmp/project",
+                project: "project",
+                file: "/tmp/s-high.jsonl",
+                ageDays: 0,
+                lastTs: 350,
+                prompts: 1,
+                pattern: "unknown",
+                score: 0,
+                reason: "",
+                etaMin: 0,
+                state: null,
+                brief: "High effort session",
+                tags: [],
+                model: "claude-sonnet",
+                effort: "high",
+              },
+            ],
+            knownDirs: ["/tmp/project"],
+            defaultNewDir: "/tmp/project",
+            tags: [],
+            sessions1h: 0,
+            prompts1h: 0,
+            chars1h: 0,
+          }),
+        });
+      });
+
+      // The staged selection remains what the rail shows and what Send must use.
+      expect(await railEffort(page).textContent()).toBe("xhigh");
+      await page.locator("#input").fill("run it with the staged effort");
+      await page.locator("#send").click();
+      await expect
+        .poll(() => sentBody)
+        .toMatchObject({
+          runConfig: true,
+          model: "claude-sonnet",
+          effort: "xhigh",
+        });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("opens the effort picker and clears an exact /effort command after space", async () => {
+    let sends = 0;
+    const page = await openConsole(browser, (request) => {
+      if (new URL(request.url()).pathname === "/chat/send") sends += 1;
+    });
+    try {
+      await page.locator("#list .item", { hasText: "High effort session" }).click();
+      const input = page.locator("#input");
+      await input.pressSequentially("/effort");
+
+      expect(await input.inputValue()).toBe("/effort");
+      expect(await page.locator("#composerRailPop").isHidden()).toBe(true);
+
+      await input.press("Space");
+
+      await expect.poll(() => input.inputValue()).toBe("");
+      expect(await page.locator("#composerRailPop").isVisible()).toBe(true);
+      expect(await page.locator("#railEffort").getAttribute("aria-expanded")).toBe("true");
+      expect(await page.locator("#composerRailPop .rail-option-label").allTextContents()).toEqual([
+        "low",
+        "high (default)",
+        "xhigh",
+      ]);
+      expect(
+        await page
+          .locator('#composerRailPop .rail-option[aria-current="true"] .rail-option-label')
+          .textContent(),
+      ).toBe("high (default)");
+      expect(
+        await page.locator("#composerRailPop .rail-option:focus .rail-option-label").textContent(),
+      ).toBe("high (default)");
+
+      await page.keyboard.press("ArrowDown");
+      expect(
+        await page.locator("#composerRailPop .rail-option:focus .rail-option-label").textContent(),
+      ).toBe("xhigh");
+      await page.keyboard.press("Enter");
+
+      expect(await railEffort(page).textContent()).toBe("xhigh");
+      expect(await page.locator("#composerRailPop").isHidden()).toBe(true);
+      expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(true);
+
+      await input.pressSequentially("/effort");
+      await input.press("Space");
+      expect(
+        await page.locator("#composerRailPop .rail-option:focus .rail-option-label").textContent(),
+      ).toBe("xhigh");
+      await page.keyboard.press("ArrowUp");
+      expect(
+        await page.locator("#composerRailPop .rail-option:focus .rail-option-label").textContent(),
+      ).toBe("high (default)");
+      await page.keyboard.press("Escape");
+
+      expect(await page.locator("#composerRailPop").isHidden()).toBe(true);
+      expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(true);
+      expect(await railEffort(page).textContent()).toBe("xhigh");
+      expect(sends).toBe(0);
     } finally {
       await page.close();
     }
