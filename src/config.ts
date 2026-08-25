@@ -44,7 +44,7 @@ export interface AttendConfig {
   codexModelsCache: string;
   /** exact system Claude Code executable used by the Agent SDK, or null when unavailable. */
   claudeBin: string | null;
-  /** resolved `codex` binary (PATH or app bundle), or null when not installed —
+  /** resolved standalone `codex` CLI (PATH or macOS app bundle), or null when unavailable —
    *  gates in-browser Codex chat / the Codex daemon. */
   codexBin: string | null;
   /** resolved `cursor-agent` binary, or null when it is not installed. */

@@ -99,6 +99,30 @@ headless/JSONL interfaces. Claude and Codex support native forks. Cursor, Antigr
 branches are created as new sessions seeded with the visible parent transcript because those
 headless CLIs do not expose a native fork command.
 
+### Codex CLI on Windows
+
+Attend needs the standalone terminal [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), including
+its `codex exec` automation surface. The Windows desktop app executable under `WindowsApps` is a
+separate app surface and may be access-restricted, so Attend skips that alias when searching PATH.
+
+Install the standalone CLI in PowerShell and verify the npm shim directly:
+
+```powershell
+npm install --global @openai/codex@latest
+$codexBin = Join-Path (npm prefix --global) "codex.cmd"
+& $codexBin --version
+```
+
+Attend 1.3.3 and newer can launch that `.cmd` shim directly. It is discovered automatically when
+the npm global prefix is on PATH. For a nonstandard prefix or multiple Codex installations, pin the
+exact shim, then reopen PowerShell and Attend so they inherit the user environment:
+
+```powershell
+[Environment]::SetEnvironmentVariable("ATTEND_CODEX_BIN", $codexBin, "User")
+```
+
+If the CLI has not been authenticated yet, run `& $codexBin login` before starting Attend.
+
 ### Claude authentication
 
 Attend does not store a separate Claude login. Claude Agent SDK subprocesses inherit the

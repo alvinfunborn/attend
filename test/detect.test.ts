@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   MIN_CLAUDE_CLI_VERSION,
+  codexInstallMessage,
   detectVendors,
   hasStandaloneCliHelp,
   inspectVendorExecutables,
   isVendorId,
+  isWindowsDesktopCodexPath,
   parseCliVersion,
   resolveAntigravityBin,
   resolveClaudeBin,
@@ -12,6 +14,7 @@ import {
   resolveCopilotBin,
   resolveCursorBin,
 } from "../src/core/vendor/detect.js";
+import type { CliResolver } from "../src/core/vendor/detect.js";
 
 const noBundle = () => false; // no app-bundle on the test "machine"
 
@@ -19,7 +22,7 @@ describe("detectVendors", () => {
   it("reports availability and version from the local CLI probe", () => {
     const installed = new Set(["claude"]);
     const vendors = detectVendors(
-      (cmd) => installed.has(cmd),
+      (cmd) => (installed.has(cmd) ? `/opt/bin/${cmd}` : null),
       noBundle,
       () => "2.1.12",
     );
@@ -49,7 +52,7 @@ describe("detectVendors", () => {
 
   it("marks all available when all CLIs resolve and report versions", () => {
     const vendors = detectVendors(
-      () => true,
+      (cmd) => `/opt/bin/${cmd}`,
       noBundle,
       () => "2.1.12",
       () => true,
@@ -99,7 +102,7 @@ describe("detectVendors", () => {
   });
 
   it("marks all unavailable when neither PATH nor the app-bundle resolve", () => {
-    const vendors = detectVendors(() => false, noBundle);
+    const vendors = detectVendors(() => null, noBundle);
     expect(vendors.some((v) => v.available)).toBe(false);
   });
 
@@ -180,17 +183,29 @@ describe("detectVendors", () => {
     expect(vendors.find((vendor) => vendor.vendor === "cursor")?.message).toContain("Install");
   });
 
-  it("does not invent a version floor for Codex or Cursor", () => {
+  it("requires Codex to run without inventing a version floor", () => {
     const vendors = inspectVendorExecutables(
       { claude: null, codex: "/opt/bin/codex", cursor: "/opt/bin/cursor-agent" },
-      () => null,
+      (executable) => (executable.includes("codex") ? "0.144.2" : null),
     );
 
     expect(vendors.find((vendor) => vendor.vendor === "codex")).toMatchObject({
       available: true,
+      version: "0.144.2",
     });
     expect(vendors.find((vendor) => vendor.vendor === "cursor")).toMatchObject({
       available: true,
+    });
+    expect(vendors.find((vendor) => vendor.vendor === "codex")?.minimumVersion).toBeUndefined();
+  });
+
+  it("rejects a configured Codex command that cannot report its version", () => {
+    const vendors = inspectVendorExecutables({ codex: "C:\\broken\\codex.exe" }, () => null);
+
+    expect(vendors.find((vendor) => vendor.vendor === "codex")).toMatchObject({
+      available: false,
+      issue: "not_runnable",
+      message: expect.stringContaining("could not run Codex CLI"),
     });
   });
 
@@ -201,33 +216,62 @@ describe("detectVendors", () => {
     expect(parseCliVersion("unknown")).toBeNull();
   });
 
-  it("resolves Codex from the app-bundle when it isn't on PATH, preferring ChatGPT.app", () => {
+  it("resolves a concrete Codex PATH entry before the macOS app bundle", () => {
     // both bundles present → newest layout (ChatGPT.app) wins
     expect(
       resolveCodexBin(
-        () => false,
+        () => null,
         () => true,
+        "darwin",
       ),
     ).toContain("ChatGPT.app");
     // only the older Codex.app bundle present → fall back to it
     expect(
       resolveCodexBin(
-        () => false,
+        () => null,
         (p) => p.includes("Codex.app"),
+        "darwin",
       ),
     ).toContain("Codex.app");
     // PATH wins over any bundle
     expect(
       resolveCodexBin(
-        () => true,
+        () => "/usr/local/bin/codex",
         () => false,
+        "darwin",
       ),
-    ).toBe("codex");
+    ).toBe("/usr/local/bin/codex");
     expect(
       resolveCodexBin(
+        () => null,
         () => false,
-        () => false,
+        "darwin",
       ),
     ).toBeNull();
+  });
+
+  it("skips WindowsApps Codex aliases and continues to an npm codex.cmd shim", () => {
+    const candidates = [
+      "C:\\Users\\av\\AppData\\Local\\Microsoft\\WindowsApps\\codex.exe",
+      "D:\\Scoop\\persist\\npm\\codex.cmd",
+    ];
+    const resolve: CliResolver = (_command, accept = () => true) =>
+      candidates.find((candidate) => accept(candidate)) ?? null;
+
+    expect(resolveCodexBin(resolve, noBundle, "win32")).toBe("D:\\Scoop\\persist\\npm\\codex.cmd");
+    expect(isWindowsDesktopCodexPath(candidates[0] ?? "", "win32")).toBe(true);
+    expect(isWindowsDesktopCodexPath(candidates[1] ?? "", "win32")).toBe(false);
+  });
+
+  it("does not use a macOS app bundle as a Windows Codex fallback", () => {
+    expect(
+      resolveCodexBin(
+        () => null,
+        () => true,
+        "win32",
+      ),
+    ).toBeNull();
+    expect(codexInstallMessage("win32")).toContain("codex.cmd");
+    expect(codexInstallMessage("win32")).not.toContain("desktop app");
   });
 });

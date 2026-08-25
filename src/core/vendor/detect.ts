@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnCliSync } from "../spawn.js";
 import { runMetadataCommand } from "./async-command.js";
 import { type VendorCapabilities, vendorCapabilities } from "./capabilities.js";
 
@@ -43,18 +43,25 @@ export interface VendorAvailability {
 
 export type VendorExecutables = Partial<Record<VendorId, string | null>>;
 
-/** Probe whether a command resolves on PATH. Injectable so tests never spawn. */
-export type CliProbe = (command: string) => boolean;
+export type CliCandidateFilter = (candidate: string) => boolean;
+/** Resolve a command to its concrete PATH entry, optionally skipping shadowing candidates. */
+export type CliResolver = (command: string, accept?: CliCandidateFilter) => string | null;
 export type CliVersionProbe = (executable: string) => string | null;
 export type CliSurfaceProbe = (executable: string, vendor: VendorId) => boolean;
 
 /** Resolve a PATH command to the concrete executable used by the current shell. */
-export function resolveOnPath(command: string): string | null {
+export function resolveOnPath(
+  command: string,
+  accept: CliCandidateFilter = () => true,
+): string | null {
   const candidates: string[] = [];
   const hasSeparator = command.includes("/") || command.includes("\\");
   const bases = hasSeparator
     ? [""]
-    : (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+    : (process.env.PATH ?? "")
+        .split(path.delimiter)
+        .map((base) => base.replace(/^"|"$/g, ""))
+        .filter(Boolean);
   const extensions =
     process.platform === "win32"
       ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM")
@@ -72,7 +79,7 @@ export function resolveOnPath(command: string): string | null {
         candidate,
         process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK,
       );
-      return candidate;
+      if (accept(candidate)) return candidate;
     } catch {
       // Continue through PATH.
     }
@@ -80,23 +87,23 @@ export function resolveOnPath(command: string): string | null {
   return null;
 }
 
-export function resolveClaudeBin(resolve: (command: string) => string | null = resolveOnPath) {
+export function resolveClaudeBin(resolve: CliResolver = resolveOnPath) {
   return resolve("claude");
 }
 
-export function resolveCursorBin(resolve: (command: string) => string | null = resolveOnPath) {
+export function resolveCursorBin(resolve: CliResolver = resolveOnPath) {
   return resolve("cursor-agent") ?? resolve("agent");
 }
 
-export function resolveAntigravityBin(resolve: (command: string) => string | null = resolveOnPath) {
+export function resolveAntigravityBin(resolve: CliResolver = resolveOnPath) {
   return resolve("agy");
 }
 
-export function resolveCopilotBin(resolve: (command: string) => string | null = resolveOnPath) {
+export function resolveCopilotBin(resolve: CliResolver = resolveOnPath) {
   return resolve("copilot");
 }
 
-/** Default probe: `where` on Windows, `which` elsewhere. Resolves shims (claude.cmd). */
+/** Whether a command has any concrete PATH candidate. */
 export function onPath(command: string): boolean {
   return resolveOnPath(command) !== null;
 }
@@ -109,21 +116,11 @@ export function parseCliVersion(output: string): string | null {
 /** Run the exact configured executable; never consult an SDK-bundled runtime. */
 export function readCliVersion(executable: string): string | null {
   try {
-    const options = {
+    const result = spawnCliSync(executable, ["--version"], {
       encoding: "utf8",
       timeout: 5_000,
       windowsHide: true,
-    } as const;
-    // npm-installed CLIs commonly resolve to `.cmd` shims on Windows, which
-    // Node cannot execute directly without cmd.exe.
-    const result =
-      process.platform === "win32" && /\.(?:cmd|bat)$/i.test(executable)
-        ? spawnSync(
-            process.env.ComSpec ?? "cmd.exe",
-            ["/d", "/s", "/c", `"${executable}" --version`],
-            options,
-          )
-        : spawnSync(executable, ["--version"], options);
+    });
     if (result.status !== 0 || result.error) return null;
     return parseCliVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
   } catch {
@@ -151,7 +148,7 @@ export function hasStandaloneCliHelp(output: string, vendor: VendorId): boolean 
 export function hasStandaloneCliSurface(executable: string, vendor: VendorId): boolean {
   if (vendor !== "antigravity" && vendor !== "copilot") return true;
   try {
-    const result = spawnSync(executable, ["--help"], {
+    const result = spawnCliSync(executable, ["--help"], {
       encoding: "utf8",
       timeout: 5_000,
       windowsHide: true,
@@ -186,16 +183,29 @@ function compareCliVersions(left: string, right: string): number {
   return a.prerelease.localeCompare(b.prerelease);
 }
 
+/** Windows Store app aliases resolve into WindowsApps but are not runnable CLIs for Attend. */
+export function isWindowsDesktopCodexPath(
+  candidate: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== "win32") return false;
+  return candidate.replace(/\//g, "\\").toLowerCase().includes("\\windowsapps\\");
+}
+
 /**
- * Resolve the `codex` binary: PATH first, else the macOS desktop-app bundle
- * (installed but not symlinked). Returns null when Codex isn't found. The
- * `existsSync` check is injectable so tests stay off the filesystem.
+ * Resolve the concrete standalone `codex` command on PATH. On Windows, skip
+ * desktop-app aliases under WindowsApps and continue to a later npm `.cmd`
+ * shim. macOS alone may fall back to the CLI bundled in ChatGPT/Codex.app.
  */
 export function resolveCodexBin(
-  probe: CliProbe = onPath,
+  resolve: CliResolver = resolveOnPath,
   exists: (p: string) => boolean = fs.existsSync,
+  platform: NodeJS.Platform = process.platform,
 ): string | null {
-  if (probe("codex")) return "codex";
+  const accept = (candidate: string) => !isWindowsDesktopCodexPath(candidate, platform);
+  const fromPath = resolve("codex", accept);
+  if (fromPath && accept(fromPath)) return fromPath;
+  if (platform !== "darwin") return null;
   return CODEX_APP_BINS.find((bin) => exists(bin)) ?? null;
 }
 
@@ -212,7 +222,7 @@ const VENDORS: readonly {
 }[] = [
   { vendor: "claude", chat: true },
   // Codex is driven in-browser via `codex exec --json` (no SDK needed); resolves
-  // from PATH or the desktop-app bundle.
+  // from PATH or the macOS desktop-app bundle.
   { vendor: "codex", chat: true },
   // Cursor's headless CLI exposes the same process-per-turn primitives Attend
   // needs: stream-json output and --resume=<session id>.
@@ -229,15 +239,32 @@ const VENDOR_LABELS: Record<VendorId, string> = {
   copilot: "GitHub Copilot CLI",
 };
 
-const VENDOR_INSTALL_MESSAGES: Record<VendorId, string> = {
-  claude: "Claude CLI was not found. Install Claude Code, then restart Attend.",
-  codex:
-    "Codex CLI was not found. Install Codex CLI or the ChatGPT desktop app, then restart Attend.",
-  cursor: "Cursor CLI was not found. Install Cursor CLI, then restart Attend.",
-  antigravity:
-    "Antigravity CLI was not found. Install the standalone Antigravity CLI, then restart Attend.",
-  copilot: "GitHub Copilot CLI was not found. Install Copilot CLI, then restart Attend.",
-};
+function requiresRunnableVersion(vendor: VendorId): boolean {
+  return vendor === "claude" || vendor === "codex";
+}
+
+export function codexInstallMessage(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") {
+    return "Codex CLI was not found. Install the standalone CLI with npm, or set ATTEND_CODEX_BIN to its codex.cmd path, then restart Attend.";
+  }
+  if (platform === "darwin") {
+    return "Codex CLI was not found. Install Codex CLI or the ChatGPT desktop app, then restart Attend.";
+  }
+  return "Codex CLI was not found. Install Codex CLI, then restart Attend.";
+}
+
+function vendorInstallMessage(vendor: VendorId): string {
+  if (vendor === "codex") return codexInstallMessage();
+  if (vendor === "claude") {
+    return "Claude CLI was not found. Install Claude Code, then restart Attend.";
+  }
+  if (vendor === "cursor")
+    return "Cursor CLI was not found. Install Cursor CLI, then restart Attend.";
+  if (vendor === "antigravity") {
+    return "Antigravity CLI was not found. Install the standalone Antigravity CLI, then restart Attend.";
+  }
+  return "GitHub Copilot CLI was not found. Install Copilot CLI, then restart Attend.";
+}
 
 /**
  * Inspect the exact executables selected by configuration. This is the single
@@ -261,7 +288,7 @@ export function inspectVendorExecutables(
         available: false,
         ...(minimumVersion ? { minimumVersion } : {}),
         issue: "not_installed" as const,
-        message: VENDOR_INSTALL_MESSAGES[vendor],
+        message: vendorInstallMessage(vendor),
       };
     }
 
@@ -279,7 +306,7 @@ export function inspectVendorExecutables(
       };
     }
     const version = versionProbe(executable);
-    if (!version && minimumVersion) {
+    if (!version && requiresRunnableVersion(vendor)) {
       return {
         vendor,
         chat,
@@ -337,7 +364,7 @@ export function configuredVendorAvailability(executables: VendorExecutables): Ve
         available: false,
         ...(minimumVersion ? { minimumVersion } : {}),
         issue: "not_installed",
-        message: VENDOR_INSTALL_MESSAGES[vendor],
+        message: vendorInstallMessage(vendor),
       };
     }
     return {
@@ -386,7 +413,7 @@ export async function inspectVendorExecutablesAsync(
           available: false,
           ...(minimumVersion ? { minimumVersion } : {}),
           issue: "not_installed",
-          message: VENDOR_INSTALL_MESSAGES[vendor],
+          message: vendorInstallMessage(vendor),
         };
       }
       if (!(await hasStandaloneCliSurfaceAsync(executable, vendor))) {
@@ -403,13 +430,13 @@ export async function inspectVendorExecutablesAsync(
         };
       }
       const version = await readCliVersionAsync(executable);
-      if (!version && minimumVersion) {
+      if (!version && requiresRunnableVersion(vendor)) {
         return {
           vendor,
           chat,
           capabilities,
           available: false,
-          minimumVersion,
+          ...(minimumVersion ? { minimumVersion } : {}),
           issue: "not_runnable",
           message: `Attend could not run ${VENDOR_LABELS[vendor]}. Check its configured path or reinstall it, then restart Attend.`,
         };
@@ -452,23 +479,23 @@ export function isVendorId(value: unknown): value is VendorId {
  * every entry, hides unavailable ones when any vendor works, and uses the
  * generated messages as recovery guidance when none work.
  * Vendor-locked execution (DESIGN.md invariant 4): detection lives in
- * core/vendor/ alongside the other seams. Probes are injectable so tests stay
+ * core/vendor/ alongside the other seams. Resolvers are injectable so tests stay
  * deterministic off any real machine.
  */
 export function detectVendors(
-  probe: CliProbe = onPath,
+  resolve: CliResolver = resolveOnPath,
   exists: ExistsFn = fs.existsSync,
   versionProbe: CliVersionProbe = readCliVersion,
   surfaceProbe: CliSurfaceProbe = hasStandaloneCliSurface,
 ): VendorAvailability[] {
-  const cursorBin = probe("cursor-agent") ? "cursor-agent" : probe("agent") ? "agent" : null;
+  const cursorBin = resolve("cursor-agent") ?? resolve("agent");
   return inspectVendorExecutables(
     {
-      claude: probe("claude") ? "claude" : null,
-      codex: resolveCodexBin(probe, exists),
+      claude: resolve("claude"),
+      codex: resolveCodexBin(resolve, exists),
       cursor: cursorBin,
-      antigravity: probe("agy") ? "agy" : null,
-      copilot: probe("copilot") ? "copilot" : null,
+      antigravity: resolve("agy"),
+      copilot: resolve("copilot"),
     },
     versionProbe,
     surfaceProbe,

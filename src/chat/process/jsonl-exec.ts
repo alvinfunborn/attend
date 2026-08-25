@@ -1,8 +1,9 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import { spawnCli, spawnCliSync } from "../../core/spawn.js";
 import type { CodexEvent } from "../codex/events.js";
 import type { ChatAttachment } from "../driver.js";
 import type { ProcessTurnFn, ProcessTurnHandle, ProcessTurnRequest } from "./types.js";
@@ -60,7 +61,7 @@ function prepareInput(
 function descendantPids(root: number): number[] {
   if (process.platform === "win32") return [];
   try {
-    const result = spawnSync("ps", ["-axo", "pid=,ppid="], {
+    const result = spawnCliSync("ps", ["-axo", "pid=,ppid="], {
       encoding: "utf8",
       windowsHide: true,
     });
@@ -137,7 +138,7 @@ export function makeJsonlExec<Event extends object, State>(
     const state = adapter.createState(request);
     let sessionId = request.resume ?? adapter.initialSessionId?.(request, state) ?? null;
     fs.mkdirSync(adapter.sessionsDir, { recursive: true });
-    const child = spawn(adapter.bin, adapter.buildArgs(request, prepared.prompt, state), {
+    const child = spawnCli(adapter.bin, adapter.buildArgs(request, prepared.prompt, state), {
       cwd: request.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",

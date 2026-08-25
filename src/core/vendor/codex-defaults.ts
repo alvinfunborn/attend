@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
 import type { ModelDefaults } from "../model-options.js";
+import { spawnCli } from "../spawn.js";
 
 interface RpcMessage {
   id?: number;
@@ -36,7 +36,7 @@ export function inspectCodexDefaults(
 ): Promise<ModelDefaults> {
   if (!codexBin) return Promise.resolve({ model: "", effort: "", speed: "" });
   return new Promise((resolve) => {
-    const child = spawn(codexBin, ["app-server", "--stdio"], {
+    const child = spawnCli(codexBin, ["app-server", "--stdio"], {
       cwd,
       stdio: ["pipe", "pipe", "ignore"],
     });

@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ModelOption } from "../model-options.js";
+import { spawnCliSync } from "../spawn.js";
 import { runMetadataCommand } from "./async-command.js";
 
 interface CachedModel {
@@ -98,7 +98,7 @@ interface CodexModelCommandResult {
 export type CodexModelCommandRunner = (codexBin: string, args: string[]) => CodexModelCommandResult;
 
 const runCodexModelCommand: CodexModelCommandRunner = (codexBin, args) => {
-  const result = spawnSync(codexBin, args, {
+  const result = spawnCliSync(codexBin, args, {
     encoding: "utf-8",
     timeout: 15_000,
     maxBuffer: 8 * 1024 * 1024,

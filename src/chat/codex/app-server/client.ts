@@ -1,6 +1,7 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import readline from "node:readline";
+import { spawnCli } from "../../../core/spawn.js";
 import type { AppServerMessage, JsonRpcId } from "./types.js";
 
 interface PendingRequest {
@@ -88,7 +89,7 @@ export class CodexAppServerClient implements AppServerClientLike {
 
   private async open(): Promise<void> {
     this.stopped = false;
-    const child = spawn(this.bin, ["app-server", "--stdio"], {
+    const child = spawnCli(this.bin, ["app-server", "--stdio"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;

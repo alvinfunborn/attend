@@ -15,6 +15,7 @@ const ENV_KEYS = [
   "ATTEND_CLAUDE_BIN",
   "ATTEND_CODEX_SESSIONS",
   "ATTEND_CODEX_MODELS_CACHE",
+  "ATTEND_CODEX_BIN",
   "ATTEND_CURSOR_SESSIONS",
   "ATTEND_CURSOR_PROJECTS",
   "ATTEND_CURSOR_STATE_DB",
@@ -144,6 +145,11 @@ describe("resolveConfig precedence", () => {
   it("allows overriding the Claude executable used by the Agent SDK", () => {
     process.env.ATTEND_CLAUDE_BIN = "/opt/claude/current/claude";
     expect(resolveConfig({ positionals: [] }).claudeBin).toBe("/opt/claude/current/claude");
+  });
+
+  it("allows pinning a Windows npm Codex shim", () => {
+    process.env.ATTEND_CODEX_BIN = "D:\\Scoop\\persist\\npm\\codex.cmd";
+    expect(resolveConfig({ positionals: [] }).codexBin).toBe("D:\\Scoop\\persist\\npm\\codex.cmd");
   });
 
   it("allows overriding Cursor CLI, native projects, and captured sessions", () => {

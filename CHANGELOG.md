@@ -2,6 +2,24 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.3 — 2026-08-25
+
+### Changed
+
+- Tagged releases now verify Windows npm command shims on a native Windows runner before the npm
+  publish job can begin.
+
+### Fixed
+
+- Windows Codex discovery skips inaccessible desktop-app aliases under `WindowsApps`, continues to
+  a later standalone npm `codex.cmd`, and retains that concrete executable instead of falling back
+  to the shadowed command name.
+- Provider version, model, default-config, analyzer, and live-turn processes share one
+  argument-safe cross-platform launcher, so Windows `.cmd` and `.bat` shims work throughout the
+  complete Codex execution chain.
+- Codex is no longer reported as available when its configured command cannot run, and Windows
+  recovery guidance points to the standalone CLI plus `ATTEND_CODEX_BIN` override.
+
 ## 1.3.2 — 2026-08-24
 
 ### Added

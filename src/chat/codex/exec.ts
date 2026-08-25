@@ -1,8 +1,9 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { spawnCli } from "../../core/spawn.js";
 import type {
   ProcessForkFn,
   ProcessSandbox,
@@ -93,7 +94,7 @@ function spawnCodexExec(bin: string, req: CodexExecRequest): CodexExecHandle {
   // input from stdin…"; closing it lets the prompt arg stand alone.
   let child: ChildProcess;
   try {
-    child = spawn(
+    child = spawnCli(
       bin,
       buildArgs({ ...req, prompt: prepared.prompt, imagePaths: prepared.imagePaths }),
       { cwd: req.cwd, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" },

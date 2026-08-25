@@ -76,6 +76,30 @@ Attend 会在启动时检测这些系统 CLI，只显示实际可运行的 Vendo
 Codex 支持原生 fork；Cursor、Antigravity 和 Copilot 的 headless CLI 没有原生 fork 命令，因此分支会
 创建新 session，并用父 session 的可见 transcript 作为上下文。
 
+### Windows 上的 Codex CLI
+
+Attend 依赖独立的终端版 [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)，包括
+`codex exec` 自动化接口。`WindowsApps` 中的 Windows 桌面应用可执行文件属于另一套应用入口，
+而且可能受访问权限限制；Attend 会在 PATH 搜索中跳过这个别名。
+
+在 PowerShell 中安装独立 CLI，并直接验证 npm shim：
+
+```powershell
+npm install --global @openai/codex@latest
+$codexBin = Join-Path (npm prefix --global) "codex.cmd"
+& $codexBin --version
+```
+
+Attend 1.3.3 及以上版本可以直接启动这个 `.cmd`。只要 npm 全局目录已经加入 PATH，Attend 会自动
+找到它；如果 npm 使用非标准目录，或机器上存在多个 Codex 安装，可以显式固定路径。设置后重新
+打开 PowerShell 和 Attend，让新进程继承用户环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable("ATTEND_CODEX_BIN", $codexBin, "User")
+```
+
+如果 CLI 尚未登录，启动 Attend 前先执行 `& $codexBin login`。
+
 ### Claude 认证
 
 Attend 不保存另一套 Claude 登录；Claude Agent SDK 子进程会继承 Attend 进程的认证环境。
