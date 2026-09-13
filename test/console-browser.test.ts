@@ -8957,7 +8957,12 @@ describe("console browser behavior", () => {
         expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe(
           "Load more folders",
         );
-        await page.locator("#ndirSug .chooser-more").click();
+        // Keep this path scroll-driven. Auto-scrolling a button into view can
+        // already load its page and remove it before Playwright dispatches click.
+        await page.locator("#ndirSug").evaluate((drop) => {
+          drop.scrollTop = drop.scrollHeight;
+          drop.dispatchEvent(new Event("scroll"));
+        });
       }
       await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(55);
       expect(await page.locator("#ndirSug .chooser-more").count()).toBe(0);

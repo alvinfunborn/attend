@@ -2,7 +2,7 @@
 
 All notable changes to Attend are documented in this file.
 
-## 1.3.4 — 2026-09-14
+## 1.3.5 — 2026-09-14
 
 ### Added
 
