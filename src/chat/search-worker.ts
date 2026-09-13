@@ -14,6 +14,8 @@ parentPort.on(
     kind?: string;
     id?: number;
     sessions?: RawSession[];
+    upserts?: RawSession[];
+    removedPaths?: string[];
     query?: string;
     opts?: { maxResults?: number; maxHitsPerSession?: number };
   }) => {
@@ -25,6 +27,18 @@ parentPort.on(
     if (message.kind === "sync" && Array.isArray(message.sessions)) {
       try {
         index.sync(message.sessions);
+      } catch {
+        // A background refresh is best-effort; an explicit search retries.
+      }
+      return;
+    }
+    if (
+      message.kind === "sync_delta" &&
+      Array.isArray(message.upserts) &&
+      Array.isArray(message.removedPaths)
+    ) {
+      try {
+        index.syncDelta(message.upserts, message.removedPaths);
       } catch {
         // A background refresh is best-effort; an explicit search retries.
       }

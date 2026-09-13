@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveConfig } from "../src/config.js";
+import type { RawSession } from "../src/core/types.js";
 import { SessionIndexStore } from "../src/core/vendor/session-index-store.js";
 import { type SessionIndexSnapshot, WorkerSessionIndex } from "../src/core/vendor/session-index.js";
 import { TranscriptPathIndex } from "../src/core/vendor/transcript-index.js";
@@ -26,6 +27,24 @@ function waitForSnapshot(
       resolve(snapshot);
     });
   });
+}
+
+function rawSession(root: string, lastPrompt: string): RawSession {
+  return {
+    path: path.join(root, "delta-session.jsonl"),
+    vendor: "codex",
+    sessionId: "delta-session",
+    title: "delta session",
+    lastPrompt,
+    lastTurnChars: 0,
+    chars: lastPrompt.length,
+    cwd: root,
+    firstTs: 1,
+    lastTs: 2,
+    prompts: 1,
+    actions: 0,
+    visits: 1,
+  };
 }
 
 describe("WorkerSessionIndex", () => {
@@ -196,6 +215,46 @@ describe("WorkerSessionIndex", () => {
     } finally {
       abandoned.close();
       survivor.close();
+    }
+  });
+
+  it("polls identity separately and journals only consecutive catalog deltas", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-index-delta-"));
+    roots.push(root);
+    const store = new SessionIndexStore(path.join(root, "index.sqlite3"));
+    const owner = `${process.pid}:delta-test`;
+    try {
+      const token = store.acquireLease(owner);
+      expect(token).toBeTypeOf("number");
+      const first = store.commit(owner, token ?? 0, [rawSession(root, "first")], {}, 100);
+      expect(first?.revision).toBe(1);
+      expect(store.readIdentity()).toMatchObject({
+        epoch: first?.epoch,
+        revision: 1,
+        scannedAt: 100,
+        pending: false,
+      });
+      // Revision zero deliberately has no duplicate full-catalog journal row.
+      expect(store.readDeltas(first?.epoch ?? "", 0, 1)).toBeNull();
+
+      const second = store.commit(owner, token ?? 0, [rawSession(root, "second")], {}, 200);
+      expect(second?.revision).toBe(2);
+      const deltas = store.readDeltas(second?.epoch ?? "", 1, 2);
+      expect(deltas).toHaveLength(1);
+      expect(deltas?.[0]).toMatchObject({
+        baseRevision: 1,
+        revision: 2,
+        upserts: [{ sessionId: "delta-session", lastPrompt: "second" }],
+        removed: [],
+      });
+
+      const unchanged = store.commit(owner, token ?? 0, [rawSession(root, "second")], {}, 300);
+      expect(unchanged?.revision).toBe(2);
+      // No-op scans do not rewrite the overflow-page-backed snapshot row.
+      expect(store.readIdentity().scannedAt).toBe(200);
+    } finally {
+      store.releaseLease(owner);
+      store.close();
     }
   });
 });

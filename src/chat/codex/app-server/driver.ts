@@ -12,7 +12,7 @@ import type { UiEvent } from "../../events.js";
 import { IdleSessionTimers, SESSION_IDLE_TTL_MS } from "../../idle-sessions.js";
 import { InteractionBroker } from "../../interactions.js";
 import { MEMORY_CITATION_OPEN, extractMemoryCitationTrailer } from "../../memory-citations.js";
-import { providerErrorPayload } from "../../provider-errors.js";
+import { errorText, providerErrorPayload } from "../../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../../runtime.js";
 import { classifyCodexError } from "../errors.js";
 import { prepareCodexInput, validateCodexAttachments } from "../input.js";
@@ -30,6 +30,18 @@ const INTERACTIVE_APPROVAL_POLICY = "never";
 const INTERACTIVE_SANDBOX = "danger-full-access";
 const INTERACTIVE_SANDBOX_POLICY = { type: "dangerFullAccess" } as const;
 const INTERRUPT_REQUEST_TIMEOUT_MS = 5_000;
+const RESUME_REQUEST_TIMEOUT_MS = 60_000;
+const CAPACITY_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 40_000, 60_000] as const;
+const CAPACITY_RETRY_PROMPT = [
+  "<attend_auto_retry>",
+  "The previous turn was interrupted by a transient Codex model-capacity error.",
+  "Continue the original task from the exact point where it stopped " +
+    "without asking the user to send continue.",
+  "Do not repeat completed side effects. Reuse or inspect any yielded tool session " +
+    "before starting a duplicate.",
+  "Finish only when the original task is genuinely complete or needs real user input.",
+  "</attend_auto_retry>",
+].join("\n");
 
 interface CodexRun extends DriverRun {
   model?: string;
@@ -41,6 +53,9 @@ interface CodexRun extends DriverRun {
   interactions: InteractionBroker<ToolAnswer>;
   agentMessageStreams: Map<string, { raw: string; emittedLength: number }>;
   cleanupInputs: Set<() => void>;
+  capacityRetryAttempt: number;
+  capacityRetryTimer: ReturnType<typeof setTimeout> | null;
+  pendingCapacityError: unknown;
 }
 
 interface ThreadResponse {
@@ -76,6 +91,17 @@ function text(value: unknown): string {
   }
 }
 
+function isCapacityError(error: unknown): boolean {
+  const normalized = `${errorText(error)} ${text(error)}`.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return (
+    normalized.includes("serveroverloaded") ||
+    normalized.includes("serverisoverloaded") ||
+    normalized.includes("selectedmodelisatcapacity") ||
+    normalized.includes("modelisatcapacity") ||
+    normalized.includes("modelcapacityerror")
+  );
+}
+
 /** Persistent Codex adapter backed by the bidirectional app-server protocol. */
 export class CodexAppServerDriver implements ChatDriver {
   readonly vendor = "codex";
@@ -91,6 +117,7 @@ export class CodexAppServerDriver implements ChatDriver {
   constructor(
     private readonly client: AppServerClientLike = new CodexAppServerClient(),
     idleTtlMs = SESSION_IDLE_TTL_MS,
+    private readonly capacityRetryDelaysMs: readonly number[] = CAPACITY_RETRY_DELAYS_MS,
   ) {
     this.unsubscribe = client.onMessage((message) => this.receive(message));
     this.idle = new IdleSessionTimers(idleTtlMs);
@@ -186,10 +213,14 @@ export class CodexAppServerDriver implements ChatDriver {
         ...common,
       });
     } else if (opts.resume) {
-      response = await this.client.request<ThreadResponse>("thread/resume", {
-        threadId: opts.resume,
-        ...common,
-      });
+      // Display history comes from Attend's history worker. Hydrating every
+      // provider turn here only delays sending, and a missing RPC response must
+      // not pin starts[sessionId] forever (including every subsequent retry).
+      response = await this.client.request<ThreadResponse>(
+        "thread/resume",
+        { threadId: opts.resume, ...common, excludeTurns: true },
+        { timeoutMs: RESUME_REQUEST_TIMEOUT_MS },
+      );
     } else {
       response = await this.client.request<ThreadResponse>("thread/start", common);
     }
@@ -214,6 +245,9 @@ export class CodexAppServerDriver implements ChatDriver {
       interactions: new InteractionBroker<ToolAnswer>(),
       agentMessageStreams: new Map(),
       cleanupInputs: new Set(),
+      capacityRetryAttempt: 0,
+      capacityRetryTimer: null,
+      pendingCapacityError: null,
     };
     this.runtime.index(sessionId, run);
     this.runtime.publish(run, { kind: "session", sessionId });
@@ -311,6 +345,10 @@ export class CodexAppServerDriver implements ChatDriver {
       return this.interruptRemoteTurn(sessionId, options?.turnId);
     }
     const cancelledInteractions = run.interactions.cancelAll();
+    if (run.capacityRetryTimer !== null) {
+      this.finishCapacityRetryAsInterrupted(run);
+      return true;
+    }
     if (!run.turnActive)
       return (
         cancelledInteractions > 0 || (await this.interruptRemoteTurn(sessionId, options?.turnId))
@@ -396,7 +434,10 @@ export class CodexAppServerDriver implements ChatDriver {
     this.unsubscribe();
     this.idle.clear();
     this.runtime.clearPending();
-    for (const run of this.runtime.values()) this.cleanupPreparedInputs(run);
+    for (const run of this.runtime.values()) {
+      this.clearCapacityRetryTimer(run);
+      this.cleanupPreparedInputs(run);
+    }
     this.client.shutdown();
   }
 
@@ -417,12 +458,21 @@ export class CodexAppServerDriver implements ChatDriver {
     run.cleanupInputs.clear();
   }
 
-  private async startTurn(run: CodexRun, turn: UserTurn): Promise<void> {
+  private async startTurn(
+    run: CodexRun,
+    turn: UserTurn,
+    capacityContinuation = false,
+  ): Promise<void> {
     if (run.sessionId) this.idle.cancel(run.sessionId);
-    run.events = [];
-    run.agentMessageStreams.clear();
+    if (!capacityContinuation) {
+      this.clearCapacityRetryTimer(run);
+      run.capacityRetryAttempt = 0;
+      run.events = [];
+      run.agentMessageStreams.clear();
+    }
+    run.pendingCapacityError = null;
     run.turnActive = true;
-    run.turnStartedAt = Date.now();
+    if (!capacityContinuation || !run.turnStartedAt) run.turnStartedAt = Date.now();
     // A fresh turn owns a fresh id, and `turn/started` may claim it before
     // `turn/start` answers (see below). Clear first so "unset" is meaningful.
     run.turnId = null;
@@ -461,8 +511,11 @@ export class CodexAppServerDriver implements ChatDriver {
         );
       }
     } catch (error) {
-      run.interruptRequested = false;
       this.cleanupPreparedInputs(run);
+      // A rejected turn/start may not have persisted its input. Retry that
+      // exact input; completed provider turns use the continuation prompt below.
+      if (this.scheduleCapacityRetry(run, error, turn)) return;
+      run.interruptRequested = false;
       throw error;
     } finally {
       markTurnReady();
@@ -528,6 +581,13 @@ export class CodexAppServerDriver implements ChatDriver {
         // classified account failures immediately; only transient unknown
         // failures remain silent while the provider retries.
         const error = record(params.error);
+        if (isCapacityError(error)) {
+          // Capacity failures terminate the provider turn, but not the user's
+          // requested task. Wait for turn/completed so a replacement turn never
+          // overlaps the provider's still-closing turn.
+          run.pendingCapacityError = error;
+          break;
+        }
         const classified = this.classifyError(error);
         if (run.turnActive && (params.willRetry !== true || classified)) this.failTurn(run, error);
         break;
@@ -975,6 +1035,14 @@ export class CodexAppServerDriver implements ChatDriver {
       this.scheduleIdle(run);
       return;
     }
+    const failure = isCapacityError(turn.error)
+      ? turn.error
+      : (run.pendingCapacityError ?? turn.error ?? "codex turn failed");
+    if (turn.status === "failed" && this.scheduleCapacityRetry(run, failure)) return;
+
+    this.clearCapacityRetryTimer(run);
+    run.capacityRetryAttempt = 0;
+    run.pendingCapacityError = null;
     run.turnId = null;
     run.turnReady = null;
     run.interruptRequested = false;
@@ -984,7 +1052,7 @@ export class CodexAppServerDriver implements ChatDriver {
     if (turn.status === "failed") {
       this.runtime.publish(run, {
         kind: "error",
-        ...providerErrorPayload(this.classifyError, turn.error ?? "codex turn failed"),
+        ...providerErrorPayload(this.classifyError, failure),
       });
     } else {
       this.runtime.publish(run, {
@@ -997,6 +1065,9 @@ export class CodexAppServerDriver implements ChatDriver {
   }
 
   private failTurn(run: CodexRun, error: unknown): void {
+    this.clearCapacityRetryTimer(run);
+    run.capacityRetryAttempt = 0;
+    run.pendingCapacityError = null;
     run.turnId = null;
     run.turnReady = null;
     run.interruptRequested = false;
@@ -1007,6 +1078,71 @@ export class CodexAppServerDriver implements ChatDriver {
       kind: "error",
       ...providerErrorPayload(this.classifyError, error),
     });
+    this.scheduleIdle(run);
+  }
+
+  private scheduleCapacityRetry(
+    run: CodexRun,
+    error: unknown,
+    retryTurn: UserTurn = { text: CAPACITY_RETRY_PROMPT },
+  ): boolean {
+    if (!isCapacityError(error)) return false;
+    if (run.interruptRequested) {
+      this.finishCapacityRetryAsInterrupted(run);
+      return true;
+    }
+    const delayMs = this.capacityRetryDelaysMs[run.capacityRetryAttempt];
+    if (delayMs === undefined) return false;
+
+    this.clearCapacityRetryTimer(run);
+    run.capacityRetryAttempt += 1;
+    run.pendingCapacityError = null;
+    run.turnId = null;
+    run.turnReady = null;
+    run.interactions.cancelAll();
+    this.cleanupPreparedInputs(run);
+    this.flushAgentMessageStreams(run);
+    debugLog(
+      "codex",
+      `capacity retry ${run.capacityRetryAttempt}/${this.capacityRetryDelaysMs.length} for ${run.sessionId} in ${delayMs}ms`,
+    );
+
+    const timer = setTimeout(
+      () => {
+        if (run.capacityRetryTimer !== timer) return;
+        run.capacityRetryTimer = null;
+        if (!run.turnActive) return;
+        if (run.interruptRequested) {
+          this.finishCapacityRetryAsInterrupted(run);
+          return;
+        }
+        void this.startTurn(run, retryTurn, true).catch((retryError) =>
+          this.failTurn(run, retryError),
+        );
+      },
+      Math.max(0, delayMs),
+    );
+    timer.unref?.();
+    run.capacityRetryTimer = timer;
+    return true;
+  }
+
+  private clearCapacityRetryTimer(run: CodexRun): void {
+    if (run.capacityRetryTimer !== null) clearTimeout(run.capacityRetryTimer);
+    run.capacityRetryTimer = null;
+  }
+
+  private finishCapacityRetryAsInterrupted(run: CodexRun): void {
+    this.clearCapacityRetryTimer(run);
+    run.capacityRetryAttempt = 0;
+    run.pendingCapacityError = null;
+    run.turnId = null;
+    run.turnReady = null;
+    run.interruptRequested = false;
+    run.interactions.cancelAll();
+    this.cleanupPreparedInputs(run);
+    this.flushAgentMessageStreams(run);
+    this.runtime.publish(run, { kind: "result", ok: false, text: "interrupted" });
     this.scheduleIdle(run);
   }
 

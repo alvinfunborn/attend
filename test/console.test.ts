@@ -220,10 +220,14 @@ describe("renderConsole", () => {
     expect(html).toContain(
       "activeGenerationTimingText(activeGenerationTiming(commentDrawerState,commentGenStart,Date.now()))",
     );
-    expect(html).toContain("commentDrawerState.lastAssistantOutputAt=emittedAt;");
+    expect(html).toContain("var commentGenerationTimings = {};");
+    expect(html).toContain("function noteCommentGenerationActivity(thread,at)");
+    expect(html).toContain(
+      "commentDrawerState.lastAssistantOutputAt=Number(textTiming&&textTiming.lastAssistantOutputAt)||emittedAt;",
+    );
     expect(html).toContain("commentDrawerState.generating?'■ stop'");
     expect(html).not.toContain("commentDrawerState.generating?'queue':'send'");
-    expect(html).toContain("if(open) setCommentGenerating(true,ev.startedAt||ev.steeredAt);");
+    expect(html).toContain("if(open) setCommentGenerating(true,turnStartedAt);");
     expect(html).not.toContain("if(input) input.disabled=!!on;");
     expect(html).toContain('id="commentInput" rows="1"');
     expect(html).toContain('id="commentShortcutGhost" aria-hidden="true" hidden');
@@ -273,9 +277,9 @@ describe("renderConsole", () => {
       "fetch('/chat/abort?session='+encodeURIComponent(thread.providerSessionId)",
     );
     expect(html).toContain("var commentMessageCache = {};");
-    expect(html).toContain(
-      "renderCommentMessages(thread&&commentMessageCache[thread.id]||[],false);",
-    );
+    expect(html).toContain("var cachedComments=thread&&commentMessageCache[thread.id]||[];");
+    expect(html).toContain("seedCommentGenerationTiming(thread,cachedComments);");
+    expect(html).toContain("renderCommentMessages(cachedComments,false);");
     expect(html).toContain("cacheOpenCommentMessages();");
     expect(html).toContain('id="commentPromote" type="button">promote to session</button>');
     expect(html).not.toContain("button.hidden=!thread;");
@@ -370,7 +374,7 @@ describe("renderConsole", () => {
     expect(html).toContain("var row=el('div','headtag-row it-footrow');");
     expect(html).toContain("var tags=el('div','it-tags');");
     expect(html.indexOf('id="h-sig"')).toBeLessThan(html.indexOf('id="h-sub"'));
-    const sidebar = html.slice(html.indexOf("function renderSidebar(){"));
+    const sidebar = html.slice(html.indexOf("function renderSidebar(force){"));
     expect(sidebar.indexOf("renderSessionSignals(meta,s);")).toBeLessThan(
       sidebar.indexOf(
         "sessionPromptLine('it-firstline','First',s.title,null,promptAgeLabel(s,'first'))",
@@ -756,8 +760,8 @@ describe("renderConsole", () => {
 
   it("reports a lost Attend connection instead of falling back to polling", () => {
     const html = renderConsole(view);
-    expect(html).toContain("showToast('Attend is unavailable.', 'error', true);");
-    expect(html).toContain("showToast('Attend service connection restored.', 'live-restored');");
+    expect(html).toContain("showToast('Live connection unavailable.', 'error', true);");
+    expect(html).toContain("showToast('Live connection restored.', 'live-restored');");
     expect(html).toContain("liveErrorToast.parentNode.removeChild(liveErrorToast)");
     expect(html).toContain(".toast.error { position: fixed; top: 1rem; left: 50%;");
     expect(html).toContain(".toast.live-restored { position: fixed; top: 1rem; left: 50%;");
@@ -1245,7 +1249,10 @@ describe("renderConsole", () => {
     expect(html).not.toContain("el('button','qsend', turnActive ? 'waiting' : 'send')");
     const queueEditorStart = html.indexOf("function makeQueuedEditor(turn, i)");
     const queueEditorEnd = html.indexOf("// The send button doubles as Stop", queueEditorStart);
-    expect(html.slice(queueEditorStart, queueEditorEnd)).not.toContain("textarea");
+    const queueEditor = html.slice(queueEditorStart, queueEditorEnd);
+    expect(queueEditor).not.toContain("textarea");
+    expect(queueEditor).toContain("'qdispatch qsend qsave','save'");
+    expect(queueEditor).not.toContain("commit(true)");
     expect(html).not.toContain("function advanceQueuedIfIdle()");
     expect(html).not.toContain("function pumpQueuedDrafts()");
     expect(html).not.toContain("setInterval(pumpQueuedDrafts, 1000);");
@@ -1432,7 +1439,11 @@ describe("renderConsole", () => {
     expect(html).toContain('id="searchRangeMenu"');
     expect(html).toContain("var sessionSearchRange='today';");
     expect(html).toContain("function sessionMatchesSearchRange(s)");
+    expect(html).toContain(
+      "if(value==='3d') return {start:sessionSearchDayStart(-2),end:tomorrow};",
+    );
     expect(html).toContain("if(!sessionMatchesSearchRange(s)) return false;");
+    expect(html).toContain("{value:'3d',label:'Last 3 days',compact:'3 days'}");
     expect(html).toContain("{value:'custom',label:'Custom range…',compact:'Custom'}");
     expect(html).toContain("function renderSessionSearchCustomRange(menu)");
     expect(html).toContain("scheduledatetime search-range-datetime");
@@ -2632,7 +2643,7 @@ describe("renderConsole", () => {
     expect(html).toContain(
       "return Math.max(Number(s.sortTs!=null ? s.sortTs : s.lastTs)||0,latestCommentUserTsForSession(s));",
     );
-    expect(html).toContain("lastUserMessageAt:emittedAt");
+    expect(html).toContain("lastUserMessageAt:turnStartedAt");
   });
 
   it("injects discovered Codex models for the new-session model picker", () => {

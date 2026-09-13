@@ -30,6 +30,11 @@ export class WorkerSessionSearch implements SessionSearch {
     this.worker?.postMessage({ kind: "sync", sessions });
   }
 
+  syncDelta(upserts: RawSession[], removedPaths: string[]): void {
+    if (!this.worker) this.start();
+    this.worker?.postMessage({ kind: "sync_delta", upserts, removedPaths });
+  }
+
   search(
     sessions: RawSession[],
     query: string,

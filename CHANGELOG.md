@@ -2,6 +2,39 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.4 — 2026-09-14
+
+### Added
+
+- The todo hub can be moved, resized and pinned, and individual todos can be sent or queued
+  without replacing the current composer draft or marking the todo complete.
+- `attend --compact-index` safely compacts the session catalog after all Attend instances stop.
+
+### Changed
+
+- Session indexing, search synchronization and browser updates use revisioned deltas, reducing
+  repeated full-catalog reads and writes across local Attend instances.
+- HTML, browser assets and JSON responses support compression. The first session list loads
+  independently of the live stream, with bounded downloads and retry backoff.
+- Comment threads can fulfill implementation and investigation requests immediately, using the
+  same available tools and execution permissions as other workspace tasks.
+
+### Fixed
+
+- Slow session-index downloads survive newer revision notifications, and incremental updates
+  cannot replace a missing initial snapshot. Comment-history refreshes no longer block the
+  live/session handshake.
+- Sidebar and middle-panel dividers support touch dragging. Page height follows the visible
+  viewport so browser chrome and keyboard resizing do not leave the composer below the screen.
+- Session-list updates preserve the card targeted by a pointer, and session tags remain on one
+  horizontally scrollable line in the middle panel.
+- Codex capacity failures retry with a bounded backoff and can be stopped while waiting. Resuming
+  a thread omits redundant history and times out instead of indefinitely blocking later sends.
+- Codex terminal task errors are reported as failures. Comment generation timing survives
+  drawer refreshes, and queued-message edits remain synchronized.
+- Folder suggestions support keyboard navigation across pages, while transcript pins resolve
+  messages outside the currently rendered window.
+
 ## 1.3.3 — 2026-08-25
 
 ### Changed

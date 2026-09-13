@@ -8,6 +8,7 @@ export interface TranscriptPathLookup {
 /** Mutable side owned by the vendor scan pipeline. */
 export interface TranscriptPathWriter extends TranscriptPathLookup {
   set(vendor: string, sessionId: string, file: string): void;
+  delete(vendor: string, sessionId: string | null): void;
   replaceVendor(vendor: string, sessions: RawSession[]): void;
 }
 
@@ -35,6 +36,14 @@ export class TranscriptPathIndex implements TranscriptPathWriter {
       this.paths.set(vendor, entries);
     }
     entries.set(sessionId, file);
+  }
+
+  delete(vendor: string, sessionId: string | null): void {
+    if (!sessionId) return;
+    const entries = this.paths.get(vendor);
+    if (!entries) return;
+    entries.delete(sessionId);
+    if (!entries.size) this.paths.delete(vendor);
   }
 
   replaceVendor(vendor: string, sessions: RawSession[]): void {

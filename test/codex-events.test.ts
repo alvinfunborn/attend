@@ -141,6 +141,25 @@ MEMORY.md:4-8|note=[Used a prior decision]
     ]);
   });
 
+  it("does not report an errored rollout task_complete as success", () => {
+    expect(
+      toUiEventsFromCodex({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          error: {
+            message: "Selected model is at capacity. Please try a different model.",
+          },
+        },
+      }),
+    ).toEqual([
+      {
+        kind: "error",
+        message: "Selected model is at capacity. Please try a different model.",
+      },
+    ]);
+  });
+
   it("surfaces a codex usage-limit failure as an error banner (parity with Claude)", () => {
     // The real shape: a bare `error` event immediately followed by an informative
     // `turn.failed`. The empty one must emit nothing so it can't preempt (and thus

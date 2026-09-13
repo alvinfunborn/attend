@@ -332,7 +332,7 @@ describe("per-session run config in the composer rail", () => {
     }
   });
 
-  it("opens the effort picker and clears an exact /effort command after space", async () => {
+  it("opens the effort picker for trailing /effort or /e commands and removes only the command", async () => {
     let sends = 0;
     const page = await openConsole(browser, (request) => {
       if (new URL(request.url()).pathname === "/chat/send") sends += 1;
@@ -340,14 +340,14 @@ describe("per-session run config in the composer rail", () => {
     try {
       await page.locator("#list .item", { hasText: "High effort session" }).click();
       const input = page.locator("#input");
-      await input.pressSequentially("/effort");
+      await input.pressSequentially("Keep this draft /effort");
 
-      expect(await input.inputValue()).toBe("/effort");
+      expect(await input.inputValue()).toBe("Keep this draft /effort");
       expect(await page.locator("#composerRailPop").isHidden()).toBe(true);
 
       await input.press("Space");
 
-      await expect.poll(() => input.inputValue()).toBe("");
+      await expect.poll(() => input.inputValue()).toBe("Keep this draft ");
       expect(await page.locator("#composerRailPop").isVisible()).toBe(true);
       expect(await page.locator("#railEffort").getAttribute("aria-expanded")).toBe("true");
       expect(await page.locator("#composerRailPop .rail-option-label").allTextContents()).toEqual([
@@ -374,8 +374,9 @@ describe("per-session run config in the composer rail", () => {
       expect(await page.locator("#composerRailPop").isHidden()).toBe(true);
       expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(true);
 
-      await input.pressSequentially("/effort");
+      await input.pressSequentially("/e");
       await input.press("Space");
+      await expect.poll(() => input.inputValue()).toBe("Keep this draft ");
       expect(
         await page.locator("#composerRailPop .rail-option:focus .rail-option-label").textContent(),
       ).toBe("xhigh");

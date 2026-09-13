@@ -602,6 +602,64 @@ describe("console browser behavior", () => {
         .poll(() => page.locator('[data-session-id="s1"] .it-status').getAttribute("class"))
         .toContain("generating");
 
+      // A consecutive delta patches only the changed keyed row. The unrelated
+      // row keeps its DOM identity instead of paying for a full sidebar rebuild.
+      await page.locator('[data-session-id="s1"]').evaluate((row) => {
+        (globalThis as unknown as Record<string, unknown>).__unchangedIndexRow = row;
+      });
+      await page.evaluate(() => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__coldIndexEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "cold-server",
+            baseRevision: 1,
+            revision: 2,
+            pending: false,
+            upserts: [
+              {
+                vendor: "claude",
+                sessionId: "s2",
+                title: "Other session updated",
+                lastPrompt: "other prompt",
+                cwd: "/tmp/project",
+                project: "project",
+                file: "/tmp/session-2.jsonl",
+                ageDays: 0,
+                lastTs: 90,
+                prompts: 1,
+                pattern: "unknown",
+                state: null,
+                score: 5,
+                reason: "",
+                etaMin: 10,
+                brief: "Other session updated",
+                tags: [],
+              },
+            ],
+            removedSessionKeys: [],
+            knownDirs: ["/tmp/project"],
+            defaultNewDir: "/tmp/project",
+            tags: ["work"],
+            sessions1h: 2,
+            prompts1h: 5,
+            chars1h: 1250,
+            scannedAt: Date.now(),
+          }),
+        });
+      });
+      await expect
+        .poll(() => page.locator('[data-session-id="s2"]').textContent())
+        .toContain("Other session updated");
+      expect(
+        await page.locator('[data-session-id="s1"]').evaluate((row) => {
+          return (globalThis as unknown as Record<string, unknown>).__unchangedIndexRow === row;
+        }),
+      ).toBe(true);
+
       // A stale revision cannot roll the catalog back.
       await page.evaluate(() => {
         const source = (globalThis as unknown as Record<string, unknown>)
@@ -648,6 +706,126 @@ describe("console browser behavior", () => {
       }, raceView.sessions);
       await expect.poll(() => page.locator("#tagFilters").textContent()).toContain("reconnected");
       await expect.poll(() => page.locator("#sessions1h").textContent()).toBe("3");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("keeps the aimed middle-panel session fixed while an index delta reorders the list", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+    page.setDefaultTimeout(3_000);
+    const indexView: ConsoleView = {
+      ...raceView,
+      sessionIndexEpoch: "pointer-stable-index",
+      sessionIndexRevision: 1,
+    };
+    await page.addInitScript(() => {
+      localStorage.setItem("attend.sessionPanelOpen", "1");
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__pointerStableEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(indexView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      const panelSessionIds = () =>
+        page
+          .locator("#sessionPanelList .item[data-session-id]")
+          .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-id")));
+      const target = page.locator('#sessionPanelList .item[data-session-id="s2"]');
+      expect(await panelSessionIds()).toEqual(["s1", "s2"]);
+      await target.hover();
+      const targetBefore = await target.boundingBox();
+
+      await page.evaluate(() => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__pointerStableEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({
+          data: JSON.stringify({
+            kind: "session_index",
+            epoch: "pointer-stable-index",
+            baseRevision: 1,
+            revision: 2,
+            pending: false,
+            upserts: [
+              {
+                vendor: "claude",
+                sessionId: "new-top",
+                title: "New top session",
+                lastPrompt: "new activity",
+                cwd: "/tmp/project",
+                project: "project",
+                file: "/tmp/new-top.jsonl",
+                ageDays: 0,
+                lastTs: 1_000,
+                sortTs: 1_000,
+                prompts: 1,
+                pattern: "unknown",
+                state: null,
+                score: 3,
+                reason: "",
+                etaMin: 10,
+                brief: "New top session",
+                tags: [],
+              },
+            ],
+            removedSessionKeys: [],
+            tags: [],
+            scannedAt: Date.now(),
+          }),
+        });
+      });
+
+      // Fresh rows still land under a long-resting pointer, but the aimed card keeps
+      // its old grid slot instead of being displaced one row by the insertion.
+      await page.waitForTimeout(1_300);
+      expect(await panelSessionIds()).toEqual(["new-top", "s2", "s1"]);
+      const targetAfter = await target.boundingBox();
+      expect(targetAfter?.x).toBeCloseTo(targetBefore?.x ?? 0, 0);
+      if (!targetBefore) throw new Error("Missing original pointer target");
+      // Other cards can have different heights. The regression contract is
+      // that the real resting pointer still hits the originally aimed session.
+      expect(
+        await page
+          .locator("body")
+          .evaluate(
+            (body, point) =>
+              body.ownerDocument
+                .elementFromPoint(point.x, point.y)
+                ?.closest(".item")
+                ?.getAttribute("data-session-id"),
+            {
+              x: targetBefore.x + targetBefore.width / 2,
+              y: targetBefore.y + targetBefore.height / 2,
+            },
+          ),
+      ).toBe("s2");
+
+      await target.click();
+      await expect
+        .poll(() => page.locator("#chatTabs .chat-tab.on").getAttribute("data-session-id"))
+        .toBe("s2");
+      await page.locator("#msgs").hover();
+      await expect.poll(panelSessionIds).toEqual(["new-top", "s1", "s2"]);
     } finally {
       await page.close();
     }
@@ -1094,6 +1272,135 @@ describe("console browser behavior", () => {
         .toContain("left by another tab");
       expect(await page.locator("#commentQueue").textContent()).not.toContain("stuck in flight");
       expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 15_000);
+
+  it("keeps CommentPanel quiet timing across history refreshes and drawer reopen", async () => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    page.setDefaultTimeout(3_000);
+    const baseThread = commentGeneratingView.vaultState?.commentThreads?.["comment-generating"];
+    if (!baseThread) throw new Error("Missing generating comment fixture");
+    const startedAt = Date.now() - 10_000;
+    const thread = { ...baseThread, lastUserMessageAt: startedAt };
+    const timingView: ConsoleView = {
+      ...commentGeneratingView,
+      vaultState: { commentThreads: { [thread.id]: thread } },
+    };
+    let historyCalls = 0;
+    let historyVersion = "comment-timing-v1";
+    const historyMessages: Array<{
+      role: "user" | "assistant";
+      text: string;
+      tools: unknown[];
+      ts: number;
+    }> = [{ role: "user", text: "timing question", tools: [], ts: startedAt }];
+
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as Record<string, unknown>;
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          browserGlobal.__commentTimingEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(browserGlobal, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(timingView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({
+          json: [{ role: "assistant", text: "An answer with an unread comment", tools: [] }],
+        });
+      } else if (url.pathname === "/comments/messages") {
+        historyCalls += 1;
+        await route.fulfill({
+          json: {
+            ok: true,
+            epoch: "comment-timing-epoch",
+            generatedAt: Date.now(),
+            historyVersion,
+            thread,
+            messages: historyMessages,
+          },
+        });
+      } else if (url.pathname === "/chat/queue") {
+        await route.fulfill({
+          json: { ok: true, items: [], parked: false, steerable: true },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    const emit = (message: Record<string, unknown>) =>
+      page.evaluate((nextMessage) => {
+        const source = (globalThis as unknown as Record<string, unknown>)
+          .__commentTimingEventSource as {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+        source.onmessage?.({ data: JSON.stringify(nextMessage) });
+      }, message);
+
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.locator('#list .item[data-session-id="s1"] .it-comment').click();
+      await expect.poll(() => historyCalls).toBe(1);
+
+      const assistantAt = Date.now();
+      await emit({
+        kind: "session_event",
+        sessionId: thread.providerSessionId,
+        vendor: thread.vendor,
+        emittedAt: assistantAt,
+        event: { kind: "assistant_text", text: "partial comment answer" },
+      });
+      await expect
+        .poll(() => page.locator("#commentGenerating .bubble").textContent())
+        .toContain("quiet");
+
+      // A comment-index update re-renders the transcript. That DOM refresh must
+      // preserve the turn start and latest assistant activity instead of
+      // reclassifying the active turn as waiting for its first output.
+      historyMessages.push({
+        role: "assistant",
+        text: "partial comment answer",
+        tools: [],
+        ts: assistantAt,
+      });
+      historyVersion = "comment-timing-v2";
+      await emit({
+        kind: "comment_index",
+        epoch: "comment-timing-epoch",
+        generatedAt: Date.now(),
+        comments: [{ thread, historyVersion }],
+      });
+      await expect.poll(() => historyCalls).toBe(2);
+      await expect
+        .poll(() => page.locator("#commentGenerating .bubble").textContent())
+        .toContain("quiet");
+      expect(await page.locator("#commentGenerating .bubble").textContent()).not.toContain(
+        "waiting",
+      );
+
+      // Activity is also tracked while the drawer is closed, so reopening the
+      // same still-generating thread keeps the quiet clock semantics.
+      await page.locator("#commentClose").click();
+      await emit({
+        kind: "session_event",
+        sessionId: thread.providerSessionId,
+        vendor: thread.vendor,
+        emittedAt: Date.now(),
+        event: { kind: "tool_use", id: "comment-tool", name: "shell", input: {} },
+      });
+      await page.locator('#list .item[data-session-id="s1"] .it-comment').click();
+      await expect
+        .poll(() => page.locator("#commentGenerating .bubble").textContent())
+        .toContain("quiet");
     } finally {
       await page.close();
     }
@@ -4030,6 +4337,116 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it.each([
+    { source: "cached", kind: "message" },
+    { source: "cached", kind: "tool" },
+    { source: "targeted", kind: "message" },
+    { source: "targeted", kind: "tool" },
+  ])("locates a $source $kind Pin outside the virtualized DOM", async ({ source, kind }) => {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+    const historyRequests: string[] = [];
+    const history = Array.from({ length: 300 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" : "assistant",
+      text: `Historical message ${index}. ${"detail ".repeat(24)}`,
+      historyId: `m_${index}`,
+      historyOrdinal: index,
+      historyIndex: index,
+      tools:
+        index % 2 === 0
+          ? []
+          : [
+              {
+                id: `tool_${index}`,
+                name: "exec_command",
+                input: { cmd: `echo ${index}` },
+                result: `result ${index}`,
+                historyId: `t_${index}`,
+                historyOrdinal: Math.floor(index / 2),
+                historyIndex: index,
+              },
+            ],
+    }));
+    const historyId = kind === "tool" ? "t_41" : "m_41";
+    const pinView: ConsoleView = {
+      ...raceView,
+      vaultState: {
+        pins: {
+          "attend.pins.v1:s1": [
+            {
+              // A saved ordinal can differ from the current history snapshot.
+              key: kind === "tool" ? "tool:old" : "assistant:1",
+              role: kind === "tool" ? "tool" : "claude",
+              text: kind === "tool" ? "Tool: exec_command" : "Historical message 41.",
+              historyId,
+              pinnedAt: 1,
+            },
+          ],
+        },
+      },
+    };
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(pinView) });
+      } else if (url.pathname === "/chat/messages") {
+        historyRequests.push(url.search);
+        const around = url.searchParams.get("around");
+        const start = around ? 21 : source === "cached" ? 0 : 240;
+        const end = around ? 62 : history.length;
+        await route.fulfill({
+          json: {
+            ok: true,
+            messages: history.slice(start, end),
+            page: {
+              before: start,
+              hasMore: start > 0,
+              total: history.length,
+              version: "history-v1",
+              sourceTruncated: false,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({ json: { ok: true, items: [] } });
+      }
+    });
+
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator('#list .item[data-session-id="s1"]').click();
+    await expect
+      .poll(() => page.locator("#msgs").textContent())
+      .toContain("Historical message 299.");
+    const target = page.locator(`#msgs [data-history-id="${historyId}"]`);
+    expect(await target.count()).toBe(0);
+
+    await page.locator("#pinTray .pinitem").click();
+    await expect.poll(() => target.count()).toBe(1);
+    await expect
+      .poll(() =>
+        target.evaluate((node) => {
+          const host = node.closest("#msgs");
+          if (!host) return false;
+          const rect = node.getBoundingClientRect();
+          const frame = host.getBoundingClientRect();
+          return rect.top >= frame.top && rect.top < frame.bottom;
+        }),
+      )
+      .toBe(true);
+    expect(await page.locator("#msgs").getAttribute("class")).toContain("transcript-virtualized");
+    expect(await page.locator("#msgs .msg, #msgs .toolc").count()).toBeLessThan(100);
+    expect(await page.locator("#toastHost .toast.warn").count()).toBe(0);
+    expect(historyRequests).toHaveLength(source === "cached" ? 1 : 2);
+    if (source === "targeted") expect(historyRequests[1]).toContain(`around=${historyId}`);
+    await page.close();
+  });
+
   it("restores existing fork relations as a chat tab group", async () => {
     const page = await browser.newPage({
       viewport: { width: 1100, height: 800 },
@@ -5993,6 +6410,223 @@ describe("console browser behavior", () => {
     await page.close();
   }, 15_000);
 
+  it("shows only the current chat's open todos beside queued messages and sends without consuming the draft", async () => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(2_000);
+    const todo = (id: string, text: string, completed = false) => ({
+      id,
+      text,
+      completed,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const todoView: ConsoleView = {
+      ...composerRailView,
+      vaultState: {
+        ...composerRailView.vaultState,
+        sessionTodos: {
+          s1: [
+            todo("todo-1", "Verify permissions"),
+            todo("todo-2", "Check fallback"),
+            todo("done", "Already done", true),
+          ],
+          s2: [todo("other", "Other chat task")],
+        },
+        inboxTodos: [todo("inbox", "Standalone task")],
+      },
+    };
+    const sent: { session: string | null; body: unknown }[] = [];
+    const patches: unknown[] = [];
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(todoView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/queue") {
+        await route.fulfill({
+          json: {
+            ok: true,
+            items:
+              url.searchParams.get("session") === "s1"
+                ? [{ id: "queued-1", text: "Existing queue", vendor: "claude" }]
+                : [],
+            parked: true,
+          },
+        });
+      } else if (url.pathname === "/chat/send") {
+        sent.push({ session: url.searchParams.get("session"), body: request.postDataJSON() });
+        await route.fulfill({ json: { ok: true } });
+      } else if (url.pathname === "/vault/ui-state") {
+        patches.push(request.postDataJSON());
+        await route.fulfill({ json: { ok: true } });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    const rows = page.locator("#queue .qitem.todo");
+    await expect
+      .poll(() => rows.locator(".qtext").allTextContents())
+      .toEqual(["Verify permissions", "Check fallback"]);
+    await expect
+      .poll(() => page.locator("#queue .qitem:not(.todo) .qtext").textContent())
+      .toBe("Existing queue");
+    await page.locator("#input").fill("Keep this separate draft");
+    await rows.nth(0).locator(".qsend").click();
+    await expect
+      .poll(() => sent)
+      .toEqual([
+        { session: "s1", body: { text: "Verify permissions", attachments: [], references: [] } },
+      ]);
+    expect(await page.locator("#input").inputValue()).toBe("Keep this separate draft");
+    expect(await rows.count()).toBe(2);
+    expect(await page.locator("#msgs .msg.user .bubble").last().textContent()).toContain(
+      "Verify permissions",
+    );
+    await page.locator('#queue [data-todo-id="todo-1"] .rail-todo-check').click();
+    await expect.poll(() => rows.locator(".qtext").allTextContents()).toEqual(["Check fallback"]);
+    await expect
+      .poll(() => patches)
+      .toContainEqual(
+        expect.objectContaining({
+          sessionTodos: {
+            s1: expect.arrayContaining([
+              expect.objectContaining({ id: "todo-1", completed: true }),
+            ]),
+          },
+        }),
+      );
+    await page.locator("#railTodos").click();
+    await page.locator('#composerRailPop [data-rail-item-id="todo-1"] .rail-todo-check').uncheck();
+    await expect.poll(() => rows.count()).toBe(2);
+    await page.locator("#railAddInput").fill("New task");
+    await page.locator("#railAddInput").press("Enter");
+    await expect
+      .poll(() => rows.locator(".qtext").allTextContents())
+      .toEqual(["Verify permissions", "Check fallback", "New task"]);
+    await page.locator('#composerRailPop [data-rail-item-id="todo-2"] .qdel').click();
+    await expect
+      .poll(() => rows.locator(".qtext").allTextContents())
+      .toEqual(["Verify permissions", "New task"]);
+    await page.locator("#list .item", { hasText: "Other session" }).click();
+    await expect.poll(() => rows.locator(".qtext").allTextContents()).toEqual(["Other chat task"]);
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    expect(await page.locator("#input").inputValue()).toBe("Keep this separate draft");
+    await page.close();
+  }, 15_000);
+
+  it("queues a todo mid-turn and preserves both the todo and composer draft when queueing fails", async () => {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(2_000);
+    const todoView: ConsoleView = {
+      ...composerRailView,
+      vaultState: {
+        sessionTodos: {
+          s1: [
+            { id: "todo-1", text: "Check fallback", completed: false, createdAt: 1, updatedAt: 1 },
+          ],
+        },
+      },
+    };
+    const queued: unknown[] = [];
+    let failQueue = true;
+    let sendCalls = 0;
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        constructor() {
+          (globalThis as unknown as Record<string, unknown>).__todoBus = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({ contentType: "text/html", body: renderConsole(todoView) });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/queue" && request.method() === "POST") {
+        queued.push(request.postDataJSON());
+        await route.fulfill({
+          json: failQueue
+            ? { ok: false, error: "Queue unavailable" }
+            : { ok: true, items: [{ id: "queued-todo", text: "Check fallback" }], steerable: true },
+        });
+      } else if (url.pathname === "/chat/send") {
+        sendCalls++;
+        await route.fulfill({ json: { ok: true } });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    await page.locator("#input").fill("Keep my draft");
+    await page.evaluate(() => {
+      const source = (
+        globalThis as unknown as { __todoBus: { onmessage(event: { data: string }): void } }
+      ).__todoBus;
+      source.onmessage({
+        data: JSON.stringify({
+          kind: "session_event",
+          sessionId: "s1",
+          emittedAt: Date.now(),
+          event: { kind: "user_turn_started", text: "Active turn" },
+        }),
+      });
+    });
+    await page.locator("#queue .todo .qsend").click();
+    await expect.poll(() => queued.length).toBe(1);
+    await expect.poll(() => page.locator("#queue .qitem:not(.todo)").count()).toBe(0);
+    expect(await page.locator("#queue .todo .qtext").textContent()).toBe("Check fallback");
+    await page.locator("#list .item", { hasText: "Other session" }).click();
+    await page.locator("#list .item", { hasText: "Avoidance session" }).click();
+    expect(await page.locator("#input").inputValue()).toBe("Keep my draft");
+    failQueue = false;
+    await page.evaluate(() => {
+      const source = (
+        globalThis as unknown as { __todoBus: { onmessage(event: { data: string }): void } }
+      ).__todoBus;
+      source.onmessage({
+        data: JSON.stringify({
+          kind: "session_event",
+          sessionId: "s1",
+          emittedAt: Date.now(),
+          event: { kind: "user_turn_started", text: "Resumed turn" },
+        }),
+      });
+    });
+    await page.locator("#queue .todo .qsend").click();
+    await expect.poll(() => queued.length).toBe(2);
+    expect(queued[1]).toEqual({
+      text: "Check fallback",
+      attachments: [],
+      references: [],
+      goal: false,
+    });
+    await expect
+      .poll(() => page.locator("#queue .qitem:not(.todo) .qtext").textContent())
+      .toBe("Check fallback");
+    expect(await page.locator("#queue .todo").count()).toBe(1);
+    expect(await page.locator("#input").inputValue()).toBe("Keep my draft");
+    expect(sendCalls).toBe(0);
+    await page.close();
+  }, 15_000);
+
   it("keeps a half-typed rail todo focused while session data streams in", async () => {
     const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
     page.setDefaultTimeout(2_000);
@@ -6835,10 +7469,16 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("labels active queued actions as Claude append and Codex guide", async () => {
+  it("labels active queue dispatches by vendor but saves inline edits without dispatching", async () => {
     const page = await browser.newPage({
       viewport: { width: 1200, height: 900 },
     });
+    let patchedQueueText = "";
+    let queueSendCalls = 0;
+    const queueItems = [
+      { id: "queued-claude", text: "continue this answer", vendor: "claude" },
+      { id: "queued-codex", text: "focus on the tests", vendor: "codex" },
+    ];
     await page.addInitScript(() => {
       const browserGlobal = globalThis as unknown as Record<string, unknown>;
       class StubEventSource {
@@ -6854,7 +7494,8 @@ describe("console browser behavior", () => {
       });
     });
     await page.route("**/*", async (route) => {
-      const url = new URL(route.request().url());
+      const request = route.request();
+      const url = new URL(request.url());
       if (url.pathname === "/") {
         await route.fulfill({
           contentType: "text/html",
@@ -6862,14 +7503,22 @@ describe("console browser behavior", () => {
         });
       } else if (url.pathname === "/chat/messages") {
         await route.fulfill({ json: [] });
+      } else if (url.pathname === "/chat/queue" && request.method() === "PATCH") {
+        const body = request.postDataJSON() as { text?: string };
+        patchedQueueText = String(body.text ?? "");
+        const item = queueItems.find((candidate) => candidate.id === url.searchParams.get("item"));
+        if (item) item.text = patchedQueueText;
+        await route.fulfill({
+          json: { ok: true, items: queueItems, parked: false, steerable: true },
+        });
+      } else if (url.pathname === "/chat/queue/send") {
+        queueSendCalls += 1;
+        await route.fulfill({ json: { ok: true, items: queueItems, parked: false } });
       } else if (url.pathname === "/chat/queue") {
         await route.fulfill({
           json: {
             ok: true,
-            items: [
-              { id: "queued-claude", text: "continue this answer", vendor: "claude" },
-              { id: "queued-codex", text: "focus on the tests", vendor: "codex" },
-            ],
+            items: queueItems,
             parked: false,
             steerable: true,
           },
@@ -6905,7 +7554,7 @@ describe("console browser behavior", () => {
     );
 
     await queuedRows.nth(0).locator(".qedit").click();
-    await expect.poll(() => page.locator("#queue .qeditbox .qsend").textContent()).toBe("append");
+    await expect.poll(() => page.locator("#queue .qeditbox .qsave").textContent()).toBe("save");
     await page.locator("#queue .qeditta").fill("continue this edited answer");
     await page.evaluate(() => {
       const source = (globalThis as unknown as Record<string, unknown>).__attendEventSource as {
@@ -6920,12 +7569,19 @@ describe("console browser behavior", () => {
         }),
       });
     });
-    await expect.poll(() => page.locator("#queue .qeditta").inputValue()).toBe(
-      "continue this edited answer",
-    );
+    await expect
+      .poll(() => page.locator("#queue .qeditta").inputValue())
+      .toBe("continue this edited answer");
     await page.locator("#queue .qeditta").press("Escape");
     await queuedRows.nth(1).locator(".qedit").click();
-    await expect.poll(() => page.locator("#queue .qeditbox .qsend").textContent()).toBe("guide");
+    await expect.poll(() => page.locator("#queue .qeditbox .qsave").textContent()).toBe("save");
+    await page.locator("#queue .qeditta").fill("focus on the edited tests");
+    await page.locator("#queue .qeditbox .qsave").click();
+    await expect.poll(() => patchedQueueText).toBe("focus on the edited tests");
+    await expect
+      .poll(() => queuedRows.nth(1).locator(".qtext").textContent())
+      .toBe("focus on the edited tests");
+    expect(queueSendCalls).toBe(0);
     await page.close();
   });
 
@@ -8144,7 +8800,7 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("loads additional project folders after the first suggestion page", async () => {
+  it("navigates recent and folder suggestions with arrow keys without restarting the query", async () => {
     const page = await browser.newPage();
     await page.addInitScript(() => {
       class StubEventSource {
@@ -8154,50 +8810,161 @@ describe("console browser behavior", () => {
       Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
     });
     const root = "/work/projects";
-    const folders = Array.from({ length: 55 }, (_, index) => ({
-      path: `${root}/folder-${String(index).padStart(2, "0")}`,
-      source: "folder",
-    }));
-    const offsets: number[] = [];
+    const recentDirs = ["attend", "rain", "math-research"].map((name) => `${root}/${name}`);
+    const folders = Array.from({ length: 8 }, (_, index) => `${root}/folder-${index}`);
+    const values = [...recentDirs, ...folders];
+    let requests = 0;
     await page.route("**/*", (route) => {
       const url = new URL(route.request().url());
       if (url.pathname === "/") {
         return route.fulfill({
           contentType: "text/html",
-          body: renderConsole({ ...view, scopeRoots: [root], defaultNewDir: root }),
+          body: renderConsole({
+            ...view,
+            knownDirs: recentDirs,
+            scopeRoots: [root],
+            defaultNewDir: root,
+          }),
         });
       }
       if (url.pathname === "/dirs/suggest") {
-        const offset = Number(url.searchParams.get("offset") ?? 0);
-        const limit = Number(url.searchParams.get("limit") ?? 24);
-        offsets.push(offset);
+        requests++;
         return route.fulfill({
-          json: {
-            dirs: folders.slice(offset, offset + limit),
-            hasMore: offset + limit < folders.length,
-          },
+          json: { dirs: folders.map((path) => ({ path, source: "folder" })), hasMore: false },
         });
       }
       return route.fulfill({ json: {} });
     });
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
-
     await page.locator("#newToggle").click();
-    await page.locator("#ndir").focus();
-    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(24);
-    expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe("Load more folders");
-    await page.locator("#ndirSug").evaluate((drop) => {
-      drop.scrollTop = drop.scrollHeight;
-      drop.dispatchEvent(new Event("scroll"));
+    const input = page.locator("#ndir");
+    const active = page.locator("#ndirSug .chooser-opt.on");
+    await input.focus();
+    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(values.length);
+
+    for (const value of values) {
+      await input.press("ArrowDown");
+      expect(await active.getAttribute("data-value")).toBe(value);
+    }
+    const placement = await active.evaluate((option) => {
+      const drop = option.parentElement;
+      if (!drop) throw new Error("Missing directory dropdown");
+      const itemRect = option.getBoundingClientRect();
+      const dropRect = drop.getBoundingClientRect();
+      return {
+        scrollTop: drop.scrollTop,
+        visible: itemRect.top >= dropRect.top && itemRect.bottom <= dropRect.bottom,
+      };
     });
-    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(48);
-    expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe("Load more folders");
-    await page.locator("#ndirSug .chooser-more").click();
-    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(55);
-    expect(await page.locator("#ndirSug .chooser-more").count()).toBe(0);
-    expect(offsets).toEqual([0, 24, 48]);
+    expect(placement.scrollTop).toBeGreaterThan(0);
+    expect(placement.visible).toBe(true);
+    await input.press("ArrowDown");
+    expect(await active.getAttribute("data-value")).toBe(values[0]);
+    await input.press("ArrowUp");
+    expect(await active.getAttribute("data-value")).toBe(values.at(-1));
+    await input.press("Escape");
+    await input.press("ArrowUp");
+    expect(await active.getAttribute("data-value")).toBe(values.at(-1));
+    expect(requests).toBe(1);
+    await input.press("Enter");
+    expect(await input.inputValue()).toBe(values.at(-1));
+    expect(await page.locator("#ndirSug").isHidden()).toBe(true);
+    await input.fill(`${root}/folder-`);
+    await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(folders.length);
+    expect(requests).toBe(2);
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    expect(await input.inputValue()).toBe(folders[0]);
     await page.close();
   });
+
+  it.each(["scroll", "keyboard"])(
+    "loads additional project folders using %s",
+    async (navigation) => {
+      const page = await browser.newPage();
+      await page.addInitScript(() => {
+        class StubEventSource {
+          static readonly CLOSED = 2;
+          close() {}
+        }
+        Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      });
+      const root = "/work/projects";
+      const folders = Array.from({ length: 55 }, (_, index) => ({
+        path: `${root}/folder-${String(index).padStart(2, "0")}`,
+        source: "folder",
+      }));
+      const offsets: number[] = [];
+      let releasePage: (() => void) | undefined;
+      await page.route("**/*", async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/") {
+          return route.fulfill({
+            contentType: "text/html",
+            body: renderConsole({ ...view, scopeRoots: [root], defaultNewDir: root }),
+          });
+        }
+        if (url.pathname === "/dirs/suggest") {
+          const offset = Number(url.searchParams.get("offset") ?? 0);
+          const limit = Number(url.searchParams.get("limit") ?? 24);
+          offsets.push(offset);
+          if (navigation === "keyboard" && offset > 0) {
+            await new Promise<void>((resolve) => {
+              releasePage = resolve;
+            });
+          }
+          return route.fulfill({
+            json: {
+              dirs: folders.slice(offset, offset + limit),
+              hasMore: offset + limit < folders.length,
+            },
+          });
+        }
+        return route.fulfill({ json: {} });
+      });
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+
+      await page.locator("#newToggle").click();
+      await page.locator("#ndir").focus();
+      await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(24);
+      expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe("Load more folders");
+      if (navigation === "keyboard") {
+        const input = page.locator("#ndir");
+        const active = page.locator("#ndirSug .chooser-opt.on");
+        for (const [index, folder] of folders.entries()) {
+          await input.press("ArrowDown");
+          if (index > 0 && index % 24 === 0) {
+            await expect.poll(() => offsets.at(-1)).toBe(index);
+            expect(await active.getAttribute("data-value")).toBe(folders[index - 1]?.path);
+            if (!releasePage) throw new Error("Missing pending directory page");
+            releasePage();
+            releasePage = undefined;
+          }
+          await expect.poll(() => active.getAttribute("data-value")).toBe(folder.path);
+        }
+        await input.press("ArrowDown");
+        expect(await active.getAttribute("data-value")).toBe(folders[0]?.path);
+        await input.press("ArrowUp");
+        expect(await active.getAttribute("data-value")).toBe(folders.at(-1)?.path);
+        await input.press("Enter");
+        expect(await input.inputValue()).toBe(folders.at(-1)?.path);
+      } else {
+        await page.locator("#ndirSug").evaluate((drop) => {
+          drop.scrollTop = drop.scrollHeight;
+          drop.dispatchEvent(new Event("scroll"));
+        });
+        await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(48);
+        expect(await page.locator("#ndirSug .chooser-more").textContent()).toBe(
+          "Load more folders",
+        );
+        await page.locator("#ndirSug .chooser-more").click();
+      }
+      await expect.poll(() => page.locator("#ndirSug .chooser-opt").count()).toBe(55);
+      expect(await page.locator("#ndirSug .chooser-more").count()).toBe(0);
+      expect(offsets).toEqual([0, 24, 48]);
+      await page.close();
+    },
+  );
 
   it("returns to All when the selected non-All view is clicked again", async () => {
     const page = await browser.newPage();
@@ -9965,9 +10732,9 @@ describe("console browser behavior", () => {
       ...raceView,
       sessions: raceView.sessions.map((session, index) => ({
         ...session,
-        lastTs: index === 0 ? now : now - 3 * 86_400_000,
-        sortTs: index === 0 ? now : now - 3 * 86_400_000,
-        ageDays: index === 0 ? 0 : 3,
+        lastTs: index === 0 ? now : now - 2 * 86_400_000,
+        sortTs: index === 0 ? now : now - 2 * 86_400_000,
+        ageDays: index === 0 ? 0 : 2,
       })),
     };
     await page.addInitScript(() => {
@@ -10005,9 +10772,9 @@ describe("console browser behavior", () => {
     expect(await page.locator('#searchRangeMenu [aria-selected="true"]').textContent()).toContain(
       "Today",
     );
-    await page.locator('.search-range-option[data-range="7d"]').click();
+    await page.locator('.search-range-option[data-range="3d"]').click();
 
-    expect(await page.locator("#searchRangeText").textContent()).toBe("7 days");
+    expect(await page.locator("#searchRangeText").textContent()).toBe("3 days");
     expect(await page.locator("#list .item").count()).toBe(2);
     expect(await page.locator("#searchRangeMenu").isHidden()).toBe(true);
 
@@ -10044,8 +10811,8 @@ describe("console browser behavior", () => {
         return { start: format(start), end: format(end) };
       },
       {
-        start: now - 3 * 86_400_000 - 3_600_000,
-        end: now - 3 * 86_400_000 + 3_600_000,
+        start: now - 2 * 86_400_000 - 3_600_000,
+        end: now - 2 * 86_400_000 + 3_600_000,
       },
     );
     await page.locator("#searchRangeCustomStart").fill(localDateTimeValues.end);
@@ -12218,6 +12985,10 @@ describe("console browser behavior", () => {
     await page.locator("#todoHubToggle").click();
     expect(await page.locator("#newbox").getAttribute("class")).not.toContain("open");
     expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
+    const firstTodoBox = await page.locator("#todoHub").boundingBox();
+    if (!firstTodoBox) throw new Error("Missing Todo panel geometry");
+    expect(Math.abs(firstTodoBox.x + firstTodoBox.width / 2 - 600)).toBeLessThanOrEqual(2);
+    expect(Math.abs(firstTodoBox.y + firstTodoBox.height / 2 - 410)).toBeLessThanOrEqual(2);
     expect(await page.locator("#todoHub").textContent()).toContain("Triage the release");
     expect(await page.locator("#todoHub").textContent()).toContain("Verify the migration");
     expect(
@@ -12274,17 +13045,64 @@ describe("console browser behavior", () => {
     await page.locator("#todoHubClose").click();
     await page.locator("#sessionPanelToggle").click();
     await page.locator("#todoHubToggle").click();
-    expect(await page.locator("#todoHub").getAttribute("class")).toContain("panel-hosted");
-    const [todoBox, sessionPanel] = await Promise.all([
-      page.locator("#todoHub").boundingBox(),
-      page.locator("#sessionPanel").boundingBox(),
-    ]);
-    if (!todoBox || !sessionPanel) throw new Error("Missing Todo popover geometry");
-    expect(todoBox.x).toBeGreaterThanOrEqual(sessionPanel.x - 20);
-    expect(todoBox.x + todoBox.width).toBeLessThanOrEqual(sessionPanel.x + sessionPanel.width);
+    const centeredTodoBox = await page.locator("#todoHub").boundingBox();
+    if (!centeredTodoBox) throw new Error("Missing centered Todo panel geometry");
+    expect(Math.abs(centeredTodoBox.x + centeredTodoBox.width / 2 - 600)).toBeLessThanOrEqual(2);
+    expect(Math.abs(centeredTodoBox.y + centeredTodoBox.height / 2 - 410)).toBeLessThanOrEqual(2);
+
+    const dragHandle = await page.locator("#todoHubDragHandle").boundingBox();
+    if (!dragHandle) throw new Error("Missing Todo panel drag handle");
+    await page.mouse.move(
+      dragHandle.x + dragHandle.width / 2,
+      dragHandle.y + dragHandle.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      dragHandle.x + dragHandle.width / 2 - 80,
+      dragHandle.y + dragHandle.height / 2 - 60,
+      { steps: 4 },
+    );
+    await page.mouse.up();
+    const draggedTodoBox = await page.locator("#todoHub").boundingBox();
+    if (!draggedTodoBox) throw new Error("Missing dragged Todo panel geometry");
+    expect(draggedTodoBox.x).toBeLessThan(centeredTodoBox.x - 50);
+    expect(draggedTodoBox.y).toBeLessThan(centeredTodoBox.y - 30);
+
+    const resizeHandle = await page.locator("#todoHubResizeHandle").boundingBox();
+    if (!resizeHandle) throw new Error("Missing Todo panel resize handle");
+    await page.mouse.move(
+      resizeHandle.x + resizeHandle.width / 2,
+      resizeHandle.y + resizeHandle.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      resizeHandle.x + resizeHandle.width / 2 + 100,
+      resizeHandle.y + resizeHandle.height / 2 + 70,
+      { steps: 4 },
+    );
+    await page.mouse.up();
+    const resizedTodoBox = await page.locator("#todoHub").boundingBox();
+    if (!resizedTodoBox) throw new Error("Missing resized Todo panel geometry");
+    expect(resizedTodoBox.width).toBeGreaterThan(draggedTodoBox.width + 70);
+    expect(resizedTodoBox.height).toBeGreaterThan(draggedTodoBox.height + 40);
+    expect(Math.abs(resizedTodoBox.x - draggedTodoBox.x)).toBeLessThanOrEqual(2);
+    expect(Math.abs(resizedTodoBox.y - draggedTodoBox.y)).toBeLessThanOrEqual(2);
+
+    await page.locator("#todoHubPin").click();
+    expect(await page.locator("#todoHubPin").getAttribute("aria-pressed")).toBe("true");
+    await page.locator("#newToggle").click();
+    expect(await page.locator("#newbox").getAttribute("class")).toContain("open");
+    expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
+    await page.locator("#newClose").click();
+    await page.locator("#sessionPanelToggle").click();
+    expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
 
     await page.locator('.todohub-item[data-todo-id="session-1"] .todohub-text').click();
     await expect.poll(() => page.locator("#h-title").textContent()).toContain("Avoidance session");
+    expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
+    await page.locator("#todoHubPin").click();
+    await page.locator("#sessionPanelToggle").click();
+    expect(await page.locator("#todoHub").getAttribute("class")).not.toContain("open");
     await page.locator("#railTodos").click();
     expect(await page.locator("#composerRailPop").textContent()).toContain("Verify the migration");
     await page.close();

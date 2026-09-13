@@ -26,6 +26,8 @@ export interface CodexItem {
   aggregated_output?: string;
   exit_code?: number | null;
   status?: string;
+  /** Rollout task_complete may carry a terminal provider error. */
+  error?: unknown;
   /** mcp_tool_call */
   name?: string;
   arguments?: unknown;
@@ -55,9 +57,14 @@ export interface CodexEvent {
  * the terminal instead of the empty one preempting — and thereby suppressing —
  * it in the engine.
  */
-function errText(error: CodexEvent["error"]): string | null {
+function errText(error: unknown): string | null {
   if (!error) return null;
-  const msg = typeof error === "string" ? error : (error.message ?? "");
+  const msg =
+    typeof error === "string"
+      ? error
+      : typeof error === "object"
+        ? String((error as { message?: unknown }).message ?? "")
+        : "";
   return msg.trim() || null;
 }
 
@@ -143,7 +150,11 @@ export function toUiEventsFromCodex(ev: CodexEvent): UiEvent[] {
     }
 
     case "event_msg":
-      if (ev.payload?.type === "task_complete") out.push({ kind: "result", ok: true });
+      if (ev.payload?.type === "task_complete") {
+        const message = errText(ev.payload.error);
+        if (message) out.push({ kind: "error", message });
+        else out.push({ kind: "result", ok: true });
+      }
       break;
 
     case "thread.started":

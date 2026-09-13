@@ -160,6 +160,19 @@ MEMORY.md:1-2|note=[Used prior context]
         payload: {
           type: "message",
           role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "<attend_auto_retry>continue after capacity error</attend_auto_retry>",
+            },
+          ],
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
           content: [{ type: "input_text", text: "now add the transcript" }],
         },
       },

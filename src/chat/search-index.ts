@@ -85,6 +85,26 @@ export class PersistentTranscriptSearchIndex {
     for (const session of sessions) this.indexIfChanged(session);
   }
 
+  syncDelta(upserts: RawSession[], removedPaths: string[]): void {
+    const paths = [...new Set(removedPaths.filter(Boolean))];
+    if (paths.length) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const removeText = this.db.prepare("DELETE FROM transcript_search_fts WHERE file = ?");
+        const removeFile = this.db.prepare("DELETE FROM transcript_search_files WHERE file = ?");
+        for (const file of paths) {
+          removeText.run(file);
+          removeFile.run(file);
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    for (const session of upserts) this.indexIfChanged(session);
+  }
+
   search(
     sessions: RawSession[],
     query: string,

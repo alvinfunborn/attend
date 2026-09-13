@@ -26,6 +26,19 @@ const ROLLOUT = [
   },
   {
     type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: "<attend_auto_retry>continue after capacity error</attend_auto_retry>",
+        },
+      ],
+    },
+  },
+  {
+    type: "response_item",
     timestamp: "2026-06-01T13:02:00.000Z",
     payload: {
       type: "message",
@@ -72,7 +85,7 @@ describe("readCodexTranscript", () => {
     fs.writeFileSync(file, ROLLOUT.map((l) => JSON.stringify(l)).join("\n"));
     const msgs = readCodexTranscript(file);
 
-    // developer turn + the synthetic <environment_context> user turn are dropped
+    // Developer and synthetic environment/automatic-retry turns are dropped.
     expect(msgs.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(msgs[0]).toMatchObject({ role: "user", text: "run pwd" });
     expect(msgs[0]?.ts).toBe(Date.parse("2026-06-01T13:01:00.000Z"));

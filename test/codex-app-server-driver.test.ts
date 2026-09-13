@@ -124,6 +124,20 @@ class RejectInterruptAppServer extends FakeAppServer {
   }
 }
 
+class CapacityOnceAppServer extends FakeAppServer {
+  private turnStarts = 0;
+
+  override async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method !== "turn/start") return super.request<T>(method, params);
+    this.requests.push({ method, params });
+    this.turnStarts += 1;
+    if (this.turnStarts === 1) {
+      throw new Error("Selected model is at capacity. Please try a different model.");
+    }
+    return { turn: { id: "turn-2", status: "inProgress" } } as T;
+  }
+}
+
 describe("CodexAppServerDriver", () => {
   it("restores the provider-returned configuration when resuming cold", async () => {
     const client = new FakeAppServer();
@@ -748,6 +762,127 @@ MEMORY.md:20-24|note=[Used prior routing context]
       code: "codex_auth_required",
       command: "codex login",
     });
+  });
+
+  it("continues a capacity-interrupted Codex task without ending the Attend turn", async () => {
+    vi.useFakeTimers();
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client, 60_000, [100]);
+    try {
+      const ended: string[] = [];
+      driver.onTurnEnd((sessionId) => ended.push(sessionId));
+      const id = await driver.start({ cwd: "/repo", firstText: "finish the deployment" });
+      const events: UiEvent[] = [];
+      driver.subscribe(id, (event) => events.push(event));
+
+      const capacityError = {
+        message: "Selected model is at capacity. Please try a different model.",
+        codexErrorInfo: "server_overloaded",
+      };
+      client.emit({
+        method: "error",
+        params: {
+          threadId: id,
+          turnId: "turn-1",
+          willRetry: false,
+          error: capacityError,
+        },
+      });
+      expect(driver.activeSessions()).toEqual([id]);
+      client.emit({
+        method: "turn/completed",
+        params: {
+          threadId: id,
+          turn: { id: "turn-1", status: "failed", error: null },
+        },
+      });
+
+      expect(driver.activeSessions()).toEqual([id]);
+      expect(ended).toEqual([]);
+      expect(events.some((event) => event.kind === "error" || event.kind === "result")).toBe(false);
+
+      client.nextTurn = "turn-2";
+      await vi.advanceTimersByTimeAsync(100);
+      const retry = client.requests.filter((request) => request.method === "turn/start").at(-1);
+      expect(retry).toMatchObject({
+        params: {
+          threadId: id,
+          input: [
+            {
+              type: "text",
+              text: expect.stringContaining("<attend_auto_retry>"),
+            },
+          ],
+        },
+      });
+
+      client.emit({
+        method: "turn/completed",
+        params: { threadId: id, turn: { id: "turn-2", status: "completed" } },
+      });
+      expect(events).toContainEqual({ kind: "result", ok: true });
+      expect(ended).toEqual([id]);
+      expect(driver.activeSessions()).toEqual([]);
+    } finally {
+      driver.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resends the original input when capacity rejects turn/start before it is persisted", async () => {
+    vi.useFakeTimers();
+    const client = new CapacityOnceAppServer();
+    const driver = new CodexAppServerDriver(client, 60_000, [100]);
+    try {
+      const id = await driver.start({ cwd: "/repo", firstText: "ship the original task" });
+      expect(driver.activeSessions()).toEqual([id]);
+      await vi.advanceTimersByTimeAsync(100);
+
+      const starts = client.requests.filter((request) => request.method === "turn/start");
+      expect(starts).toHaveLength(2);
+      expect(starts[1]).toMatchObject({
+        params: {
+          input: [{ type: "text", text: "ship the original task" }],
+        },
+      });
+    } finally {
+      driver.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets Stop cancel a pending capacity retry before it creates another turn", async () => {
+    vi.useFakeTimers();
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client, 60_000, [1_000]);
+    try {
+      const id = await driver.start({ cwd: "/repo", firstText: "keep working" });
+      const events: UiEvent[] = [];
+      driver.subscribe(id, (event) => events.push(event));
+      client.emit({
+        method: "turn/completed",
+        params: {
+          threadId: id,
+          turn: {
+            id: "turn-1",
+            status: "failed",
+            error: {
+              message: "Selected model is at capacity. Please try a different model.",
+              codexErrorInfo: "server_overloaded",
+            },
+          },
+        },
+      });
+
+      expect(await driver.interrupt(id)).toBe(true);
+      expect(events).toContainEqual({ kind: "result", ok: false, text: "interrupted" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(client.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+      expect(driver.activeSessions()).toEqual([]);
+    } finally {
+      driver.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   it("surfaces the app-server usage-limit notification once without waiting for completion", async () => {

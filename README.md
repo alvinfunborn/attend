@@ -195,9 +195,13 @@ attend [dirs...] [options]
   -c, --config <path>          Path to attend.config.json
       --no-open                Do not open the browser
       --e2ee-passphrase <text> Encrypt browser/server API payloads
+      --compact-index          Compact the session index and exit
   -v, --version                Show the installed version
   -h, --help                   Help
 ```
+
+Stop every Attend instance before running `attend --compact-index`; the command
+refuses to compact while a live scan leader owns the index.
 
 ## Development
 

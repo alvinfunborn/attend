@@ -2,6 +2,11 @@ import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import type { AttendConfig } from "../../config.js";
 import type { RawSession } from "../types.js";
+import {
+  type SessionIndexDelta,
+  type SessionIndexMetrics,
+  sessionIndexKey,
+} from "./session-index-protocol.js";
 import type { TranscriptPathWriter } from "./transcript-index.js";
 
 export interface SessionIndexSnapshot {
@@ -10,15 +15,10 @@ export interface SessionIndexSnapshot {
   scannedAt: number;
   pending: boolean;
   sessions: RawSession[];
+  /** Present only when this revision arrived through the compact worker journal. */
+  delta?: SessionIndexDelta;
   error?: string;
-  metrics?: {
-    durationMs: number;
-    files: number;
-    leader: boolean;
-    parsedBytes: number;
-    parsedFiles: number;
-    cacheHits: number;
-  };
+  metrics?: SessionIndexMetrics;
 }
 
 export interface SessionIndex {
@@ -46,6 +46,7 @@ export interface SessionIndexWorkerConfig {
 
 type WorkerMessage =
   | { kind: "snapshot"; snapshot: SessionIndexSnapshot }
+  | { kind: "delta"; delta: SessionIndexDelta }
   | { kind: "error"; error: string };
 
 function workerEntry(): URL {
@@ -90,6 +91,7 @@ export class WorkerSessionIndex implements SessionIndex {
   };
   private readonly listeners = new Set<(snapshot: SessionIndexSnapshot) => void>();
   private readonly byProviderId = new Map<string, RawSession>();
+  private readonly bySessionKey = new Map<string, RawSession>();
   private readonly ownerId = `${process.pid}:${crypto.randomUUID()}`;
   private worker: Worker | null = null;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -146,6 +148,7 @@ export class WorkerSessionIndex implements SessionIndex {
     this.worker = worker;
     worker.on("message", (message: WorkerMessage) => {
       if (message.kind === "snapshot") this.applySnapshot(message.snapshot);
+      else if (message.kind === "delta") this.applyDelta(message.delta);
       else this.applyError(message.error);
     });
     worker.on("error", (error) => this.applyError(error.message));
@@ -166,10 +169,12 @@ export class WorkerSessionIndex implements SessionIndex {
     // rebuilding the provider maps and notifying every subscriber would be pure
     // waste. A lower revision is a stale straggler. Only a newer state proceeds.
     if (snapshot.epoch === this.current.epoch && snapshot.revision <= this.current.revision) return;
-    this.current = snapshot;
+    this.current = { ...snapshot, delta: undefined };
     this.byProviderId.clear();
+    this.bySessionKey.clear();
     const byVendor = new Map<string, RawSession[]>();
     for (const session of snapshot.sessions) {
+      this.bySessionKey.set(sessionIndexKey(session), session);
       if (session.sessionId)
         this.byProviderId.set(`${session.vendor}\u0000${session.sessionId}`, session);
       const sessions = byVendor.get(session.vendor) ?? [];
@@ -181,7 +186,44 @@ export class WorkerSessionIndex implements SessionIndex {
         this.transcriptIndex.replaceVendor(vendor, byVendor.get(vendor) ?? []);
       }
     }
-    for (const listener of this.listeners) listener(snapshot);
+    for (const listener of this.listeners) listener(this.current);
+  }
+
+  private applyDelta(delta: SessionIndexDelta): void {
+    if (delta.epoch !== this.current.epoch || delta.baseRevision !== this.current.revision) {
+      // Worker messages are ordered, so this is only expected after a worker
+      // recovery or retained-journal gap. Ask for one authoritative snapshot.
+      this.worker?.postMessage({ kind: "resync" });
+      return;
+    }
+    if (delta.revision <= this.current.revision) return;
+
+    for (const removal of delta.removed) {
+      this.bySessionKey.delete(removal.key);
+      if (removal.sessionId)
+        this.byProviderId.delete(`${removal.vendor}\u0000${removal.sessionId}`);
+      this.transcriptIndex?.delete(removal.vendor, removal.sessionId);
+    }
+    for (const session of delta.upserts) {
+      this.bySessionKey.set(sessionIndexKey(session), session);
+      if (session.sessionId)
+        this.byProviderId.set(`${session.vendor}\u0000${session.sessionId}`, session);
+      if (session.sessionId)
+        this.transcriptIndex?.set(session.vendor, session.sessionId, session.path);
+    }
+
+    this.current = {
+      ...this.current,
+      epoch: delta.epoch,
+      revision: delta.revision,
+      scannedAt: delta.scannedAt,
+      pending: delta.pending,
+      sessions: [...this.bySessionKey.values()],
+      delta,
+      metrics: delta.metrics ?? this.current.metrics,
+      error: undefined,
+    };
+    for (const listener of this.listeners) listener(this.current);
   }
 
   private applyError(error: string): void {

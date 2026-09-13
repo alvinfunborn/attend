@@ -31,6 +31,13 @@ bounded incremental vacuum. WAL is capped at 4 MiB. Cleanup is opportunistic:
 failure never prevents the server from starting, and another daily run can
 recover.
 
+The separate session/search catalog at `~/.attend/index-v3.sqlite3` keeps a
+bounded revision-delta journal and does not rewrite its full session JSON for a
+no-op scan. New indexes use incremental vacuum. To reclaim historical free pages
+from an older, inflated index, stop every Attend instance and run
+`attend --compact-index`; the command refuses to proceed while a live scan lease
+is present.
+
 Legacy JSON files are retained as migration backups and are not subject to the
 SQLite retention job. They can be archived or deleted manually after the new
 database has been verified. Vendor transcripts and vendor-owned caches remain

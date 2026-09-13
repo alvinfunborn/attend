@@ -3,6 +3,7 @@ import type { SessionSearchResult } from "./search.js";
 
 export interface SessionSearch {
   sync?(sessions: RawSession[]): void;
+  syncDelta?(upserts: RawSession[], removedPaths: string[]): void;
   search(
     sessions: RawSession[],
     query: string,

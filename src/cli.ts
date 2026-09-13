@@ -27,6 +27,7 @@ Options:
       --no-open        Do not open the browser on start
       --e2ee-passphrase <text>
                      Encrypt browser/server API payloads with this passphrase
+      --compact-index Compact the session index and exit (stop all Attend instances first)
   -v, --version        Show the installed version
   -h, --help           Show this help
 
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
       config: { type: "string", short: "c" },
       "no-open": { type: "boolean" },
       "e2ee-passphrase": { type: "string" },
+      "compact-index": { type: "boolean" },
       version: { type: "boolean", short: "v" },
       help: { type: "boolean", short: "h" },
     },
@@ -81,6 +83,16 @@ async function main(): Promise<void> {
     noOpen: values["no-open"],
     e2eePassphrase: values["e2ee-passphrase"],
   });
+
+  if (values["compact-index"]) {
+    const { compactSessionIndexDatabase } = await import("./core/vendor/session-index-store.js");
+    const result = compactSessionIndexDatabase(config.sessionIndex);
+    const mib = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1);
+    process.stdout.write(
+      `attend: compacted session index ${mib(result.beforeBytes)} MiB -> ${mib(result.afterBytes)} MiB\n`,
+    );
+    return;
+  }
 
   const { startServer } = await import("./server.js");
   const server = await startServer(config);
