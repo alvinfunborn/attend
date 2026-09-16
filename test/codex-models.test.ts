@@ -33,6 +33,7 @@ describe("readCodexModelOptions", () => {
 
     expect(calls).toEqual([["debug", "models"]]);
     expect(inspection).toEqual({
+      source: "live",
       models: [
         {
           value: "gpt-5.6-sol",

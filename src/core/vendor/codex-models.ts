@@ -88,6 +88,7 @@ export function defaultCodexModelsCachePath(): string {
 export interface CodexModelCacheInspection {
   models: ModelOption[];
   warning: string | null;
+  source?: "live" | "bundled" | "cache";
 }
 
 interface CodexModelCommandResult {
@@ -125,13 +126,14 @@ export function inspectCodexModels(
   if (codexBin) {
     const live = run(codexBin, ["debug", "models"]);
     const liveModels = live.status === 0 ? inspectCatalogJson(live.stdout) : [];
-    if (liveModels.length) return { models: liveModels, warning: null };
+    if (liveModels.length) return { models: liveModels, warning: null, source: "live" };
 
     const bundled = run(codexBin, ["debug", "models", "--bundled"]);
     const bundledModels = bundled.status === 0 ? inspectCatalogJson(bundled.stdout) : [];
     if (bundledModels.length) {
       return {
         models: bundledModels,
+        source: "bundled",
         warning: "Live Codex model discovery failed; using the catalog bundled with Codex.",
       };
     }
@@ -141,6 +143,7 @@ export function inspectCodexModels(
   if (cached.models.length) {
     return {
       models: cached.models,
+      source: "cache",
       warning: "Codex CLI model discovery is unavailable; using its internal cache as fallback.",
     };
   }
@@ -156,13 +159,14 @@ export async function inspectCodexModelsAsync(
   if (codexBin) {
     const live = await runMetadataCommand(codexBin, ["debug", "models"], 15_000);
     const liveModels = live.status === 0 ? inspectCatalogJson(live.stdout) : [];
-    if (liveModels.length) return { models: liveModels, warning: null };
+    if (liveModels.length) return { models: liveModels, warning: null, source: "live" };
 
     const bundled = await runMetadataCommand(codexBin, ["debug", "models", "--bundled"], 15_000);
     const bundledModels = bundled.status === 0 ? inspectCatalogJson(bundled.stdout) : [];
     if (bundledModels.length) {
       return {
         models: bundledModels,
+        source: "bundled",
         warning: "Live Codex model discovery failed; using the catalog bundled with Codex.",
       };
     }
@@ -171,6 +175,7 @@ export async function inspectCodexModelsAsync(
   if (cached.models.length) {
     return {
       models: cached.models,
+      source: "cache",
       warning: "Codex CLI model discovery is unavailable; using its internal cache as fallback.",
     };
   }

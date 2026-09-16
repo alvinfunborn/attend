@@ -12,6 +12,9 @@ export default defineConfig({
   format: ["esm"],
   target: "node22",
   platform: "node",
+  // Preserve the optional SDK's own runtime paths and lazy-import failure path.
+  // It must never be bundled together with its native runtime loader.
+  external: ["@github/copilot-sdk"],
   clean: true,
   removeNodeProtocol: false,
   // `node:sqlite` has no bare `sqlite` alias. Preserve explicit builtin

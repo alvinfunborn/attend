@@ -8,9 +8,8 @@ export interface ProcessCliModelInspection {
   models: ModelOption[];
   defaults: ModelDefaults;
   warning: string | null;
+  source?: "cli" | "account" | "help" | "unavailable";
 }
-
-const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function clean(raw: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI SGR starts with ESC.
@@ -18,14 +17,14 @@ function clean(raw: string): string {
 }
 
 /** Parse the line/table format used by `agy models`. */
-export function parseProcessCliModels(raw: string, efforts: string[]): ModelOption[] {
+export function parseProcessCliModels(raw: string, _efforts: string[] = []): ModelOption[] {
   const seen = new Set<string>();
   const models: ModelOption[] = [];
   for (const sourceLine of clean(raw).split(/\r?\n/)) {
     const line = sourceLine.trim().replace(/^[*•-]\s+/, "");
     const match =
       line.match(/^([A-Za-z0-9][A-Za-z0-9._:/-]+)\s+-\s+(.+?)(?:\s+\((?:default|current)\))?$/) ??
-      line.match(/^([A-Za-z0-9][A-Za-z0-9._:/-]+)\s{2,}(.+)$/);
+      line.match(/^([A-Za-z0-9][A-Za-z0-9._:/-]+)(?:\t+| {2,})(.+)$/);
     if (!match) continue;
     const value = match[1] ?? "";
     if (
@@ -38,7 +37,6 @@ export function parseProcessCliModels(raw: string, efforts: string[]): ModelOpti
     models.push({
       value,
       label: (match[2] ?? value).replace(/\s+\((?:default|current)\)\s*$/, "").trim(),
-      ...(efforts.length ? { efforts } : {}),
     });
   }
   return models;
@@ -56,7 +54,7 @@ export function parseProcessCliModels(raw: string, efforts: string[]): ModelOpti
 export function parseCopilotHelpModels(raw: string): ModelOption[] {
   const lines = clean(raw).split(/\r?\n/);
   const start = lines.findIndex((line) => /^\s{2}(?:-\w,\s*)?--model(?:[=\s]|$)/.test(line));
-  if (start < 0) return [{ value: "auto", label: "Auto", efforts: EFFORTS }];
+  if (start < 0) return [{ value: "auto", label: "Auto" }];
 
   let end = start + 1;
   while (end < lines.length && !/^\s{2}(?:-\w,\s*)?--[A-Za-z0-9]/.test(lines[end] ?? "")) {
@@ -71,7 +69,6 @@ export function parseCopilotHelpModels(raw: string): ModelOption[] {
   return [...values].map((value) => ({
     value,
     label: value === "auto" ? "Auto" : value,
-    efforts: EFFORTS,
   }));
 }
 
@@ -80,7 +77,11 @@ async function readDefaults(file: string): Promise<ModelDefaults> {
   try {
     const settings = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
     const model = settings.model ?? settings.defaultModel;
-    const effort = settings.effort ?? settings.reasoningEffort ?? settings.reasoning_effort;
+    const effort =
+      settings.effort ??
+      settings.reasoningEffort ??
+      settings.reasoning_effort ??
+      settings.effortLevel;
     if (typeof model === "string") defaults.model = model;
     if (typeof effort === "string") defaults.effort = effort;
   } catch {
@@ -100,7 +101,8 @@ async function inspect(
   try {
     const result = await runMetadataCommand(bin, args, 10_000);
     const models = parseProcessCliModels(`${result.stdout ?? ""}\n${result.stderr ?? ""}`, efforts);
-    if (result.status === 0 && models.length) return { models, defaults, warning: null };
+    if (result.status === 0 && models.length)
+      return { models, defaults, warning: null, source: "cli" };
     return {
       models: [],
       defaults,
@@ -125,31 +127,92 @@ export function inspectAntigravityModels(bin: string): Promise<ProcessCliModelIn
   );
 }
 
-export async function inspectCopilotModels(bin: string): Promise<ProcessCliModelInspection> {
-  const defaults = await readDefaults(path.join(os.homedir(), ".copilot", "settings.json"));
+export interface CopilotCatalogClient {
+  start(): Promise<void>;
+  getAuthStatus(): Promise<{ isAuthenticated: boolean }>;
+  listModels(): Promise<import("@github/copilot-sdk").ModelInfo[]>;
+  forceStop(): Promise<void>;
+}
+
+export function normalizeCopilotModels(
+  models: import("@github/copilot-sdk").ModelInfo[],
+): ModelOption[] {
+  return models
+    .filter((model) => typeof model.id === "string")
+    .map((model) => ({
+      value: model.id,
+      label: model.name || model.id,
+      ...(model.capabilities?.supports?.reasoningEffort && model.supportedReasoningEfforts?.length
+        ? { efforts: model.supportedReasoningEfforts, defaultEffort: model.defaultReasoningEffort }
+        : {}),
+      ...(model.policy ? { policy: model.policy.state } : {}),
+      ...(typeof model.billing?.multiplier === "number"
+        ? { billingMultiplier: model.billing.multiplier }
+        : {}),
+    }));
+}
+
+/** Metadata only: bind the official SDK to the user's CLI and inherited auth. */
+export async function inspectCopilotModels(
+  bin: string,
+  createClient?: () => CopilotCatalogClient,
+  timeoutMs = 10_000,
+  cwd = process.cwd(),
+  readHelp: () => Promise<string> = async () => {
+    const result = await runMetadataCommand(bin, ["help"], timeoutMs);
+    return result.status === 0 ? `${result.stdout}\n${result.stderr}` : "";
+  },
+): Promise<ProcessCliModelInspection> {
+  const defaults = await readDefaults(
+    path.join(process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot"), "settings.json"),
+  );
+  let client: CopilotCatalogClient | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await runMetadataCommand(bin, ["help"], 10_000);
-    if (result.status !== 0) {
-      return {
-        models: [{ value: "auto", label: "Auto", efforts: EFFORTS }],
-        defaults,
-        warning: "GitHub Copilot CLI model discovery failed; Attend will use Auto.",
-      };
+    if (createClient) client = createClient();
+    else {
+      const { CopilotClient, RuntimeConnection } = await import("@github/copilot-sdk");
+      client = new CopilotClient({
+        connection: RuntimeConnection.forStdio({ path: bin }),
+        workingDirectory: cwd,
+      });
     }
-    const models = parseCopilotHelpModels(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    const connected = client;
+    const models = await Promise.race([
+      (async () => {
+        await connected.start();
+        if (!(await connected.getAuthStatus()).isAuthenticated)
+          throw new Error("Not authenticated");
+        return normalizeCopilotModels(await connected.listModels());
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Catalog timeout")), timeoutMs);
+      }),
+    ]);
     return {
       models,
       defaults,
-      warning:
-        models.length === 1
-          ? "GitHub Copilot CLI did not advertise account-specific models; Attend will use Auto."
-          : null,
+      source: "account",
+      warning: models.some((m) => m.value !== "auto")
+        ? null
+        : "Copilot only advertises Auto; no verified lightweight model is available.",
     };
   } catch {
+    clearTimeout(timer);
+    await client?.forceStop().catch(() => {});
+    client = undefined;
+    // Keep old CLI choices usable in the work picker; help is never proof of
+    // account availability for economical routing.
+    const help = await readHelp().catch(() => "");
     return {
-      models: [{ value: "auto", label: "Auto", efforts: EFFORTS }],
+      models: parseCopilotHelpModels(help),
       defaults,
-      warning: "GitHub Copilot CLI model discovery failed; Attend will use Auto.",
+      source: help ? "help" : "unavailable",
+      warning:
+        "Copilot account catalog unavailable; background economical mode uses local analysis.",
     };
+  } finally {
+    clearTimeout(timer);
+    await client?.forceStop().catch(() => {});
   }
 }

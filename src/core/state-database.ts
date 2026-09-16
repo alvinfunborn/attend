@@ -136,6 +136,11 @@ export class SqliteDocument<T> {
     return this.readDatabase(now, version);
   }
 
+  /** Read without the projection cache at cross-process execution boundaries. */
+  readFresh(): T {
+    return this.readDatabase();
+  }
+
   private readDatabase(now = Date.now(), version = localDocumentVersion(this.cacheKey)): T {
     const row = this.db.prepare("SELECT value FROM state_documents WHERE key = ?").get(this.key) as
       | { value: string }

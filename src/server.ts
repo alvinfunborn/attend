@@ -52,6 +52,8 @@ import { type AttendConfig, isLoopbackHost } from "./config.js";
 import type { AlignmentModelReader } from "./core/alignment-model.js";
 import { WorkerAlignmentModel } from "./core/alignment-model.js";
 import { type AlignmentModel, scoreAlignment } from "./core/alignment.js";
+import { type AnalyzerCatalog, AnalyzerPolicyResolver } from "./core/analyzer-policy.js";
+import { AnalyzerSettingsStore, isAnalyzerMode } from "./core/analyzer-settings.js";
 import { CollaborationStore } from "./core/collaboration.js";
 import { type Analysis, AnalysisCache, type AnalysisState } from "./core/daemon/cache.js";
 import { OverrideStore } from "./core/daemon/overrides.js";
@@ -97,6 +99,7 @@ import {
   type UiSessionRunConfig,
   VaultUiStateStore,
 } from "./core/ui-state.js";
+import { inspectAnalyzerCatalog } from "./core/vendor/analyzer-catalog.js";
 import {
   capabilityUnavailable,
   nativeCapability,
@@ -844,10 +847,21 @@ export interface AppDeps {
   /** Compatibility switch for self-contained HTML fixtures. Runtime callers
    *  use the compact shell + snapshot transport unless explicitly disabled. */
   compactTransport?: boolean;
+  analyzerCatalog?: (vendor: string, cwd: string) => Promise<AnalyzerCatalog>;
   orchestrator: DaemonOrchestrator;
 }
 
+function openAnalyzerSettings(config: AttendConfig): AnalyzerSettingsStore {
+  return new AnalyzerSettingsStore(config.workEvents, [
+    config.uiState,
+    config.daemonRegistry,
+    config.analysisCache,
+  ]);
+}
+
 function createDefaultAppDeps(config: AttendConfig): AppDeps {
+  // Record install lineage before workers/registries create the database.
+  openAnalyzerSettings(config).close();
   const { claudeBin, codexBin, cursorBin, antigravityBin, copilotBin } = config;
   const executables = {
     claude: claudeBin,
@@ -872,6 +886,7 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
   const transcriptHistory = new WorkerTranscriptHistory();
   const analyzerContext = new WorkerAnalyzerContext();
   return {
+    analyzerCatalog: (vendor, cwd) => inspectAnalyzerCatalog(config, vendor, cwd),
     launcher: launchSession,
     sessionIndex,
     transcriptHistory,
@@ -1479,10 +1494,9 @@ function estimateEtaFromMemory(model: AlignmentModel | null, text: string): numb
   return Math.max(1, Math.round(ETA_BASE_MIN + ETA_DEPTH_MIN * depth));
 }
 
-export function createApp(
-  config: AttendConfig,
-  deps: AppDeps = createDefaultAppDeps(config),
-): Hono {
+export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
+  const analyzerSettings = openAnalyzerSettings(config);
+  const deps = suppliedDeps ?? createDefaultAppDeps(config);
   const e2ee = createE2ee(config.e2eePassphrase);
   const transcriptIndex = deps.transcriptIndex ?? new TranscriptPathIndex();
   const transcriptHistory = deps.transcriptHistory ?? new WorkerTranscriptHistory();
@@ -2344,6 +2358,13 @@ export function createApp(
     const provider = rawSession(vendor, sessionId)?.runConfig;
     return mergeSessionRunConfig(provider?.source === "provider" ? provider : undefined, saved);
   };
+  orchestrator.configurePolicy(
+    new AnalyzerPolicyResolver(
+      () => analyzerSettings.get(),
+      deps.analyzerCatalog ?? (async () => ({ models: [], live: false, source: "unavailable" })),
+      (vendor, taskId) => resumableRunConfig(vendor, taskId),
+    ),
+  );
   const rememberSessionRunConfig = (
     vendor: string,
     sessionId: string,
@@ -3237,6 +3258,7 @@ export function createApp(
     close() {
       if (backgroundClosed) return;
       backgroundClosed = true;
+      analyzerSettings.close();
       unsubscribeSessionIndex();
       unsubscribeAlignmentModel();
       if (!deps.sessionIndex) backgroundSessionIndex.close();
@@ -3483,9 +3505,25 @@ export function createApp(
   // Latest daemon analysis for a session (brief/state/priority/eta/reason), or null.
   // The console polls this shortly after a turn ends to pick up the daemon's
   // fresh verdict without a full reload.
+  app.get("/analyzer/settings", (c) => {
+    c.header("Cache-Control", "no-store");
+    return c.json(analyzerSettings.get());
+  });
+  app.post("/analyzer/settings", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body || !isAnalyzerMode(body.mode))
+      return c.json({ error: "Expected economical, follow, or off" }, 400);
+    const settings = analyzerSettings.set(body.mode);
+    broadcastLive();
+    return c.json(settings);
+  });
+
   app.get("/session/analysis", (c) => {
     const id = c.req.query("session");
-    return c.json({ analysis: id ? orchestrator.analysis(id) : null });
+    return c.json({
+      analysis: id ? orchestrator.analysis(id) : null,
+      execution: id ? orchestrator.executionStatus(id) : null,
+    });
   });
 
   app.get("/session/view", (c) => {

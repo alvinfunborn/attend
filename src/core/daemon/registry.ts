@@ -4,6 +4,8 @@ import { SqliteDocument } from "../state-database.js";
 export interface DaemonEntry {
   /** the daemon's own session id (filtered out of the listing) */
   daemonId: string;
+  profile?: string;
+  retiredIds?: string[];
   /** the task's cwd — the daemon shares it, so it can read all the context */
   cwd: string;
   /** the task's vendor — picks which analyzer drives this daemon on later rounds */
@@ -28,7 +30,7 @@ export class DaemonRegistry {
   }
 
   get(taskId: string): DaemonEntry | undefined {
-    return this.data.read()[taskId];
+    return (this.data instanceof SqliteDocument ? this.data.readFresh() : this.data.read())[taskId];
   }
 
   has(taskId: string): boolean {
@@ -62,7 +64,10 @@ export class DaemonRegistry {
   /** Every daemon session id — used to filter daemons out of the listing. */
   daemonIds(): Set<string> {
     const ids = new Set<string>();
-    for (const v of Object.values(this.data.read())) ids.add(v.daemonId);
+    for (const v of Object.values(this.data.read())) {
+      if (v.daemonId) ids.add(v.daemonId);
+      for (const id of v.retiredIds ?? []) if (id) ids.add(id);
+    }
     return ids;
   }
 }
@@ -82,6 +87,12 @@ function normalizeEntries(value: unknown): Record<string, DaemonEntry> {
         daemonId: candidate.daemonId,
         cwd: candidate.cwd,
         vendor: candidate.vendor,
+        ...(typeof candidate.profile === "string" ? { profile: candidate.profile } : {}),
+        ...(Array.isArray(candidate.retiredIds)
+          ? {
+              retiredIds: candidate.retiredIds.filter((id): id is string => typeof id === "string"),
+            }
+          : {}),
       };
     }
   }

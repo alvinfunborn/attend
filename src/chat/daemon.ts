@@ -1,3 +1,4 @@
+import type { AnalyzerPlan, AnalyzerPolicy } from "../core/analyzer-policy.js";
 import type { CollaborationStats, CollaborationStore } from "../core/collaboration.js";
 import type { Analysis, AnalysisCache } from "../core/daemon/cache.js";
 import type { DaemonRegistry } from "../core/daemon/registry.js";
@@ -20,6 +21,8 @@ export class DaemonOrchestrator {
   private readonly analyzeAgain = new Map<string, { cwd: string; uiContext: string }>();
   private readonly prompting = new Set<string>();
   private readonly analysisEpoch = new Map<string, number>();
+  private policy?: AnalyzerPolicy;
+  private readonly plans = new Map<string, AnalyzerPlan>();
   private readonly analysisOwner = crypto.randomUUID();
 
   constructor(
@@ -29,6 +32,43 @@ export class DaemonOrchestrator {
     private readonly collaboration?: CollaborationStore,
   ) {
     for (const a of analyzers) this.analyzers.set(a.vendor, a);
+  }
+
+  configurePolicy(policy: AnalyzerPolicy): void {
+    this.policy = policy;
+  }
+
+  executionStatus(taskId: string): AnalyzerPlan | null {
+    const plan = this.plans.get(taskId);
+    const entry = this.registry.get(taskId);
+    return plan && entry && this.policy?.current(taskId, entry.vendor, plan) ? plan : null;
+  }
+
+  private failed(taskId: string, vendor: string, cwd: string, plan: AnalyzerPlan): void {
+    if (!this.policy?.current(taskId, vendor, plan)) return;
+    const entry = this.registry.get(taskId);
+    if (entry?.profile !== plan.fingerprint) return;
+    this.policy?.failed?.(vendor, cwd);
+    this.plans.set(taskId, {
+      ...plan,
+      execution: undefined,
+      reason: "Background provider failed; using local analysis.",
+    });
+    this.cache.delete(taskId);
+    if (entry) this.registry.set(taskId, { ...entry, profile: `failed:${plan.fingerprint}` });
+  }
+
+  private validPlan(taskId: string, plan?: AnalyzerPlan): boolean {
+    const entry = this.registry.get(taskId);
+    return (
+      !this.policy ||
+      !!(
+        plan &&
+        entry &&
+        this.policy.current(taskId, entry.vendor, plan) &&
+        entry.profile === plan.fingerprint
+      )
+    );
   }
 
   /** Is this session id one of our hidden daemons (→ filter it out of the list)? */
@@ -68,6 +108,7 @@ export class DaemonOrchestrator {
       m.set(newTaskId, value);
     };
     moveMapEntry(this.analysisEpoch);
+    moveMapEntry(this.plans);
     moveMapEntry(this.analyzeAgain);
     if (this.analyzing.delete(oldTaskId)) this.analyzing.add(newTaskId);
     if (this.prompting.delete(oldTaskId)) this.prompting.add(newTaskId);
@@ -82,7 +123,20 @@ export class DaemonOrchestrator {
   }
 
   analysis(taskId: string): Analysis | null {
-    return this.cache.get(taskId);
+    const cached = this.cache.get(taskId);
+    if (!cached) return null;
+    if (this.policy) {
+      const settings = this.policy.settings();
+      const plan = this.plans.get(taskId);
+      if (settings.mode === "off") return null;
+      if (plan && (!plan.execution || !this.validPlan(taskId, plan))) return null;
+      if (
+        settings.mode !== "legacy_vendor_default" &&
+        (!plan || cached?.analyzerProfile !== plan.fingerprint)
+      )
+        return null;
+    }
+    return cached;
   }
 
   /** A new user turn makes the previous turn's message drafts unusable. Bump the
@@ -97,14 +151,65 @@ export class DaemonOrchestrator {
    *  (idempotent). No-op for vendors without an analyzer (e.g. Codex stub). */
   ensureDaemon(taskId: string, vendor: string, cwd: string): Promise<string | null> {
     this.collaboration?.ensureSession(vendor, taskId, cwd);
-    // Once the provider id is observed it is registered immediately for
-    // filtering, while callers still await the full spawn/seed lifecycle.
     const inflight = this.spawning.get(taskId);
     if (inflight) return inflight;
-    const existing = this.registry.get(taskId);
-    if (existing) return Promise.resolve(existing.daemonId);
+    if (this.policy && (this.analyzing.has(taskId) || this.prompting.has(taskId)))
+      return Promise.resolve(null);
+    const pending = (async () => {
+      const plan = this.policy ? await this.policy.resolve(taskId, vendor, cwd) : undefined;
+      if (plan && !this.policy?.current(taskId, vendor, plan)) return null;
+      if (plan) this.plans.set(taskId, plan);
+      let existing = this.registry.get(taskId);
+      if (plan && !plan.execution) {
+        if (!existing) this.registry.set(taskId, { daemonId: "", cwd, vendor });
+        return null;
+      }
+      const profile = plan?.fingerprint;
+      if (
+        existing?.daemonId &&
+        (!plan ||
+          existing.profile === profile ||
+          (plan.mode === "legacy_vendor_default" && !existing.profile))
+      ) {
+        if (plan && !existing.profile) this.registry.set(taskId, { ...existing, profile });
+        return existing.daemonId;
+      }
+      if (
+        this.collaboration &&
+        !this.collaboration.claimAnalysis(vendor, taskId, this.analysisOwner)
+      )
+        return null;
+      try {
+        existing = this.registry.get(taskId);
+        if (existing?.daemonId && plan && existing.profile === profile) return existing.daemonId;
+        const retiredIds = [
+          ...new Set([
+            ...(existing?.retiredIds ?? []),
+            ...(existing?.daemonId ? [existing.daemonId] : []),
+          ]),
+        ];
+        if (plan) {
+          this.cache.delete(taskId);
+          this.registry.set(taskId, { daemonId: "", cwd, vendor, profile, retiredIds });
+        }
+        return await this.spawnDaemon(taskId, vendor, cwd, plan, retiredIds);
+      } finally {
+        this.collaboration?.releaseAnalysis(vendor, taskId, this.analysisOwner);
+      }
+    })().finally(() => this.spawning.delete(taskId));
+    this.spawning.set(taskId, pending);
+    return pending;
+  }
+
+  private async spawnDaemon(
+    taskId: string,
+    vendor: string,
+    cwd: string,
+    plan?: AnalyzerPlan,
+    retiredIds: string[] = [],
+  ): Promise<string | null> {
     const analyzer = this.analyzers.get(vendor);
-    if (!analyzer) return Promise.resolve(null);
+    if (!analyzer) return null;
     let observedId: string | null = null;
     const register = (daemonId: string): boolean => {
       // A daemon must be a separate provider session. Refuse a broken adapter
@@ -112,7 +217,12 @@ export class DaemonOrchestrator {
       // hidden and its remaining events suppressed as daemon traffic.
       if (!daemonId || daemonId === taskId || observedId) return false;
       observedId = daemonId;
-      this.registry.set(taskId, { daemonId, cwd, vendor });
+      this.registry.set(taskId, {
+        daemonId,
+        cwd,
+        vendor,
+        ...(plan ? { profile: plan.fingerprint, retiredIds } : {}),
+      });
       for (const listener of this.registrationListeners) {
         try {
           listener(taskId, daemonId, vendor, cwd);
@@ -122,15 +232,16 @@ export class DaemonOrchestrator {
       }
       return true;
     };
-    const p = analyzer
-      .spawn(cwd, register)
-      .then((daemonId) => {
-        if (daemonId) register(daemonId);
-        return observedId;
-      })
-      .finally(() => this.spawning.delete(taskId));
-    this.spawning.set(taskId, p);
-    return p;
+    try {
+      const daemonId = await analyzer.spawn(cwd, register, plan?.execution);
+      if (daemonId) register(daemonId);
+      if (!observedId && plan) this.failed(taskId, vendor, cwd, plan);
+      return this.validPlan(taskId, plan) ? observedId : null;
+    } catch (error) {
+      if (!plan || plan.mode === "legacy_vendor_default") throw error;
+      this.failed(taskId, vendor, cwd, plan);
+      return null;
+    }
   }
 
   /**
@@ -143,12 +254,21 @@ export class DaemonOrchestrator {
     // hide the daemon. Do not resume it until that original spawn has settled.
     const spawning = this.spawning.get(taskId);
     if (spawning) await spawning;
-    const entry = this.registry.get(taskId);
+    let entry = this.registry.get(taskId);
     if (!entry) return null;
-    if (this.analyzing.has(taskId)) {
+    if (this.analyzing.has(taskId) || this.prompting.has(taskId)) {
       this.analyzeAgain.set(taskId, { cwd, uiContext });
-      return this.cache.get(taskId);
+      return this.analysis(taskId);
     }
+    if (this.policy && !(await this.ensureDaemon(taskId, entry.vendor, entry.cwd || cwd)))
+      return null;
+    entry = this.registry.get(taskId);
+    if (!entry?.daemonId) return null;
+    if (this.analyzing.has(taskId) || this.prompting.has(taskId)) {
+      this.analyzeAgain.set(taskId, { cwd, uiContext });
+      return this.analysis(taskId);
+    }
+    const plan = this.plans.get(taskId);
     const analyzer = this.analyzers.get(entry.vendor);
     if (!analyzer) return null;
     this.collaboration?.ensureSession(entry.vendor, taskId, entry.cwd || cwd);
@@ -156,7 +276,7 @@ export class DaemonOrchestrator {
       this.collaboration &&
       !this.collaboration.claimAnalysis(entry.vendor, taskId, this.analysisOwner)
     )
-      return this.cache.get(taskId);
+      return this.analysis(taskId);
     const analysisEpoch = this.analysisEpoch.get(taskId) ?? 0;
     this.analyzing.add(taskId);
     try {
@@ -168,7 +288,9 @@ export class DaemonOrchestrator {
         collaborationState?.labeledTurnIds,
         collaborationState?.analysisFromAt,
         uiContext,
+        plan?.execution,
       );
+      if (!this.validPlan(taskId, plan)) return null;
       if (verdict) {
         const parsed = verdict.analysis;
         try {
@@ -190,9 +312,14 @@ export class DaemonOrchestrator {
           parsed.avoidancePrompt === undefined && prev?.avoidancePrompt !== undefined
             ? { ...parsed, avoidancePrompt: prev.avoidancePrompt }
             : parsed;
+        if (plan) next.analyzerProfile = plan.fingerprint;
         this.cache.set(taskId, next);
         return next;
       }
+      return null;
+    } catch (error) {
+      if (!plan || plan.mode === "legacy_vendor_default") throw error;
+      this.failed(taskId, entry.vendor, entry.cwd || cwd, plan);
       return null;
     } finally {
       this.collaboration?.releaseAnalysis(entry.vendor, taskId, this.analysisOwner);
@@ -206,12 +333,24 @@ export class DaemonOrchestrator {
   }
 
   async ensureAvoidancePrompt(taskId: string, cwd: string, uiContext = ""): Promise<string | null> {
-    const cached = this.cache.get(taskId);
+    let entry = this.registry.get(taskId);
+    if (!entry || this.prompting.has(taskId) || this.analyzing.has(taskId)) return null;
+    if (this.policy && !(await this.ensureDaemon(taskId, entry.vendor, entry.cwd || cwd)))
+      return null;
+    entry = this.registry.get(taskId);
+    if (!entry?.daemonId) return null;
+    if (this.prompting.has(taskId) || this.analyzing.has(taskId)) return null;
+    const plan = this.plans.get(taskId);
+    const epoch = this.analysisEpoch.get(taskId) ?? 0;
+    const cached = this.analysis(taskId);
     if (cached?.avoidancePrompt !== undefined) return cached.avoidancePrompt ?? null;
-    const entry = this.registry.get(taskId);
-    if (!entry || this.prompting.has(taskId)) return null;
     const analyzer = this.analyzers.get(entry.vendor);
     if (!analyzer?.avoidancePrompt) return null;
+    if (
+      this.collaboration &&
+      !this.collaboration.claimAnalysis(entry.vendor, taskId, this.analysisOwner)
+    )
+      return null;
     this.prompting.add(taskId);
     try {
       const prompt = await analyzer.avoidancePrompt(
@@ -219,12 +358,25 @@ export class DaemonOrchestrator {
         entry.cwd || cwd,
         taskId,
         uiContext,
+        plan?.execution,
       );
+      if (!this.validPlan(taskId, plan) || epoch !== (this.analysisEpoch.get(taskId) ?? 0))
+        return null;
       const current = this.cache.get(taskId);
       if (current) this.cache.set(taskId, { ...current, avoidancePrompt: prompt });
       return prompt;
+    } catch (error) {
+      if (!plan || plan.mode === "legacy_vendor_default") throw error;
+      this.failed(taskId, entry.vendor, entry.cwd || cwd, plan);
+      return null;
     } finally {
+      this.collaboration?.releaseAnalysis(entry.vendor, taskId, this.analysisOwner);
       this.prompting.delete(taskId);
+      const rerun = this.analyzeAgain.get(taskId);
+      if (rerun) {
+        this.analyzeAgain.delete(taskId);
+        void this.analyzeTask(taskId, rerun.cwd, rerun.uiContext).catch(() => {});
+      }
     }
   }
 

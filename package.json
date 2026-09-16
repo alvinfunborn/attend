@@ -71,5 +71,8 @@
     "typescript": "^5.7.2",
     "vitest": "^4.1.10"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "@github/copilot-sdk": "1.0.13"
+  }
 }

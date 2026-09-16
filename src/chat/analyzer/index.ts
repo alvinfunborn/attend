@@ -1,3 +1,4 @@
+import type { AnalyzerExecution } from "../../core/analyzer-policy.js";
 import type { CollaborationTurnFact, CollaborationTurnLabel } from "../../core/collaboration.js";
 import type { Analysis } from "../../core/daemon/cache.js";
 
@@ -21,7 +22,11 @@ export interface SessionAnalyzer {
    * it sees the same context). Returns its session id, or null if this vendor
    * can't spawn one yet (→ no daemon; the session keeps the heuristic fallback).
    */
-  spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null>;
+  spawn(
+    cwd: string,
+    onSessionId?: (sessionId: string) => void,
+    execution?: AnalyzerExecution,
+  ): Promise<string | null>;
   /**
    * Run one analysis round against the daemon for task `taskId` and return the
    * parsed verdict, or null when unsupported / unparseable. The analyzer owns its
@@ -34,6 +39,7 @@ export interface SessionAnalyzer {
     knownTurnIds?: ReadonlySet<string>,
     analysisFromAt?: number | null,
     uiContext?: string,
+    execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null>;
   /**
    * Optional one-shot prompt generation for sessions already flagged as avoidance
@@ -45,5 +51,6 @@ export interface SessionAnalyzer {
     cwd: string,
     taskId: string,
     uiContext?: string,
+    execution?: AnalyzerExecution,
   ): Promise<string | null>;
 }

@@ -10,6 +10,8 @@ export interface CopilotEvent {
   sessionId?: string;
   data?: {
     sessionId?: string;
+    selectedModel?: string;
+    newModel?: string;
     content?: string;
     message?: string;
     errorType?: string;
@@ -57,8 +59,15 @@ export function copilotToProcessEvent(event: CopilotEvent, state: CopilotState):
   const data = event.data ?? {};
   if (event.type === "session.start" || event.type === "session.resume") {
     return [
-      { type: "thread.started", thread_id: data.sessionId ?? event.sessionId ?? state.sessionId },
+      {
+        type: "thread.started",
+        thread_id: data.sessionId ?? event.sessionId ?? state.sessionId,
+        ...(data.selectedModel ? { model: data.selectedModel } : {}),
+      },
     ];
+  }
+  if (event.type === "session.model_change" && data.newModel) {
+    return [{ type: "model.changed", model: data.newModel }];
   }
   if (event.type === "assistant.message_delta" || event.type === "assistant.streaming_delta") {
     state.sawAssistantDelta = true;
