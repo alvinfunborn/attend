@@ -4850,11 +4850,13 @@ describe("console browser behavior", () => {
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
     await page.locator('#list .item[data-session-id="s1"]').click();
     const headerTag = page.locator("#h-tags .headtag-nav");
-    expect(
-      await headerTag.evaluate(
-        (node) => node.ownerDocument.defaultView?.getComputedStyle(node, "::after").content,
-      ),
-    ).toBe("none");
+    await expect
+      .poll(() =>
+        headerTag.evaluate(
+          (node) => node.ownerDocument.defaultView?.getComputedStyle(node, "::after").content,
+        ),
+      )
+      .toBe("none");
     await headerTag.click();
 
     const options = page.locator("#headerTagSessionMenu .headtag-session-option");

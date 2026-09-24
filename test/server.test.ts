@@ -6206,8 +6206,23 @@ describe("live-stream daemon analysis broadcast", () => {
       engine: new ChatEngine(fakeQuery),
       codex,
       orchestrator,
+      analyzerCatalog: async () => ({
+        live: true,
+        source: "live",
+        models: [{ value: "gpt-5.6-luna", label: "Luna", efforts: ["low"], speeds: ["default"] }],
+      }),
     });
-    await orchestrator.ensureDaemon("cx-1", "codex", os.tmpdir());
+    // Match a fresh installation without relying on the developer's legacy
+    // settings files to enable the fake analyzer.
+    const settings = await app.request("/analyzer/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "economical" }),
+    });
+    expect(settings.status).toBe(200);
+    await expect(orchestrator.ensureDaemon("cx-1", "codex", os.tmpdir())).resolves.toBe(
+      "daemon-cx-1",
+    );
 
     const res = await app.request("/chat/live-stream");
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
