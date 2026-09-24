@@ -2,7 +2,7 @@
 
 All notable changes to Attend are documented in this file.
 
-## 1.3.6 — 2026-09-24
+## 1.3.7 — 2026-09-24
 
 ### Added
 
@@ -34,6 +34,8 @@ All notable changes to Attend are documented in this file.
   session cards when provider IDs arrive or roll over.
 - Queued comments stay removed after execution starts, even when their enqueue acknowledgement
   arrives after the live update.
+- The dependency lockfile includes the optional WebAssembly runtime required for clean
+  cross-platform installations with npm 12.
 
 ## 1.3.5 — 2026-09-14
 
