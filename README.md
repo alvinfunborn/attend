@@ -61,7 +61,9 @@ Attend keeps those signals next to the actual conversations, so organizing work 
   across every session — it opens on todos and remembers whichever list you left it on.
 - Comment on a response or a selected passage, including while it is generating; continue in an
   isolated side session, queue replies, or promote the discussion with its parent configuration and
-  context. Stop, edit, and resend the latest comment message when needed.
+  context. Stop, edit, and resend the latest comment message when needed. The drawer's attention
+  indicator shows generating/read/unread and lets you toggle read status. Pin comment buttons open
+  existing threads; start new comments from the message or text selection.
 - Pin messages or selected passages and reference them with `@`; include a pin's text-only comment
   thread, exclude tool blocks, and snapshot referenced context for queued turns.
 - Collapse completed turns, refresh from the provider transcript, preview attachments and diagrams,

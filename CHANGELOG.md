@@ -17,9 +17,11 @@ All notable changes to Attend are documented in this file.
 - Installation-wide background analysis settings separate economical, follow-session, and off
   modes from the work session's model. Existing installations retain their CLI defaults until
   a mode is selected; unavailable economical configurations fall back to local analysis.
+- Comment drawers show a live attention indicator that can toggle a thread between read and unread.
 
 ### Changed
 
+- Pin comment buttons open existing threads and remain inactive when no thread exists.
 - Model discovery respects provider-owned configuration and account capabilities, including
   Copilot model policies and per-model effort. Background results are discarded when their
   selected policy or work configuration changes.
@@ -28,6 +30,8 @@ All notable changes to Attend are documented in this file.
 
 - The `analyzing` label remains editable when a daemon stalls. Manual labels survive delayed
   analysis results and older session snapshots, and reset when the next conversation turn starts.
+- Provider-discovered sessions merge with their existing local branch identity, preventing duplicate
+  session cards when provider IDs arrive or roll over.
 
 ## 1.3.5 — 2026-09-14
 

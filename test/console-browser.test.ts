@@ -656,6 +656,13 @@ describe("console browser behavior", () => {
         .poll(() => page.locator('[data-session-id="s1"] .it-status').getAttribute("class"))
         .toContain("generating");
 
+      // Let the initial replay's scheduled paint finish before measuring the delta.
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
       // A consecutive delta patches only the changed keyed row. The unrelated
       // row keeps its DOM identity instead of paying for a full sidebar rebuild.
       await page.locator('[data-session-id="s1"]').evaluate((row) => {
@@ -1640,7 +1647,8 @@ describe("console browser behavior", () => {
     const pinComments = page.locator("#pinTray .pincomment");
     expect(await pinComments.count()).toBe(2);
     expect(await pinComments.first().getAttribute("aria-label")).toBe("Open comments");
-    expect(await pinComments.last().getAttribute("aria-label")).toBe("Comment on this pin");
+    expect(await pinComments.last().getAttribute("aria-label")).toBe("No comments on this pin");
+    expect(await pinComments.last().isDisabled()).toBe(true);
     expect(await pinComments.first().getAttribute("class")).toContain("read");
     expect(await pinComments.last().getAttribute("class")).toContain("idle");
     expect(await pinComments.locator(".pincomment-icon").count()).toBe(2);
@@ -1654,7 +1662,7 @@ describe("console browser behavior", () => {
           const view = button.ownerDocument.defaultView;
           if (!view) return false;
           const probe = button.ownerDocument.createElement("span");
-          probe.style.color = "var(--status-seen)";
+          probe.style.color = "var(--ink-4)";
           probe.style.position = "fixed";
           probe.style.left = "-9999px";
           button.ownerDocument.body.appendChild(probe);

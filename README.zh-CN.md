@@ -45,6 +45,8 @@ Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向�
   daemon 卡住时也可以点击 `analyzing` 手动设置。本轮分析不会覆盖手动标签，下一轮对话开始后恢复自动分析。
 - 在 composer 旁管理机器级 shortcuts 与 session 级 notes、todos；设置受支持的 Goal，并接受 analyzer 生成的消息 draft。
 - 评论某条回复，包括它仍在生成时；在隔离的 side session 中继续、排队回复，或带着父配置和上下文升级讨论。
+- 评论抽屉的状态灯显示生成中、已读和未读，可点击切换已读状态。Pin 的评论按钮只打开已有线程；
+  新评论从消息或选中文字发起。
 - Pin 消息并用 `@` 引用；可包含 pin 下的纯文本 comment thread、排除 tool block，并为 queued turn 固化引用上下文。
 - 折叠已完成的 turn、从 provider transcript 刷新、预览附件与 diagram，以及定位引用的本地路径。
 - 从当前 draft 或 queued turn fork，沿用或切换 provider，保留运行设置和相关 notes、todos，并查看 fork tree。
