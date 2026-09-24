@@ -1,7 +1,7 @@
 # attend
 
 A local attention-management console for AI coding tasks. Current integrations: Claude Code,
-Codex/ChatGPT, Cursor CLI, Antigravity CLI, and GitHub Copilot CLI.
+Codex/ChatGPT, Cursor CLI, Antigravity CLI, GitHub Copilot CLI, and OpenCode.
 
 [中文 README](README.zh-CN.md)
 
@@ -20,9 +20,9 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 
 - Organize sessions across projects with tags, search, and Focus views, while distinguishing work
   that is generating, unread, waiting for follow-up, or handled.
-- Start or continue Claude Code, Codex/ChatGPT, Cursor CLI, Antigravity CLI, and GitHub Copilot CLI
-  sessions in the browser, with attachments, stopping, recoverable provider-limit errors, and
-  durable message queues.
+- Start or continue Claude Code, Codex/ChatGPT, Cursor CLI, Antigravity CLI, GitHub Copilot CLI,
+  and OpenCode sessions in the browser, with attachments, stopping, recoverable provider-limit
+  errors, and durable message queues.
 - Keep shortcuts, notes, todos, and Goals beside the composer; pin messages and use `@` to carry
   selected context into the next turn, or start a focused comment from a message or text selection.
 - Fork sessions, comment on a response, or promote a side discussion into its own task without
@@ -51,7 +51,11 @@ Attend keeps those signals next to the actual conversations, so organizing work 
   sessions and frozen-point forks appear as session cards immediately with their opening context.
   Sending from one of those cards before its due time starts it now and keeps the original opening
   message scheduled on the resulting session; there is no separate scheduling inbox.
-- Edit a session title, state, priority, and estimated re-entry time.
+- Type `/model `, `/effort `, or `/vendor ` in the composer to open that setting, or select a
+  matching model, effort, or vendor directly with a slash shortcut followed by a space.
+- Edit a session title, state, priority, and estimated re-entry time. State labels offer presets,
+  custom text, and a color picker; click `analyzing` to set one even if the daemon has stalled.
+  A manual label wins over that turn's analysis and resets when the next conversation turn starts.
 - Manage machine-wide shortcuts and session notes or todos beside the composer; arm supported Goals
   and accept analyzer-drafted messages. The sidebar's list button browses the same three collections
   across every session — it opens on todos and remembers whichever list you left it on.
@@ -87,17 +91,29 @@ Requirements:
 
 - Node.js `>= 22.13`
 - At least one supported CLI installed: Claude Code, Codex/ChatGPT, Cursor CLI (`cursor-agent`),
-  standalone Antigravity CLI (`agy`), or GitHub Copilot CLI (`copilot`)
+  standalone Antigravity CLI (`agy`), GitHub Copilot CLI (`copilot`), or OpenCode (`opencode`)
 
 Attend detects those system CLIs at startup and only shows vendors it can actually run. If none are
 available, the picker shows every vendor with installation guidance. Claude Code must be
 `2.1.0` or newer; an older version is disabled with an explicit update message.
 
 Every in-browser session gets an analyzer daemon from the same provider. Cursor daemons run in
-native read-only `ask` mode with sandboxing enabled; Antigravity and Copilot daemons use their
-headless/JSONL interfaces. Claude and Codex support native forks. Cursor, Antigravity, and Copilot
-branches are created as new sessions seeded with the visible parent transcript because those
-headless CLIs do not expose a native fork command.
+native read-only `ask` mode with sandboxing enabled; Antigravity, Copilot, and OpenCode daemons use
+their headless/JSONL interfaces. Claude and Codex support native forks. Cursor, Antigravity, Copilot,
+and OpenCode branches are created as new sessions seeded with the visible parent transcript because
+those headless CLIs do not expose a native fork command.
+
+### OpenCode sessions
+
+Attend reads OpenCode's native store directly: the SQLite database at
+`~/.local/share/opencode/opencode.db` on current releases, or the legacy
+`~/.local/share/opencode/storage/` JSON tree on older ones. It mirrors each session into
+`~/.attend/opencode-sessions/` so browsing, search, and analyzer daemons stay file-based. This
+read-only path works even without the CLI installed. In-browser chat uses an Attend-managed `opencode serve` process for streaming, stopping,
+mid-turn steering, and answering questions without restarting the turn. Analyzer daemons use
+`opencode run --format json`. Both require the standalone `opencode` CLI; install it with
+`npm install --global opencode-ai` or the official installer, then restart Attend. Override the
+locations with `ATTEND_OPENCODE_DATA`, `ATTEND_OPENCODE_SESSIONS`, and `ATTEND_OPENCODE_BIN`.
 
 ### Codex CLI on Windows
 

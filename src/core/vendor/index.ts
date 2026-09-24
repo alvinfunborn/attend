@@ -4,6 +4,7 @@ import { ClaudeSource } from "./claude.js";
 import { CodexSource } from "./codex.js";
 import { CopilotSource } from "./copilot.js";
 import { CursorSource } from "./cursor.js";
+import { OpencodeSource } from "./opencode.js";
 import type { ScanCache } from "./scan-cache.js";
 import type { TranscriptPathWriter } from "./transcript-index.js";
 
@@ -16,6 +17,7 @@ export interface SourceCaches {
   cursorCaptured?: ScanCache;
   antigravity?: ScanCache;
   copilot?: ScanCache;
+  opencode?: ScanCache;
 }
 
 /**
@@ -36,6 +38,8 @@ export interface SessionSourceConfig {
   antigravityCapturedSessions: string;
   copilotSessions: string;
   copilotCapturedSessions: string;
+  opencodeData: string;
+  opencodeSessions: string;
 }
 
 export function buildSources(
@@ -65,6 +69,12 @@ export function buildSources(
       caches.copilot,
       transcriptIndex,
     ),
+    new OpencodeSource(
+      config.opencodeData,
+      config.opencodeSessions,
+      caches.opencode,
+      transcriptIndex,
+    ),
   ];
 }
 
@@ -78,3 +88,4 @@ export { CodexSource } from "./codex.js";
 export { CursorSource } from "./cursor.js";
 export { AntigravitySource } from "./antigravity.js";
 export { CopilotSource } from "./copilot.js";
+export { OpencodeSource } from "./opencode.js";

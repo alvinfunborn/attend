@@ -11,6 +11,7 @@ import {
   resolveCodexBin,
   resolveCopilotBin,
   resolveCursorBin,
+  resolveOpencodeBin,
 } from "./core/vendor/detect.js";
 
 export interface AttendConfig {
@@ -38,6 +39,10 @@ export interface AttendConfig {
   copilotSessions: string;
   /** Attend-captured Copilot CLI JSONL transcripts. */
   copilotCapturedSessions: string;
+  /** OpenCode native data root (~/.local/share/opencode): opencode.db + legacy storage/. */
+  opencodeData: string;
+  /** Attend-owned OpenCode transcript mirrors, written from the native store. */
+  opencodeSessions: string;
   /** Cursor Desktop's local model-picker state database. */
   cursorStateDb: string;
   /** ~/.codex/models_cache.json */
@@ -53,6 +58,8 @@ export interface AttendConfig {
   antigravityBin: string | null;
   /** resolved `copilot` binary, or null when it is not installed. */
   copilotBin: string | null;
+  /** resolved `opencode` binary, or null when it is not installed. */
+  opencodeBin: string | null;
   /** Explicit memory files; when empty, per-project memory is auto-discovered. */
   memorySources: string[];
   port: number;
@@ -112,11 +119,23 @@ interface ConfigFile {
   antigravityCapturedSessions?: string;
   copilotSessions?: string;
   copilotCapturedSessions?: string;
+  opencodeData?: string;
+  opencodeSessions?: string;
   cursorStateDb?: string;
   codexModelsCache?: string;
   memorySources?: string[];
   port?: number;
   host?: string;
+}
+
+function defaultOpencodeDataDir(): string {
+  const home = os.homedir();
+  if (process.platform === "win32") {
+    const base = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
+    return path.join(base, "opencode");
+  }
+  const xdg = process.env.XDG_DATA_HOME;
+  return xdg ? path.join(xdg, "opencode") : path.join(home, ".local", "share", "opencode");
 }
 
 function platformDefaults(): AttendConfig {
@@ -133,6 +152,8 @@ function platformDefaults(): AttendConfig {
     antigravityCapturedSessions: path.join(attendHome, "antigravity-sessions"),
     copilotSessions: path.join(home, ".copilot", "session-state"),
     copilotCapturedSessions: path.join(attendHome, "copilot-sessions"),
+    opencodeData: defaultOpencodeDataDir(),
+    opencodeSessions: path.join(attendHome, "opencode-sessions"),
     cursorStateDb: defaultCursorStateDbPath(),
     codexModelsCache: defaultCodexModelsCachePath(),
     // Match the user's terminal: the Agent SDK is only an adapter around this
@@ -143,6 +164,7 @@ function platformDefaults(): AttendConfig {
     cursorBin: resolveCursorBin(),
     antigravityBin: resolveAntigravityBin(),
     copilotBin: resolveCopilotBin(),
+    opencodeBin: resolveOpencodeBin(),
     memorySources: [],
     port: 5050,
     host: "127.0.0.1",
@@ -259,6 +281,12 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
         file.copilotCapturedSessions ??
         defaults.copilotCapturedSessions,
     ),
+    opencodeData: path.resolve(
+      env.ATTEND_OPENCODE_DATA ?? file.opencodeData ?? defaults.opencodeData,
+    ),
+    opencodeSessions: path.resolve(
+      env.ATTEND_OPENCODE_SESSIONS ?? file.opencodeSessions ?? defaults.opencodeSessions,
+    ),
     cursorStateDb: path.resolve(
       env.ATTEND_CURSOR_STATE_DB ?? file.cursorStateDb ?? defaults.cursorStateDb,
     ),
@@ -270,6 +298,7 @@ export function resolveConfig(cli: CliInputs): AttendConfig {
     cursorBin: env.ATTEND_CURSOR_BIN ?? defaults.cursorBin,
     antigravityBin: env.ATTEND_ANTIGRAVITY_BIN ?? defaults.antigravityBin,
     copilotBin: env.ATTEND_COPILOT_BIN ?? defaults.copilotBin,
+    opencodeBin: env.ATTEND_OPENCODE_BIN ?? defaults.opencodeBin,
     memorySources: (file.memorySources ?? defaults.memorySources).map((p) => path.resolve(p)),
     port: Number.isFinite(port) ? port : defaults.port,
     host: cli.host ?? env.ATTEND_HOST ?? file.host ?? defaults.host,

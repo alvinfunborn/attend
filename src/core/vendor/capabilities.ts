@@ -137,6 +137,34 @@ const CAPABILITIES: Record<VendorId, VendorCapabilities> = {
     },
     nativeSessionCwd: { support: "native" },
   },
+  opencode: {
+    ...shared,
+    attachments: processAttachments,
+    fork: {
+      support: "emulated",
+      fallback: "Attend creates a new OpenCode session seeded with the parent transcript.",
+    },
+    goal: {
+      support: "unsupported",
+    },
+    steer: {
+      support: "native",
+    },
+    interactiveInput: {
+      support: "native",
+    },
+    modelCatalog: { support: "native" },
+    effort: {
+      support: "emulated",
+      fallback:
+        "OpenCode passes the selected variant through the prompt variant field when the provider supports it.",
+    },
+    speed: {
+      support: "unsupported",
+      fallback: "OpenCode does not expose a speed tier.",
+    },
+    nativeSessionCwd: { support: "native" },
+  },
 };
 
 export function vendorCapabilities(vendor: VendorId): VendorCapabilities {

@@ -41,6 +41,8 @@ export interface SessionIndexWorkerConfig {
   antigravityCapturedSessions: string;
   copilotSessions: string;
   copilotCapturedSessions: string;
+  opencodeData: string;
+  opencodeSessions: string;
   scanIntervalMs: number;
 }
 
@@ -69,6 +71,8 @@ function workerConfig(config: AttendConfig, ownerId: string): SessionIndexWorker
     antigravityCapturedSessions: config.antigravityCapturedSessions,
     copilotSessions: config.copilotSessions,
     copilotCapturedSessions: config.copilotCapturedSessions,
+    opencodeData: config.opencodeData,
+    opencodeSessions: config.opencodeSessions,
     scanIntervalMs: 5_000,
   };
 }
@@ -182,7 +186,7 @@ export class WorkerSessionIndex implements SessionIndex {
       byVendor.set(session.vendor, sessions);
     }
     if (this.transcriptIndex) {
-      for (const vendor of ["claude", "codex", "cursor", "antigravity", "copilot"]) {
+      for (const vendor of ["claude", "codex", "cursor", "antigravity", "copilot", "opencode"]) {
         this.transcriptIndex.replaceVendor(vendor, byVendor.get(vendor) ?? []);
       }
     }

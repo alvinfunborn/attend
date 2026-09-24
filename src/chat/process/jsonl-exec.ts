@@ -22,7 +22,8 @@ function sanitizeName(name: string): string {
   );
 }
 
-function prepareInput(
+/** Materializes attachments as temporary local files and returns the prompt. */
+export function prepareProcessInput(
   vendor: string,
   prompt: string,
   attachments: ChatAttachment[] = [],
@@ -127,6 +128,8 @@ export interface JsonlExecAdapter<Event extends object, State> {
   initialSessionId?(request: ProcessTurnRequest, state: State): string | null;
   /** Last-resort extraction for CLIs that announce a new id only in their log stream. */
   sessionIdFromStderr?(stderr: string, state: State): string | null;
+  /** Override the child environment (e.g. a vendor that trusts $PWD over cwd). */
+  env?(request: ProcessTurnRequest, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 }
 
 /** Build a resilient line-oriented CLI runner shared by Antigravity and Copilot. */
@@ -134,7 +137,7 @@ export function makeJsonlExec<Event extends object, State>(
   adapter: JsonlExecAdapter<Event, State>,
 ): ProcessTurnFn<CodexEvent> {
   return (request): ProcessTurnHandle<CodexEvent> => {
-    const prepared = prepareInput(adapter.vendor, request.prompt, request.attachments);
+    const prepared = prepareProcessInput(adapter.vendor, request.prompt, request.attachments);
     const state = adapter.createState(request);
     let sessionId = request.resume ?? adapter.initialSessionId?.(request, state) ?? null;
     fs.mkdirSync(adapter.sessionsDir, { recursive: true });
@@ -142,6 +145,7 @@ export function makeJsonlExec<Event extends object, State>(
       cwd: request.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
+      ...(adapter.env ? { env: adapter.env(request, process.env) } : {}),
     });
     let launchError: Error | null = null;
     child.once("error", (error) => {
@@ -171,7 +175,7 @@ export function makeJsonlExec<Event extends object, State>(
           return;
         }
         const lines = readline.createInterface({ input: stdout });
-        for await (const line of lines) {
+        outer: for await (const line of lines) {
           let event: Event;
           try {
             event = JSON.parse(line) as Event;
@@ -203,6 +207,12 @@ export function makeJsonlExec<Event extends object, State>(
               continue;
             if (normalized.type === "turn.completed" || normalized.type === "turn.failed") {
               sawTerminal = true;
+              yield normalized;
+              // Some providers (e.g. opencode) keep a server process alive after
+              // their terminal event. Stop reading and reap it so the turn ends
+              // instead of waiting on a process that never exits.
+              killProcess(child);
+              break outer;
             }
             yield normalized;
           }

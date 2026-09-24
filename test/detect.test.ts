@@ -13,6 +13,7 @@ import {
   resolveCodexBin,
   resolveCopilotBin,
   resolveCursorBin,
+  resolveOpencodeBin,
 } from "../src/core/vendor/detect.js";
 import type { CliResolver } from "../src/core/vendor/detect.js";
 
@@ -113,6 +114,7 @@ describe("detectVendors", () => {
     expect(isVendorId("antigravity")).toBe(true);
     expect(isVendorId("gemini")).toBe(false);
     expect(isVendorId("copilot")).toBe(true);
+    expect(isVendorId("opencode")).toBe(true);
     expect(isVendorId("cursor-cli")).toBe(false);
   });
 
@@ -133,6 +135,13 @@ describe("detectVendors", () => {
       command === "agy" || command === "copilot" ? command : null;
     expect(resolveAntigravityBin(resolve)).toBe("agy");
     expect(resolveCopilotBin(resolve)).toBe("copilot");
+  });
+
+  it("resolves OpenCode from its official command name", () => {
+    expect(
+      resolveOpencodeBin((command) => (command === "opencode" ? "/opt/bin/opencode" : null)),
+    ).toBe("/opt/bin/opencode");
+    expect(resolveOpencodeBin(() => null)).toBeNull();
   });
 
   it("resolves the concrete Claude executable for Agent SDK parity", () => {

@@ -7,6 +7,7 @@ import { parseAntigravityTranscript } from "../antigravity/transcript.js";
 import { parseCodexTranscriptMessages } from "../codex/transcript.js";
 import { parseCopilotTranscript } from "../copilot/transcript.js";
 import { parseCursorTranscript } from "../cursor/transcript.js";
+import { parseOpencodeTranscript } from "../opencode/transcript.js";
 import { type TranscriptMsg, parseClaudeTranscriptMessages } from "../transcript.js";
 import { condenseTranscript } from "./contract.js";
 
@@ -29,6 +30,7 @@ function parseTranscript(vendor: string, raw: string): TranscriptMsg[] {
   if (vendor === "cursor") return parseCursorTranscript(raw, Number.POSITIVE_INFINITY);
   if (vendor === "antigravity") return parseAntigravityTranscript(raw, Number.POSITIVE_INFINITY);
   if (vendor === "copilot") return parseCopilotTranscript(raw, Number.POSITIVE_INFINITY);
+  if (vendor === "opencode") return parseOpencodeTranscript(raw, Number.POSITIVE_INFINITY);
   return parseClaudeTranscriptMessages(raw, Number.POSITIVE_INFINITY);
 }
 

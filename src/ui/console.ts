@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type { AnalysisState } from "../core/daemon/cache.js";
 import type { ModelDefaults, ModelOption } from "../core/model-options.js";
 import type { ScheduledItem } from "../core/schedules.js";
 import type { Pattern } from "../core/types.js";
@@ -56,7 +55,8 @@ export interface SessionView {
    *  null when nothing warrants it. Independent of nextStep. */
   probe?: string | null;
   /** daemon-classified handoff state; null until a new-format analysis exists */
-  state: AnalysisState | null;
+  state: string | null;
+  stateColor?: string | null;
   /** true when the state is a manual override */
   stateset?: boolean;
   /** priority — from the session's daemon analyzer, else heuristic fallback */
@@ -138,6 +138,8 @@ export interface ConsoleView {
   /** Models advertised by the standalone Antigravity and Copilot CLIs. */
   antigravityModels?: ModelOption[];
   copilotModels?: ModelOption[];
+  /** Models advertised by the OpenCode CLI. */
+  opencodeModels?: ModelOption[];
   /** Compatibility warnings for vendor-owned internal model sources. */
   modelWarnings?: {
     claude?: string | null;
@@ -145,6 +147,7 @@ export interface ConsoleView {
     cursor?: string | null;
     antigravity?: string | null;
     copilot?: string | null;
+    opencode?: string | null;
   };
   /** Effective model/effort/speed defaults read from each vendor's CLI. */
   modelDefaults?: Partial<Record<string, ModelDefaults>>;
@@ -214,6 +217,9 @@ const STYLE = `
     --vendor-copilot-fg: #6e40c9; --vendor-copilot-bg: #f5f0ff; --vendor-copilot-border: #b392f0;
     --vendor-copilot-hover-bg: #eee5ff; --vendor-copilot-hover-border: #986ee2;
     --vendor-copilot-action-bg: #6e40c9; --vendor-copilot-action-hover: #5936a2; --vendor-copilot-action-fg: #ffffff; --vendor-copilot-action-ring: rgba(110,64,201,0.3);
+    --vendor-opencode-fg: #656363; --vendor-opencode-bg: #f5f4f4; --vendor-opencode-border: #cfcecd;
+    --vendor-opencode-hover-bg: #eceae9; --vendor-opencode-hover-border: #b7b1b1;
+    --vendor-opencode-action-bg: #4b4646; --vendor-opencode-action-hover: #656363; --vendor-opencode-action-fg: #ffffff; --vendor-opencode-action-ring: rgba(75,70,70,0.3);
     --vendor-action-bg: var(--primary-bg); --vendor-action-hover: var(--primary-hover); --vendor-action-fg: var(--primary-fg); --vendor-action-ring: var(--accent-ring);
     --todo-fg: #b45309; --todo-bg: #fffbeb; --todo-border: #fde68a;
     --radius: 8px; --radius-sm: 6px; --radius-pill: 999px;
@@ -276,6 +282,9 @@ const STYLE = `
     --vendor-copilot-fg: #d2a8ff; --vendor-copilot-bg: rgba(110,64,201,0.2); --vendor-copilot-border: #8957e5;
     --vendor-copilot-hover-bg: rgba(110,64,201,0.32); --vendor-copilot-hover-border: #b392f0;
     --vendor-copilot-action-bg: #d2a8ff; --vendor-copilot-action-hover: #e2c5ff; --vendor-copilot-action-fg: #21103f; --vendor-copilot-action-ring: rgba(210,168,255,0.34);
+    --vendor-opencode-fg: #cfcecd; --vendor-opencode-bg: rgba(183,177,177,0.14); --vendor-opencode-border: #7d7878;
+    --vendor-opencode-hover-bg: rgba(183,177,177,0.24); --vendor-opencode-hover-border: #b7b1b1;
+    --vendor-opencode-action-bg: #cfcecd; --vendor-opencode-action-hover: #e5e3e2; --vendor-opencode-action-fg: #2b2828; --vendor-opencode-action-ring: rgba(207,206,205,0.3);
     --vendor-cursor-hover-bg: #3f3f46; --vendor-cursor-hover-border: #a1a1aa;
     --todo-fg: #fbbf24; --todo-bg: rgba(245,158,11,0.14); --todo-border: rgba(245,158,11,0.48);
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.28);
@@ -299,6 +308,7 @@ const STYLE = `
   [data-vendor="cursor"] { --vendor-action-bg: var(--vendor-cursor-action-bg); --vendor-action-hover: var(--vendor-cursor-action-hover); --vendor-action-fg: var(--vendor-cursor-action-fg); --vendor-action-ring: var(--vendor-cursor-action-ring); }
   [data-vendor="antigravity"] { --vendor-action-bg: var(--vendor-antigravity-action-bg); --vendor-action-hover: var(--vendor-antigravity-action-hover); --vendor-action-fg: var(--vendor-antigravity-action-fg); --vendor-action-ring: var(--vendor-antigravity-action-ring); }
   [data-vendor="copilot"] { --vendor-action-bg: var(--vendor-copilot-action-bg); --vendor-action-hover: var(--vendor-copilot-action-hover); --vendor-action-fg: var(--vendor-copilot-action-fg); --vendor-action-ring: var(--vendor-copilot-action-ring); }
+  [data-vendor="opencode"] { --vendor-action-bg: var(--vendor-opencode-action-bg); --vendor-action-hover: var(--vendor-opencode-action-hover); --vendor-action-fg: var(--vendor-opencode-action-fg); --vendor-action-ring: var(--vendor-opencode-action-ring); }
   button[data-vendor]:focus-visible { outline-color: var(--vendor-action-ring); }
   input, textarea, select { font-family: inherit; }
   input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
@@ -882,6 +892,7 @@ const STYLE = `
   .it-context .vtag.cursor { color: var(--vendor-cursor-fg); background: transparent; border-color: transparent; }
   .it-context .vtag.antigravity { color: var(--vendor-antigravity-fg); background: transparent; border-color: transparent; }
   .it-context .vtag.copilot { color: var(--vendor-copilot-fg); background: transparent; border-color: transparent; }
+  .it-context .vtag.opencode { color: var(--vendor-opencode-fg); background: transparent; border-color: transparent; }
   .it-context .ptag { color: var(--project-fg, #64748b); font-weight: 700; }
   /* per-tab tag editor + custom suggestion dropdown (replaces the native datalist) */
   .tagedit { position: relative; margin-top: 0.4rem; }
@@ -931,6 +942,7 @@ const STYLE = `
   .vtag.cursor { color: var(--vendor-cursor-fg); background: var(--vendor-cursor-bg); border-color: var(--vendor-cursor-border); }
   .vtag.antigravity { color: var(--vendor-antigravity-fg); background: var(--vendor-antigravity-bg); border-color: var(--vendor-antigravity-border); }
   .vtag.copilot { color: var(--vendor-copilot-fg); background: var(--vendor-copilot-bg); border-color: var(--vendor-copilot-border); }
+  .vtag.opencode { color: var(--vendor-opencode-fg); background: var(--vendor-opencode-bg); border-color: var(--vendor-opencode-border); }
   .ptag { font-weight: 600; }
   #h-sig .score, #h-sig .eta { cursor: pointer; }
   /* a manually-pinned priority/ETA: dashed underline marks it as user-set */
@@ -939,6 +951,25 @@ const STYLE = `
   .badge-edit { width: 3rem; font-size: 0.7rem; padding: 0 0.25rem; border: 1px solid #6366f1; border-radius: 3px; background: var(--input-bg); color: var(--ink); }
   .sigmenu { position: fixed; z-index: 80; width: min(9.75rem, calc(100vw - 20px)); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); padding: 0.25rem; }
   .sigmenu.info { width: min(24rem, calc(100vw - 20px)); }
+  .sigmenu.state-menu { width: min(17.5rem, calc(100vw - 20px)); padding: 0.375rem; box-sizing: border-box; max-height: calc(100dvh - 20px); overflow-y: auto; }
+  .state-menu .sigmenu-opt { padding: 0.375rem 0.5rem; }
+  .state-menu .sigmenu-opt.on::after { content: '✓'; margin-left: auto; font-size: 0.75rem; color: var(--accent); }
+  .sigmenu-custom { margin: 0.375rem 0.125rem 0; padding: 0.75rem 0.375rem 0.375rem; border-top: 1px solid var(--line); }
+  .state-editor-label { display: block; margin-bottom: 0.5rem; color: var(--ink-3); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.025em; }
+  .state-editor-input { display: block; box-sizing: border-box; width: 100%; min-width: 0; height: 2.125rem; padding: 0.375rem 0.625rem; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink); font: inherit; font-size: 0.78rem; outline: none; transition: border-color 120ms, box-shadow 120ms; }
+  .state-editor-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+  .state-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: 0.625rem; }
+  .state-editor-colors { display: flex; align-items: center; gap: 0.3rem; }
+  .state-color-swatch { appearance: none; position: relative; display: block; flex: 0 0 1.125rem; width: 1.125rem; height: 1.125rem; padding: 0; border: 2px solid var(--surface); border-radius: 50%; background: var(--swatch); box-shadow: 0 0 0 1px transparent; cursor: pointer; }
+  .state-color-swatch:hover { box-shadow: 0 0 0 1px var(--ink-3); }
+  .state-color-swatch[aria-pressed="true"] { box-shadow: 0 0 0 1px var(--ink-2); }
+  .state-color-swatch:focus-visible, .state-color-picker:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .state-color-picker { position: relative; display: block; width: 1.25rem; height: 1.25rem; border-radius: 50%; background: conic-gradient(#f87171, #facc15, #4ade80, #60a5fa, #c084fc, #f87171); box-shadow: inset 0 0 0 3px var(--surface); cursor: pointer; }
+  .state-color-picker input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+  .state-editor-save { appearance: none; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--button-hover); color: var(--ink); padding: 0.375rem 0.75rem; font: inherit; font-size: 0.72rem; font-weight: 600; cursor: pointer; }
+  .state-editor-save:hover { border-color: var(--accent); color: var(--accent); }
+  .state-editor-save:disabled { opacity: 0.4; cursor: default; }
+
   .sigmenu-opt { display: flex; align-items: center; gap: 0.45rem; min-width: 0; font-size: 0.76rem; color: var(--ink-2); padding: 0.35rem 0.5rem; border-radius: var(--radius-sm); cursor: pointer; }
   .sigmenu-opt:hover, .sigmenu-opt.on { background: var(--accent-soft); color: #3730a3; }
   .sigmenu-opt .prilabel { cursor: pointer; }
@@ -1131,9 +1162,8 @@ const STYLE = `
   .msg.editing .msg-fold { display: none; }
   .msg.editing .msg-comment { display: none; }
   .pincomment { flex-shrink: 0; min-height: 1.12rem; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--radius-pill); padding: 0.16rem 0.42rem; background: transparent; color: var(--status-seen); font-size: 0.62rem; font-weight: 700; box-shadow: none; transition: color 0.12s, background 0.12s; }
-  .pincomment:hover, .pincomment:focus-visible { color: var(--status-seen); background: var(--status-seen-soft); outline: none; }
+  .pincomment:hover:not(:disabled), .pincomment:focus-visible:not(:disabled) { color: var(--status-seen); background: var(--status-seen-soft); outline: none; }
   .pincomment.idle { background: transparent; color: var(--ink-4); }
-  .pincomment.idle:hover, .pincomment.idle:focus-visible { background: var(--status-seen-soft); color: var(--status-seen); }
   .pincomment.generating { color: var(--status-generating); min-width: 1.3rem; padding: 0.16rem 0.36rem; }
   .pincomment.generating:hover, .pincomment.generating:focus-visible { color: var(--status-generating); background: var(--status-generating-soft); }
   .pincomment.unread { color: var(--status-unread); }
@@ -1143,6 +1173,8 @@ const STYLE = `
   .commentpanel { --comment-composer-overlay-height: 4rem; --comment-queue-overlay-height: 0px; --comment-scrollbar-width: 0px; position: relative; width: min(34rem, 92vw); height: 100%; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--line); box-shadow: var(--shadow-pop); }
   .commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center; gap: 0.65rem; padding: 0 0.65rem 0 0.9rem; border-bottom: 1px solid var(--line-2); }
   .commenttitle { flex: 1; min-width: 0; color: var(--ink); font-size: 0.84rem; line-height: 1; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .commentstatus { flex-shrink: 0; }
+  .commentstatus[hidden] { display: none; }
   .commentactions { flex-shrink: 0; display: flex; align-items: center; gap: 0.14rem; }
   .commentpromote { height: 1.75rem; min-height: 1.75rem; padding: 0 0.5rem; border-color: color-mix(in srgb, var(--vendor-action-bg) 38%, transparent); background: color-mix(in srgb, var(--vendor-action-bg) 10%, transparent); color: var(--vendor-action-bg); box-shadow: none; font-size: 0.68rem; line-height: 1; font-weight: 700; }
   .commentpromote:hover:not(:disabled) { border-color: color-mix(in srgb, var(--vendor-action-bg) 56%, transparent); background: color-mix(in srgb, var(--vendor-action-bg) 18%, transparent); color: var(--vendor-action-bg); box-shadow: none; }
@@ -1383,6 +1415,7 @@ const STYLE = `
   #railVendor[data-vendor="cursor"] { color: var(--vendor-cursor-fg); }
   #railVendor[data-vendor="antigravity"] { color: var(--vendor-antigravity-fg); }
   #railVendor[data-vendor="copilot"] { color: var(--vendor-copilot-fg); }
+  #railVendor[data-vendor="opencode"] { color: var(--vendor-opencode-fg); }
   #railModel { flex: 0 1 auto; min-width: 0; }
   #railModel .railbtn-value { max-width: 8rem; }
   /* only when open todos exist: label + count carry the sidebar todo marker's amber (.it-todo); 0 stays neutral */
@@ -1422,6 +1455,7 @@ const STYLE = `
   .rail-option[data-vendor="cursor"] .rail-option-label, .rail-option[data-vendor="cursor"] .rail-option-vendor-mark { color: var(--vendor-cursor-fg); }
   .rail-option[data-vendor="antigravity"] .rail-option-label, .rail-option[data-vendor="antigravity"] .rail-option-vendor-mark { color: var(--vendor-antigravity-fg); }
   .rail-option[data-vendor="copilot"] .rail-option-label, .rail-option[data-vendor="copilot"] .rail-option-vendor-mark { color: var(--vendor-copilot-fg); }
+  .rail-option[data-vendor="opencode"] .rail-option-label, .rail-option[data-vendor="opencode"] .rail-option-vendor-mark { color: var(--vendor-opencode-fg); }
   .rail-option-note { flex-shrink: 0; color: var(--ink-4); font-size: 0.62rem; }
   .rail-empty { padding: 0.85rem 0.65rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink-4); box-shadow: var(--shadow-sm); font-size: 0.74rem; text-align: center; }
   .rail-items { display: flex; flex-direction: column; gap: 0.05rem; }
@@ -1816,6 +1850,7 @@ const STYLE = `
   html[data-theme="dark"] .it-context .vtag.cursor { color: var(--vendor-cursor-fg); }
   html[data-theme="dark"] .it-context .vtag.antigravity { color: var(--vendor-antigravity-fg); }
   html[data-theme="dark"] .it-context .vtag.copilot { color: var(--vendor-copilot-fg); }
+  html[data-theme="dark"] .it-context .vtag.opencode { color: var(--vendor-opencode-fg); }
   html[data-theme="dark"] .it-context .ptag { color: var(--project-fg-dark, #cbd5e1); }
   html[data-theme="dark"] .it-live-total { color: var(--status-generating); }
   html[data-theme="dark"] .it-live.generated .it-live-total { color: var(--status-unread); }
@@ -1832,6 +1867,7 @@ const STYLE = `
   html[data-theme="dark"] .tipmeta .vtag.cursor { color: var(--vendor-cursor-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .vtag.antigravity { color: var(--vendor-antigravity-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .vtag.copilot { color: var(--vendor-copilot-fg); background: transparent; border-color: transparent; }
+  html[data-theme="dark"] .tipmeta .vtag.opencode { color: var(--vendor-opencode-fg); background: transparent; border-color: transparent; }
   html[data-theme="dark"] .tipmeta .ptag { color: var(--project-fg-dark, #cbd5e1); }
   html[data-theme="dark"] .msg.error .bubble,
   html[data-theme="dark"] .newbox .nmsg .provider-error-card,
@@ -1966,6 +2002,7 @@ export function renderConsole(v: ConsoleView): string {
   const cursorModelsJson = JSON.stringify(v.cursorModels).replace(/</g, "\\u003c");
   const antigravityModelsJson = JSON.stringify(v.antigravityModels ?? []).replace(/</g, "\\u003c");
   const copilotModelsJson = JSON.stringify(v.copilotModels ?? []).replace(/</g, "\\u003c");
+  const opencodeModelsJson = JSON.stringify(v.opencodeModels ?? []).replace(/</g, "\\u003c");
   const modelWarningsJson = JSON.stringify(v.modelWarnings ?? {}).replace(/</g, "\\u003c");
   const modelDefaultsJson = JSON.stringify(v.modelDefaults ?? {}).replace(/</g, "\\u003c");
   const tagsJson = JSON.stringify(v.tags).replace(/</g, "\\u003c");
@@ -2291,6 +2328,7 @@ export function renderConsole(v: ConsoleView): string {
 <div class="commentdrawer" id="commentDrawer" hidden aria-hidden="true">
   <section class="commentpanel" role="dialog" aria-modal="false" aria-labelledby="commentTitle">
     <header class="commenthead">
+      <span class="commentstatus it-status read" id="commentStatus" title="read" hidden></span>
       <div class="commenttitle" id="commentTitle">Comment thread</div>
       <div class="commentactions">
         <button class="commentpromote" id="commentPromote" type="button">promote to session</button>
@@ -2463,6 +2501,7 @@ window.__CODEX_MODELS__ = ${codexModelsJson};
 window.__CURSOR_MODELS__ = ${cursorModelsJson};
 window.__ANTIGRAVITY_MODELS__ = ${antigravityModelsJson};
 window.__COPILOT_MODELS__ = ${copilotModelsJson};
+window.__OPENCODE_MODELS__ = ${opencodeModelsJson};
 window.__MODEL_WARNINGS__ = ${modelWarningsJson};
 window.__MODEL_DEFAULTS__ = ${modelDefaultsJson};
 window.__TAGS__ = ${tagsJson};
@@ -2493,6 +2532,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var CURSOR_MODELS = window.__CURSOR_MODELS__ || [];
   var ANTIGRAVITY_MODELS = window.__ANTIGRAVITY_MODELS__ || [];
   var COPILOT_MODELS = window.__COPILOT_MODELS__ || [];
+  var OPENCODE_MODELS = window.__OPENCODE_MODELS__ || [];
   var MODEL_WARNINGS = window.__MODEL_WARNINGS__ || {};
   var MODEL_DEFAULTS = window.__MODEL_DEFAULTS__ || {};
   var CHANGELOG_MARKDOWN = window.__CHANGELOG__ || '';
@@ -2606,6 +2646,7 @@ window.__CHANGELOG__ = ${changelogJson};
     CURSOR_MODELS = view.cursorModels || [];
     ANTIGRAVITY_MODELS = view.antigravityModels || [];
     COPILOT_MODELS = view.copilotModels || [];
+    OPENCODE_MODELS = view.opencodeModels || [];
     MODEL_WARNINGS = view.modelWarnings || {};
     MODEL_DEFAULTS = view.modelDefaults || {};
     TAGS = view.tags || [];
@@ -2695,6 +2736,8 @@ window.__CHANGELOG__ = ${changelogJson};
     } : null;
     if(preserveLiveActivity) deferSessionActivity(existing,indexedSession);
     Object.assign(existing,indexedSession);
+    if(preserveLiveActivity) existing._manualState=null;
+    else if(existing._manualState) Object.assign(existing,existing._manualState);
     // A client id is the permanent UI/cache identity. Provider discovery only
     // binds an alias; it must never re-key the optimistic transcript object.
     if(stableIdentity){
@@ -5857,13 +5900,15 @@ window.__CHANGELOG__ = ${changelogJson};
     var preserveRecentOrder=options.source==='status'||options.source==='engagement';
     var s=findSessionById(next.sessionId);
     if(!s) return;
-    ['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','probe','state','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','model','effort','speed'].forEach(function(k){
+    ['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','probe','state','stateColor','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','model','effort','speed'].forEach(function(k){
       if(options.source==='status' && k!=='unread' && k!=='seen') return;
       var derivedAvoidance=k==='pattern'||k==='patternReason'||k==='patternData'||k==='avoidancePrompt';
       if(options.source==='engagement' && !derivedAvoidance) return;
       if(options.source==='engagement' && (sessionAwaitingLiveStart(s)||s.patternset) && derivedAvoidance) return;
       if((options.source==='send'||options.source==='answer') && s.generating && derivedAvoidance) return;
       var turnScoped=k==='state'||k==='stateset'||k==='etaMin'||k==='etaset';
+      turnScoped=turnScoped||k==='stateColor';
+      if(s._manualState&&!s.generating&&(k==='state'||k==='stateColor'||k==='stateset')) return;
       if(next[k]!==undefined && !(s.generating&&turnScoped)) s[k]=next[k];
     });
     // Same rule as the index hydration: an authoritative run config retires the
@@ -7416,6 +7461,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     commentThreads[thread.id]=next;
     VAULT_STATE.commentThreads=commentThreads;
+    if(thread.id===commentDrawerState.threadId) syncCommentHeaderStatus(next);
     syncAllMessageCommentStates();
     syncAllSessionCommentBadges();
     renderPinTray();
@@ -7937,6 +7983,8 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function openCommentsForPin(pin,thread){
     if(!pin) return;
+    thread=commentThreadForAnchor(currentParentSessionId(),pin.key,pin.text);
+    if(!thread) return;
     var targetKey=pinTargetKey(pin),target=findMsgByKey(targetKey);
     if(!target&&ensureTranscriptKeyVisible(targetKey)) target=findMsgByKey(targetKey);
     var text=String(pin.text||'');
@@ -7979,7 +8027,8 @@ window.__CHANGELOG__ = ${changelogJson};
         var commentIcon=svgIcon('comment'); commentIcon.setAttribute('class','comment-action-icon pincomment-icon'); cb.appendChild(commentIcon);
       }
       cb.type='button';
-      cb.title=commentStatus==='generating'?'Open comments · reply generating':thread?'Open comments':'Comment on this pin';
+      cb.disabled=!thread;
+      cb.title=commentStatus==='generating'?'Open comments · reply generating':thread?'Open comments':'No comments on this pin';
       cb.setAttribute('aria-label',cb.title);
       cb.onclick=function(ev){ ev.stopPropagation(); openCommentsForPin(pin,thread); };
       item.appendChild(cb);
@@ -8306,6 +8355,7 @@ window.__CHANGELOG__ = ${changelogJson};
       commentDrawerState.lastAssistantOutputAt=null;
       commentDrawerState.stopping=false;
     }
+    syncCommentHeaderStatus(commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId]);
     syncCommentSendButton();
     syncCommentPromoteButton();
     syncCommentUserEditActions();
@@ -8403,6 +8453,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var rail=byId('commentMsgFloatActions'); if(rail){ rail.classList.remove('show'); rail.setAttribute('aria-hidden','true'); }
     var referenceBox=byId('commentMsgReferenceComposer'); if(referenceBox){ referenceBox.hidden=true; referenceBox.setAttribute('aria-hidden','true'); }
     drawer.hidden=true; drawer.setAttribute('aria-hidden','true');
+    syncCommentHeaderStatus(null);
     commentDrawerEpoch++;
     commentDrawerState.assistant=null;
   }
@@ -8411,6 +8462,39 @@ window.__CHANGELOG__ = ${changelogJson};
     var readAt=Date.now();
     rememberCommentThread(Object.assign({},thread,{status:'read'}));
     fetch('/comments/read',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:thread.id,readAt:readAt})})
+      .then(function(r){return r.json();})
+      .then(function(res){ if(res&&res.stale&&res.thread) rememberCommentThread(res.thread); })
+      .catch(function(){});
+  }
+  // The open thread wears the same attention light as a session: green while a
+  // reply is unseen, gray once read, purple while generating. Clicking it is the
+  // comment-side toggleStatus — dismiss to gray or re-flag to green.
+  function commentAttentionState(thread){
+    if(!thread) return null;
+    if(thread.status==='generating'||thread.status==='scheduled') return 'generating';
+    return thread.status==='unread' ? 'unread' : 'read';
+  }
+  function commentHeaderStatusTitle(st){
+    if(st==='generating') return 'generating';
+    return st==='unread' ? 'new reply · click to mark read' : 'read · click to mark unread';
+  }
+  function syncCommentHeaderStatus(thread){
+    var dot=byId('commentStatus'); if(!dot) return;
+    var state=commentAttentionState(thread);
+    dot.hidden=!state;
+    if(!state){ dot.onclick=null; return; }
+    dot.className='commentstatus it-status '+state;
+    dot.title=commentHeaderStatusTitle(state);
+    dot.setAttribute('aria-label',commentHeaderStatusTitle(state));
+    dot.onclick=function(ev){ ev.stopPropagation(); toggleCommentStatus(); };
+  }
+  function toggleCommentStatus(){
+    var id=commentDrawerState.threadId, thread=id&&commentThreads[id];
+    if(!thread || thread.status==='generating' || thread.status==='scheduled') return;
+    var next=thread.status==='unread' ? 'read' : 'unread';
+    rememberCommentThread(Object.assign({},thread,{status:next}));
+    var readAt=Date.now();
+    fetch('/comments/status',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:id,status:next,readAt:readAt})})
       .then(function(r){return r.json();})
       .then(function(res){ if(res&&res.stale&&res.thread) rememberCommentThread(res.thread); })
       .catch(function(){});
@@ -8608,6 +8692,7 @@ window.__CHANGELOG__ = ${changelogJson};
     sendingCommentQueueItems={};
     renderCommentAnchorBlock(text,key,anchorData);
     drawer.hidden=false; drawer.setAttribute('aria-hidden','false');
+    syncCommentHeaderStatus(thread||null);
     scheduleCommentOverlayOffsets();
     var cachedComments=thread&&commentMessageCache[thread.id]||[];
     seedCommentGenerationTiming(thread,cachedComments);
@@ -8740,7 +8825,9 @@ window.__CHANGELOG__ = ${changelogJson};
     var thread=commentDrawerState.threadId&&commentThreads[commentDrawerState.threadId];
     if(commentDrawerState.pendingStop) return commentDrawerState.pendingStop;
     if(!thread||!commentDrawerState.generating) return Promise.resolve(false);
-    commentDrawerState.stopping=true; syncCommentSendButton(); syncCommentPromoteButton();
+    commentDrawerState.stopping=true;
+    syncCommentSendButton();
+    syncCommentPromoteButton();
     var status=byId('commentGenerating'), bubble=status&&status.querySelector('.bubble');
     if(bubble) bubble.textContent='Stopping…';
     syncCommentUserEditActions();
@@ -9574,7 +9661,9 @@ window.__CHANGELOG__ = ${changelogJson};
           ? { fg:'var(--vendor-antigravity-fg)', bg:'var(--vendor-antigravity-bg)', border:'var(--vendor-antigravity-border)' }
           : vendor==='copilot'
             ? { fg:'var(--vendor-copilot-fg)', bg:'var(--vendor-copilot-bg)', border:'var(--vendor-copilot-border)' }
-            : { fg:'var(--vendor-codex-fg)', bg:'var(--vendor-codex-bg)', border:'var(--vendor-codex-border)' };
+            : vendor==='opencode'
+              ? { fg:'var(--vendor-opencode-fg)', bg:'var(--vendor-opencode-bg)', border:'var(--vendor-opencode-border)' }
+              : { fg:'var(--vendor-codex-fg)', bg:'var(--vendor-codex-bg)', border:'var(--vendor-codex-border)' };
   }
   function setActionVendor(node,vendor){
     if(!node) return;
@@ -9706,6 +9795,43 @@ window.__CHANGELOG__ = ${changelogJson};
       item.onclick=function(ev){ ev.stopPropagation(); closeSignalMenu(); saveOverride(s, field, opt.value); renderSidebar(); if(cur&&cur.sessionId===s.sessionId) headerSig(s); };
       menu.appendChild(item);
     });
+    if(field==='state'){
+      menu.classList.add('state-menu');
+      var form=el('form','sigmenu-custom');
+      var label=el('label','state-editor-label','Custom label');
+      var input=el('input','state-editor-input'); input.type='text'; input.maxLength=80;
+      input.id='state-editor-text'; label.htmlFor=input.id;
+      input.placeholder='Write a label…'; input.setAttribute('aria-label','State text');
+      input.value=s.state||''; input.autocomplete='off';
+      var footer=el('div','state-editor-footer');
+      var colors=el('div','state-editor-colors'); colors.setAttribute('aria-label','Label color');
+      var picker=el('label','state-color-picker'); picker.title='Custom color';
+      var color=el('input'); color.type='color';
+      color.value=s.stateColor||({continue_ready:'#2563eb',needs_decision:'#d97706',needs_input:'#7c3aed',blocked:'#dc2626',needs_review:'#0f766e',followup_suggested:'#2563eb',done:'#64748b'})[s.state]||'#64748b';
+      color.setAttribute('aria-label','State color');
+      var swatches=[];
+      function syncColors(){ swatches.forEach(function(button){ button.setAttribute('aria-pressed',String(button.dataset.color===color.value)); }); }
+      [['#64748b','Slate'],['#0f766e','Teal'],['#2563eb','Blue'],['#7c3aed','Violet'],['#d97706','Amber'],['#dc2626','Red']].forEach(function(pair){
+        var swatch=el('button','state-color-swatch'); swatch.type='button';
+        swatch.style.setProperty('--swatch',pair[0]); swatch.dataset.color=pair[0];
+        swatch.title=pair[1]; swatch.setAttribute('aria-label',pair[1]);
+        swatch.onclick=function(){ color.value=pair[0]; syncColors(); };
+        swatches.push(swatch); colors.appendChild(swatch);
+      });
+      color.oninput=syncColors; syncColors(); picker.appendChild(color); colors.appendChild(picker);
+      var save=el('button','state-editor-save','Save'); save.type='submit';
+      input.oninput=function(){ save.disabled=!input.value.trim(); }; input.oninput();
+      footer.appendChild(colors); footer.appendChild(save);
+      form.appendChild(label); form.appendChild(input); form.appendChild(footer);
+      form.onsubmit=function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        var text=input.value.trim(); if(!text){ input.focus(); return; }
+        saveOverride(s,'state',text,color.value); closeSignalMenu();
+        renderSidebar(); if(cur&&cur.sessionId===s.sessionId) headerSig(s);
+      };
+      form.onkeydown=function(ev){ ev.stopPropagation(); if(ev.key==='Escape') closeSignalMenu(); };
+      menu.appendChild(form);
+    }
     openSignalMenu(menu, anchor, key);
   }
   function fmtAvoidMinutes(min){
@@ -9790,7 +9916,7 @@ window.__CHANGELOG__ = ${changelogJson};
     scheduleOverlayOffsets();
   }
   function stateLabel(state){
-    return STATE_OPTIONS.indexOf(state)>=0 ? state : '';
+    return typeof state==='string' ? state : '';
   }
   function stateTitle(state){
     return ({
@@ -9806,18 +9932,26 @@ window.__CHANGELOG__ = ${changelogJson};
   function stateChip(state, edited){
     var label=stateLabel(state);
     if(!label) return null;
-    var badge=el('span','state '+state+(edited?' edited':''),label);
+    var badge=el('span','state '+(STATE_OPTIONS.indexOf(state)>=0?state:'custom')+(edited?' edited':''),label);
     badge.title=stateTitle(state);
     return badge;
   }
   function stateBadge(s){
-    if(!s || !s.state) return null;
-    var badge=stateChip(s.state, !!s.stateset);
+    if(!s || (!s.state&&!s.analysisPending)) return null;
+    var pending=s.analysisPending&&!s.stateset;
+    var badge=stateChip(pending?'analyzing':s.state, !!s.stateset);
+    if(pending) badge.classList.add('analysis-pending');
+    if(!pending&&s.stateColor&&/^#[0-9a-f]{6}$/i.test(s.stateColor)){
+      badge.style.backgroundColor=s.stateColor;
+      badge.style.borderColor=s.stateColor;
+      var rgb=s.stateColor.slice(1).match(/../g).map(function(v){ return parseInt(v,16); });
+      badge.style.color=(rgb[0]*299+rgb[1]*587+rgb[2]*114)>150000?'#111827':'#ffffff';
+    }
     if(s.sessionId){
       badge.classList.add('editable');
       badge.setAttribute('role','button');
       badge.tabIndex=0;
-      badge.setAttribute('aria-label','Change state: '+stateLabel(s.state));
+      badge.setAttribute('aria-label','Change state: '+(pending?'analyzing':stateLabel(s.state)));
       var editState=function(ev){ ev.stopPropagation(); showSignalMenu(badge, s, 'state', STATE_OPTIONS.map(function(st){ return {value:st,label:stateLabel(st),node:stateChip(st, false),on:st===s.state}; })); };
       badge.onclick=editState;
       badge.onkeydown=function(ev){ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); editState(ev); } };
@@ -10282,6 +10416,27 @@ window.__CHANGELOG__ = ${changelogJson};
     var patch={}; patch[fromKey]=null; patch[toKey]=source;
     saveVaultUiState({sessionGoals:patch});
   }
+  // A provider session can be surfaced by the disk scan before this tab learns
+  // its provider id. OpenCode mints its native session row at process start, so
+  // the index revision often lands while the new-session request is still awaiting the first
+  // stream event. The unbound optimistic card is preserved and the scanned card
+  // is listed alongside it; binding the provider id then has to fold that sibling
+  // or the same session is shown twice. Iterate a copy so the splice is safe even
+  // when a caller is mid-iteration over SESS.
+  function foldProviderSiblings(owner,providerId){
+    providerId=String(providerId||'');
+    if(!owner || !providerId) return;
+    var vendor=String(owner.vendor||'').toLowerCase();
+    SESS.slice().forEach(function(other){
+      if(other===owner) return;
+      if(String(other.vendor||'').toLowerCase()!==vendor) return;
+      if(chatSessionIds(other).indexOf(providerId)<0) return;
+      var idx=SESS.indexOf(other); if(idx<0) return;
+      var wasCurrent=cur===other;
+      SESS.splice(idx,1);
+      if(wasCurrent) select(owner);
+    });
+  }
   function bindProviderSessionId(s,providerId){
     if(!s || !providerId) return;
     var previous=sessionTextKey(s);
@@ -10289,6 +10444,7 @@ window.__CHANGELOG__ = ${changelogJson};
     s.providerSessionId=providerId;
     migrateSessionTextCollections(previous,String(providerId));
     migrateSessionGoal(previous,String(providerId));
+    foldProviderSiblings(s,providerId);
     var chatGroup=chatGroupForSession(s); if(chatGroup) persistChatGroups([chatGroup]);
     if(cur===s){
       renderComposerRail();
@@ -10312,19 +10468,10 @@ window.__CHANGELOG__ = ${changelogJson};
     // handle linking old id to new, so its roll is (correctly) a distinct session.
     if(!s || !newId || !s.clientBranchId) return false;
     if(providerSessionId(s)===newId) return false;
+    // Binding folds any sibling the scan already surfaced for the rolled id into
+    // this tab, keeping the followed tab (and the user's selection) as the single
+    // owner.
     bindProviderSessionId(s,newId);
-    // Fold any sibling the scan already surfaced for the rolled id into this tab, keeping the
-    // followed tab (and the user's selection) as the single owner. Iterate a copy so the
-    // splice is safe even when a caller is mid-iteration over SESS.
-    SESS.slice().forEach(function(other){
-      if(other===s) return;
-      if(String(other.vendor||'')!==String(s.vendor||'')) return;
-      if(chatSessionIds(other).indexOf(newId)<0) return;
-      var idx=SESS.indexOf(other); if(idx<0) return;
-      var wasCurrent=cur===other;
-      SESS.splice(idx,1);
-      if(wasCurrent) select(s);
-    });
     return true;
   }
   function railOptionLabel(options,value,fallback){
@@ -11106,6 +11253,7 @@ window.__CHANGELOG__ = ${changelogJson};
       : vendor==='cursor' ? CURSOR_MODELS
       : vendor==='antigravity' ? ANTIGRAVITY_MODELS
       : vendor==='copilot' ? COPILOT_MODELS
+      : vendor==='opencode' ? OPENCODE_MODELS
       : null;
     if(!src) return null;
     var list=normalizedModelOptions(src);
@@ -11395,6 +11543,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var next=normalizedModelOptions(models); if(!next.length) return;
     if(vendor==='antigravity') ANTIGRAVITY_MODELS=next;
     else if(vendor==='copilot') COPILOT_MODELS=next;
+    else if(vendor==='opencode') OPENCODE_MODELS=next;
     var nvendor=String((byId('nvendor')||{}).value||'').trim().toLowerCase();
     if(nvendor===vendor){
       var nmodel=selectedNewModel();
@@ -11417,6 +11566,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(vendor==='cursor') return cursorModelOptions();
     if(vendor==='antigravity') return optionsWithDefault(ANTIGRAVITY_MODELS,cliDefault(vendor,'model'),'CLI default');
     if(vendor==='copilot') return optionsWithDefault(COPILOT_MODELS,cliDefault(vendor,'model'),'CLI default');
+    if(vendor==='opencode') return optionsWithDefault(OPENCODE_MODELS,cliDefault(vendor,'model'),'CLI default');
     return optionsWithDefault([], cliDefault(vendor, 'model'), 'CLI default');
   }
   function applyNewSessionPrefs(force){
@@ -14236,11 +14386,11 @@ window.__CHANGELOG__ = ${changelogJson};
       else if(ev.key==='Escape'){ ev.preventDefault(); finish(false); } });
     inp.addEventListener('blur',function(){ finish(true); });
   }
-  function saveOverride(s, field, value){
+  function saveOverride(s, field, value, color){
     var body={};
-    var previous={score:s.score,priorityset:s.priorityset,state:s.state,stateset:s.stateset,pattern:s.pattern,patternset:s.patternset,etaMin:s.etaMin,etaset:s.etaset};
+    var previous={score:s.score,priorityset:s.priorityset,state:s.state,stateColor:s.stateColor,manualState:s._manualState,analysisPending:s.analysisPending,stateset:s.stateset,pattern:s.pattern,patternset:s.patternset,etaMin:s.etaMin,etaset:s.etaset};
     if(field==='priority'){ value=Math.max(0,Math.min(10,value)); s.score=value; s.priorityset=true; body.priority=value; }
-    else if(field==='state'){ s.state=value; s.stateset=true; body.state=value; }
+    else if(field==='state'){ s.state=value; s.stateColor=color||null; s.stateset=true; s.analysisPending=false; body.state=value; body.stateColor=color||null; s._manualState={state:s.state,stateColor:s.stateColor,stateset:true}; }
     else if(field==='pattern'){
       if(value===null){ s.pattern='unknown'; s.patternset=false; body.pattern=null; }
       else { s.pattern=value; s.patternset=true; body.pattern=value; }
@@ -14252,7 +14402,8 @@ window.__CHANGELOG__ = ${changelogJson};
     function rollback(){
       if(!operationIsCurrent(operation)) return;
       s.score=previous.score; s.priorityset=previous.priorityset;
-      s.state=previous.state; s.stateset=previous.stateset;
+      s.state=previous.state; s.stateColor=previous.stateColor; s.stateset=previous.stateset;
+      if(field==='state'){ s.analysisPending=previous.analysisPending; s._manualState=previous.manualState; }
       s.pattern=previous.pattern; s.patternset=previous.patternset;
       s.etaMin=previous.etaMin; s.etaset=previous.etaset;
       if(cur===s){ syncOpenHeader(); renderAvoidancePanel(); }
@@ -14271,6 +14422,8 @@ window.__CHANGELOG__ = ${changelogJson};
     s.etaMin=null;
     s.etaset=false;
     s.state=null;
+    s.stateColor=null;
+    s._manualState=null;
     s.stateset=false;
     // Both analyzer drafts belong to the assistant turn that just ended. Once a
     // user/queued turn starts they must not survive locally or reappear at turn-end.
@@ -14589,7 +14742,7 @@ window.__CHANGELOG__ = ${changelogJson};
     registerLiveTiming(liveEntry);
     if(s.generating || s.lastGenerationDurationMs!=null || s.score!=null) host.appendChild(liveEntry.row);
     syncLiveTimingEntry(liveEntry,s,Date.now());
-    if(!s.generating && s.analysisPending) host.appendChild(el('span','analysis-pending','analyzing'));
+    if(!s.generating && s.analysisPending){ var pendingBadge=stateBadge(s); if(pendingBadge) host.appendChild(pendingBadge); }
     if(!s.generating && !s.analysisPending && s.etaMin!=null) host.appendChild(etaBadge(s,'b-eta'));
     if(!s.generating && !s.analysisPending){ var badge=stateBadge(s); if(badge) host.appendChild(badge); }
     var reason=!s.generating && !s.analysisPending && s.reason && s.reason!=='no signal' ? s.reason : '';
@@ -19331,10 +19484,12 @@ window.__CHANGELOG__ = ${changelogJson};
   }, 5000);
   refreshProcessModels('antigravity');
   refreshProcessModels('copilot');
+  refreshProcessModels('opencode');
   var processModelRefreshCount=0;
   var processModelRefreshTimer=window.setInterval(function(){
     refreshProcessModels('antigravity');
     refreshProcessModels('copilot');
+    refreshProcessModels('opencode');
     processModelRefreshCount++;
     if(processModelRefreshCount>=12) window.clearInterval(processModelRefreshTimer);
   }, 5000);
@@ -20167,16 +20322,46 @@ window.__CHANGELOG__ = ${changelogJson};
     if(document.activeElement===byId('commentInput')) syncCommentShortcutGhost();
     if(document.activeElement===byId('np')) syncNewShortcutGhost();
   });
-  function consumeComposerEffortCommand(input){
+  function consumeComposerConfigCommand(input){
     if(composerShortcutComposing || !canConfigureRun()) return false;
     var value=String(input&&input.value||'');
-    var command=value.endsWith('/effort ') ? '/effort ' : value.endsWith('/e ') ? '/e ' : '';
-    if(!command) return false;
-    input.value=value.slice(0,value.length-command.length);
+    if(input.selectionStart!==value.length || input.selectionEnd!==value.length) return false;
+    var match=/(\\s?)[/]([^\\s/]+) $/.exec(value);
+    if(!match) return false;
+    var command=match[2].toLowerCase();
+    var aliases={e:'effort',effort:'effort',m:'model',model:'model',v:'vendor',vendor:'vendor'};
+    var kind=Object.prototype.hasOwnProperty.call(aliases,command)?aliases[command]:'';
+    // One rule for every command: a slash may follow any text; only a slash
+    // directly after another slash (a URL like https://codex ) is left alone.
+    if(match.index>0 && value.charAt(match.index-1)==='/') return false;
+    var chosen=null;
+    if(!kind){
+      var display=currentRunSelection(),model=display.model||cliDefault(display.vendor,'model');
+      var candidates=[];
+      function addOptions(axis,options){
+        options.forEach(function(option){
+          if(option.value) candidates.push({kind:axis,value:String(option.value),label:String(option.label||'')});
+        });
+      }
+      addOptions('vendor',forkVendorChoices().map(function(info){ return {value:info.vendor}; }));
+      addOptions('effort',effortOptionsFor(display.vendor,model,display.speed));
+      addOptions('model',modelOptionsFor(display.vendor));
+      // Exact values win over prefixes (e.g. gpt-6 over gpt-6-mini).
+      chosen=candidates.find(function(option){ return option.value.toLowerCase()===command; }) ||
+        candidates.find(function(option){ return option.value.toLowerCase().startsWith(command)||option.label.toLowerCase().startsWith(command); });
+      if(!chosen) return false;
+      kind=chosen.kind;
+    }
+    input.value=value.slice(0,match.index+match[1].length);
     input.setSelectionRange(input.value.length,input.value.length);
     resetComposerHistoryNavigation();
-    openComposerRail('effort',true);
-    focusComposerRailConfigOption();
+    if(chosen){
+      populateRunConfigControls();
+      chooseRailConfig(kind,chosen.value);
+    } else {
+      openComposerRail(kind,true);
+      focusComposerRailConfigOption();
+    }
     return true;
   }
   byId('input').addEventListener('keydown',function(e){
@@ -20200,7 +20385,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }
   });
   byId('input').addEventListener('input',function(){
-    consumeComposerEffortCommand(this);
+    consumeComposerConfigCommand(this);
     syncComposerHeight();
     syncPinReferencePicker();
     syncComposerShortcutGhost();

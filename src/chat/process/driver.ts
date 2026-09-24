@@ -166,18 +166,32 @@ export class ProcessChatDriver implements ChatDriver {
     return true;
   }
 
-  canSteer(_sessionId: string): boolean {
-    return false;
+  canSteer(sessionId: string): boolean {
+    const run = this.runtime.get(sessionId);
+    // Steering requires a live provider turn we can still feed; a handle that
+    // advertises `steer` (OpenCode server) absorbs guidance in place.
+    return !!run?.turnActive && !run.awaitingInputToolUseId && !!run.child?.steer;
   }
 
-  steer(_sessionId: string, _turn: UserTurn): Promise<boolean> {
-    return Promise.resolve(false);
+  async steer(sessionId: string, turn: UserTurn): Promise<boolean> {
+    const run = this.runtime.get(sessionId);
+    const child = run?.child;
+    if (!run || !this.canSteer(sessionId) || !child?.steer) return false;
+    this.idle.cancel(sessionId);
+    return child.steer(turn);
   }
 
   answer(sessionId: string, answer: ToolAnswer): boolean {
     const run = this.runtime.get(sessionId);
     if (!run || !run.awaitingInputToolUseId) return false;
     if (answer.toolUseId !== run.awaitingInputToolUseId) return false;
+    // A handle that can answer in place (OpenCode's server-side question tool)
+    // keeps its provider turn alive, so the answer continues that same turn.
+    if (run.child?.answer) {
+      if (!run.child.answer(answer.toolUseId, answer)) return false;
+      run.awaitingInputToolUseId = null;
+      return true;
+    }
     this.idle.cancel(sessionId);
     run.awaitingInputToolUseId = null;
     run.queuedAnswer = answer;
@@ -296,13 +310,18 @@ export class ProcessChatDriver implements ChatDriver {
     if (!run.turnActive && isTurnEvent(event)) return false;
     if (event.kind === "tool_use" && isInputTool(event.name, event.input)) {
       run.awaitingInputToolUseId = event.id;
-      run.turnActive = false;
-      run.turnStartedAt = 0;
-      run.stoppingForInput = true;
-      try {
-        run.child?.kill();
-      } catch {
-        // Keep the question visible even if the process cannot be stopped.
+      // Restart-style vendors stop their per-turn process and replay the answer
+      // as a new turn. A handle that answers in place (OpenCode) must keep
+      // running — killing it would abort the provider turn waiting on the answer.
+      if (!run.child?.answer) {
+        run.turnActive = false;
+        run.turnStartedAt = 0;
+        run.stoppingForInput = true;
+        try {
+          run.child?.kill();
+        } catch {
+          // Keep the question visible even if the process cannot be stopped.
+        }
       }
     }
     this.runtime.publish(run, event);

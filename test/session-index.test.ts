@@ -81,6 +81,8 @@ describe("WorkerSessionIndex", () => {
       antigravityCapturedSessions: empty,
       copilotSessions: empty,
       copilotCapturedSessions: empty,
+      opencodeData: empty,
+      opencodeSessions: path.join(root, "opencode-sessions"),
       scanCache: path.join(root, "legacy-scan-cache.json"),
       sessionIndex: path.join(root, "index.sqlite3"),
     };
@@ -153,6 +155,8 @@ describe("WorkerSessionIndex", () => {
       antigravityCapturedSessions: empty,
       copilotSessions: empty,
       copilotCapturedSessions: empty,
+      opencodeData: empty,
+      opencodeSessions: path.join(root, "opencode-sessions"),
       scanCache: path.join(root, "legacy-scan-cache.json"),
       sessionIndex: path.join(root, "index.sqlite3"),
     };

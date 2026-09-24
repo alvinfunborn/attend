@@ -2,6 +2,24 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.6 — 2026-09-24
+
+### Added
+
+- OpenCode sessions can be browsed and searched from their native SQLite or legacy JSON store,
+  and continued in the browser with streaming, stopping, mid-turn steering, and interactive
+  questions through an Attend-managed server. Model variants, transcript-seeded forks, and
+  same-provider analyzer daemons are supported.
+- State labels support custom text and colors, with a themed editor, quick color swatches,
+  and a custom color picker alongside the existing presets.
+- Composer shortcuts open model, effort, and vendor settings, or select a matching value directly
+  when followed by a space.
+
+### Fixed
+
+- The `analyzing` label remains editable when a daemon stalls. Manual labels survive delayed
+  analysis results and older session snapshots, and reset when the next conversation turn starts.
+
 ## 1.3.5 — 2026-09-14
 
 ### Added

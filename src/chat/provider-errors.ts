@@ -1,6 +1,6 @@
 export interface PublicProviderError {
-  code: `${"claude" | "codex" | "cursor" | "antigravity" | "copilot"}_${"auth_required" | "usage_limit"}`;
-  vendor: "claude" | "codex" | "cursor" | "antigravity" | "copilot";
+  code: `${"claude" | "codex" | "cursor" | "antigravity" | "copilot" | "opencode"}_${"auth_required" | "usage_limit"}`;
+  vendor: "claude" | "codex" | "cursor" | "antigravity" | "copilot" | "opencode";
   message: string;
   command?: string;
   retryable: boolean;

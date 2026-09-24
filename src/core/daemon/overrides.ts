@@ -1,7 +1,6 @@
 import { JsonFile, type JsonRepository } from "../json-file.js";
 import { SqliteDocument } from "../state-database.js";
 import type { Pattern } from "../types.js";
-import type { AnalysisState } from "./cache.js";
 
 /** A user's manual override for a session's rank, set by clicking its tab. Each
  *  field is optional: only the ones the user edited are pinned, the rest still
@@ -12,7 +11,8 @@ export interface Override {
   /** pinned ETA in minutes, wins over daemon/heuristic until cleared */
   etaMin?: number;
   /** pinned daemon handoff state, wins over daemon until cleared */
-  state?: AnalysisState;
+  state?: string;
+  stateColor?: string;
   /** pinned behavioral pattern, wins over telemetry heuristic until cleared */
   pattern?: Pattern;
 }
@@ -54,7 +54,8 @@ export class OverrideStore {
     patch: {
       priority?: number | null;
       etaMin?: number | null;
-      state?: AnalysisState | null;
+      state?: string | null;
+      stateColor?: string | null;
       pattern?: Pattern | null;
     },
   ): Override | null {
@@ -66,8 +67,20 @@ export class OverrideStore {
       if (patch.etaMin === null) next.etaMin = undefined;
       else if (typeof patch.etaMin === "number" && Number.isFinite(patch.etaMin))
         next.etaMin = clamp(Math.round(patch.etaMin), ETA_MIN, ETA_MAX);
-      if (patch.state === null) next.state = undefined;
-      else if (isAnalysisState(patch.state)) next.state = patch.state;
+      if (patch.state === null) {
+        next.state = undefined;
+        next.stateColor = undefined;
+      } else if (typeof patch.state === "string" && patch.state.trim()) {
+        next.state = patch.state.trim().slice(0, 80);
+        next.stateColor = undefined;
+      }
+      if (patch.stateColor === null) next.stateColor = undefined;
+      else if (
+        next.state &&
+        typeof patch.stateColor === "string" &&
+        /^#[0-9a-f]{6}$/i.test(patch.stateColor)
+      )
+        next.stateColor = patch.stateColor.toLowerCase();
       if (patch.pattern === null) next.pattern = undefined;
       else if (isPattern(patch.pattern)) next.pattern = patch.pattern;
 
@@ -89,20 +102,6 @@ export class OverrideStore {
 function normalizeOverrides(value: unknown): Record<string, Override> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, Override>;
-}
-
-const ANALYSIS_STATES = new Set<AnalysisState>([
-  "continue_ready",
-  "needs_decision",
-  "needs_input",
-  "blocked",
-  "needs_review",
-  "followup_suggested",
-  "done",
-]);
-
-function isAnalysisState(v: unknown): v is AnalysisState {
-  return typeof v === "string" && ANALYSIS_STATES.has(v as AnalysisState);
 }
 
 function isPattern(v: unknown): v is Pattern {

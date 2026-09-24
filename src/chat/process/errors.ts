@@ -5,7 +5,7 @@ import {
 } from "../provider-errors.js";
 
 export function cliErrorClassifier(
-  vendor: "antigravity" | "copilot",
+  vendor: "antigravity" | "copilot" | "opencode",
   label: string,
   loginCommand: string,
 ): ProviderErrorClassifier {
@@ -45,4 +45,9 @@ export const classifyCopilotError = cliErrorClassifier(
   "copilot",
   "GitHub Copilot",
   "copilot login",
+);
+export const classifyOpencodeError = cliErrorClassifier(
+  "opencode",
+  "OpenCode",
+  "opencode auth login",
 );

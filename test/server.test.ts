@@ -144,6 +144,10 @@ function createApp(config: ReturnType<typeof resolveConfig>, deps: AppDeps) {
       os.tmpdir(),
       `attend-isolated-antigravity-captured-${uniq}`,
     );
+  if (config.opencodeData === defaultConfig.opencodeData)
+    config.opencodeData = path.join(os.tmpdir(), `attend-isolated-opencode-data-${uniq}`);
+  if (config.opencodeSessions === defaultConfig.opencodeSessions)
+    config.opencodeSessions = path.join(os.tmpdir(), `attend-isolated-opencode-sessions-${uniq}`);
   if (config.workEvents === defaultConfig.workEvents)
     config.workEvents = path.join(os.tmpdir(), `attend-isolated-work-events-${uniq}.sqlite3`);
   const effectiveDeps: AppDeps = {
@@ -1036,9 +1040,17 @@ describe("GET /models/process vendors", () => {
         warning: null,
       }),
     );
+    const opencodeCatalog = vi.fn(
+      async (): Promise<ProcessCliModelInspection> => ({
+        models: [{ value: "deepseek/deepseek-v4-flash", label: "deepseek/deepseek-v4-flash" }],
+        defaults: { model: "deepseek/deepseek-v4-flash", effort: "", speed: "" },
+        warning: null,
+      }),
+    );
     const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
       antigravityModelCatalog: antigravityCatalog,
       copilotModelCatalog: copilotCatalog,
+      opencodeModelCatalog: opencodeCatalog,
     });
 
     const pageResponse = await app.request("/");
@@ -1063,12 +1075,17 @@ describe("GET /models/process vendors", () => {
     const copilot = (await (await app.request("/models/copilot")).json()) as {
       models: ModelOption[];
     };
+    const opencode = (await (await app.request("/models/opencode")).json()) as {
+      models: ModelOption[];
+    };
     await app.request("/");
 
     expect(antigravity.models.map((model) => model.value)).toEqual(["gemini-3-pro"]);
     expect(copilot.models.map((model) => model.value)).toEqual(["auto"]);
+    expect(opencode.models.map((model) => model.value)).toEqual(["deepseek/deepseek-v4-flash"]);
     expect(antigravityCatalog).toHaveBeenCalledTimes(1);
     expect(copilotCatalog).toHaveBeenCalledTimes(1);
+    expect(opencodeCatalog).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1713,6 +1730,15 @@ describe("POST /session/override", () => {
     expect(await clear.json()).toMatchObject({
       ok: true,
       override: { state: "blocked", pattern: "unknown" },
+    });
+  });
+
+  it("accepts a custom state and color together", async () => {
+    const app = appWithOverrides();
+    const res = await post(app, "?session=s1", { state: "等待发布", stateColor: "#2563eb" });
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      override: { state: "等待发布", stateColor: "#2563eb" },
     });
   });
 
@@ -3668,6 +3694,30 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
         .filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1");
       expect(promptEvents, JSON.stringify(promptEvents, null, 2)).toHaveLength(2);
     });
+    const threadRead = await app.request("/comments/status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "comment-ui-1", status: "read" }),
+    });
+    expect(await threadRead.json()).toMatchObject({
+      ok: true,
+      thread: { id: "comment-ui-1", status: "read" },
+    });
+    const threadUnread = await app.request("/comments/status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "comment-ui-1", status: "unread" }),
+    });
+    expect(await threadUnread.json()).toMatchObject({
+      ok: true,
+      thread: { id: "comment-ui-1", status: "unread" },
+    });
+    const badStatus = await app.request("/comments/status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "comment-ui-1", status: "seen" }),
+    });
+    expect(badStatus.status).toBe(400);
     const commentEvents = new WorkEventStore(config.workEvents).list();
     expect(
       commentEvents.filter((event) => event.kind === "user_prompt" && event.sessionId === "cx-1"),

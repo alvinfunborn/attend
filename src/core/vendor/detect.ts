@@ -4,7 +4,7 @@ import { spawnCliSync } from "../spawn.js";
 import { runMetadataCommand } from "./async-command.js";
 import { type VendorCapabilities, vendorCapabilities } from "./capabilities.js";
 
-export type VendorId = "claude" | "codex" | "cursor" | "antigravity" | "copilot";
+export type VendorId = "claude" | "codex" | "cursor" | "antigravity" | "copilot" | "opencode";
 
 /**
  * Attend's supported system-CLI floor is the Claude Code 2.1 line. Patch
@@ -101,6 +101,10 @@ export function resolveAntigravityBin(resolve: CliResolver = resolveOnPath) {
 
 export function resolveCopilotBin(resolve: CliResolver = resolveOnPath) {
   return resolve("copilot");
+}
+
+export function resolveOpencodeBin(resolve: CliResolver = resolveOnPath) {
+  return resolve("opencode");
 }
 
 /** Whether a command has any concrete PATH candidate. */
@@ -229,6 +233,9 @@ const VENDORS: readonly {
   { vendor: "cursor", chat: true },
   { vendor: "antigravity", chat: true },
   { vendor: "copilot", chat: true },
+  // OpenCode's headless `opencode run --format json` exposes one JSONL process
+  // per turn with `--session` resume, the same shape Attend's process driver needs.
+  { vendor: "opencode", chat: true },
 ];
 
 const VENDOR_LABELS: Record<VendorId, string> = {
@@ -237,6 +244,7 @@ const VENDOR_LABELS: Record<VendorId, string> = {
   cursor: "Cursor CLI",
   antigravity: "Antigravity CLI",
   copilot: "GitHub Copilot CLI",
+  opencode: "OpenCode",
 };
 
 function requiresRunnableVersion(vendor: VendorId): boolean {
@@ -262,6 +270,9 @@ function vendorInstallMessage(vendor: VendorId): string {
     return "Cursor CLI was not found. Install Cursor CLI, then restart Attend.";
   if (vendor === "antigravity") {
     return "Antigravity CLI was not found. Install the standalone Antigravity CLI, then restart Attend.";
+  }
+  if (vendor === "opencode") {
+    return "OpenCode CLI was not found. Install OpenCode (npm i -g opencode-ai, or the desktop app), then restart Attend.";
   }
   return "GitHub Copilot CLI was not found. Install Copilot CLI, then restart Attend.";
 }
@@ -496,6 +507,7 @@ export function detectVendors(
       cursor: cursorBin,
       antigravity: resolve("agy"),
       copilot: resolve("copilot"),
+      opencode: resolve("opencode"),
     },
     versionProbe,
     surfaceProbe,

@@ -153,3 +153,92 @@ export async function inspectCopilotModels(bin: string): Promise<ProcessCliModel
     };
   }
 }
+
+function opencodeConfigPath(): string {
+  const home = os.homedir();
+  const base =
+    process.platform === "win32"
+      ? (process.env.APPDATA ?? path.join(home, "AppData", "Roaming"))
+      : (process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"));
+  return path.join(base, "opencode", "opencode.json");
+}
+
+const OPENCODE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+
+/**
+ * Parse `opencode models` (plain) and `opencode models --verbose`.
+ *
+ * Plain output is one `provider/model` per line. Verbose output interleaves the
+ * same lines with a pretty-printed JSON object per model; its `variants` keys
+ * are exactly the values `opencode run --variant` accepts, so they become the
+ * model's effort choices.
+ */
+export function parseOpencodeModels(raw: string): ModelOption[] {
+  const lines = clean(raw).split(/\r?\n/);
+  const seen = new Set<string>();
+  const models: ModelOption[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const value = (lines[index] ?? "").trim();
+    if (!OPENCODE_MODEL.test(value) || seen.has(value)) continue;
+    seen.add(value);
+
+    let next = index + 1;
+    while (next < lines.length && !(lines[next] ?? "").trim()) next += 1;
+    if (!(lines[next] ?? "").trimStart().startsWith("{")) {
+      models.push({ value, label: value });
+      continue;
+    }
+    let depth = 0;
+    let json = "";
+    let cursor = next;
+    for (; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor] ?? "";
+      json += line;
+      for (const character of line) {
+        if (character === "{") depth += 1;
+        else if (character === "}") depth -= 1;
+      }
+      if (depth <= 0) break;
+    }
+    let efforts: string[] = [];
+    try {
+      const parsed = JSON.parse(json) as { variants?: Record<string, unknown> };
+      if (parsed.variants && typeof parsed.variants === "object") {
+        efforts = Object.keys(parsed.variants);
+      }
+    } catch {
+      // Non-JSON trailing text: fall through with no effort choices.
+    }
+    models.push({ value, label: value, ...(efforts.length ? { efforts } : {}) });
+    index = cursor;
+  }
+  return models;
+}
+
+export async function inspectOpencodeModels(bin: string): Promise<ProcessCliModelInspection> {
+  const defaults = await readDefaults(opencodeConfigPath());
+  // Verbose first: it carries each model's provider-specific variants (effort).
+  try {
+    const verbose = await runMetadataCommand(bin, ["models", "--verbose"], 20_000);
+    const models = parseOpencodeModels(`${verbose.stdout ?? ""}\n${verbose.stderr ?? ""}`);
+    if (verbose.status === 0 && models.length) return { models, defaults, warning: null };
+  } catch {
+    // Fall through to the plain catalog.
+  }
+  try {
+    const result = await runMetadataCommand(bin, ["models"], 15_000);
+    const models = parseOpencodeModels(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+    if (result.status === 0 && models.length) return { models, defaults, warning: null };
+    return {
+      models: [],
+      defaults,
+      warning: "OpenCode did not return a model catalog; Attend will use the CLI default.",
+    };
+  } catch {
+    return {
+      models: [],
+      defaults,
+      warning: "OpenCode model discovery failed; Attend will use the CLI default.",
+    };
+  }
+}

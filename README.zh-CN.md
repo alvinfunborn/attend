@@ -1,7 +1,7 @@
 # attend
 
 一个用于管理 AI coding 任务注意力的本地网页控制台。目前已接入 Claude Code、Codex/ChatGPT、
-Cursor CLI、Antigravity CLI 和 GitHub Copilot CLI。
+Cursor CLI、Antigravity CLI、GitHub Copilot CLI 和 OpenCode。
 
 [English README](README.md)
 
@@ -19,8 +19,8 @@ Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向�
 ## 主要能力
 
 - 用 tag、搜索和 Focus 视图组织多个项目里的 session，并区分正在生成、未读、待继续和已处理的任务。
-- 直接在网页里新建或继续 Claude Code、Codex/ChatGPT、Cursor CLI、Antigravity CLI 与 GitHub
-  Copilot CLI 会话，支持附件、停止和持久消息队列。
+- 直接在网页里新建或继续 Claude Code、Codex/ChatGPT、Cursor CLI、Antigravity CLI、GitHub
+  Copilot CLI 与 OpenCode 会话，支持附件、停止和持久消息队列。
 - 在 composer 旁保存 shortcuts、notes、todos 和 Goal；也可以 pin 消息，并用 `@` 把需要的上下文带入下一轮。
 - Fork session、评论某条回复，或把旁支讨论升级成独立任务，同时保留它与原任务的关系。
 - 编辑标题和注意力信号，查看近期工作统计，并在明暗主题之间切换。
@@ -39,7 +39,10 @@ Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向�
   queued 区域中可继续编辑内容或修改时间；scheduled new session 和冻结分支点的 scheduled fork 会立刻生成
   session 卡片并显示首条消息或冻结历史。在到点前从卡片发送即时消息会立即启动真实 session，原定时消息仍按
   原时间发送；不另设 scheduled 面板。
-- 编辑 session 标题、state、priority 和预计重新进入时间。
+- 在输入框内键入 `/model `、`/effort ` 或 `/vendor ` 打开对应设置，也可以用斜杠加匹配的
+  model、effort 或 vendor 名称，再输入空格直接选择。
+- 编辑 session 标题、state、priority 和预计重新进入时间。State 标签支持预设、自定义文字和选色；
+  daemon 卡住时也可以点击 `analyzing` 手动设置。本轮分析不会覆盖手动标签，下一轮对话开始后恢复自动分析。
 - 在 composer 旁管理机器级 shortcuts 与 session 级 notes、todos；设置受支持的 Goal，并接受 analyzer 生成的消息 draft。
 - 评论某条回复，包括它仍在生成时；在隔离的 side session 中继续、排队回复，或带着父配置和上下文升级讨论。
 - Pin 消息并用 `@` 引用；可包含 pin 下的纯文本 comment thread、排除 tool block，并为 queued turn 固化引用上下文。
@@ -65,16 +68,27 @@ Attend 创建的受支持 session 会在每轮结束后得到简短的 `brief`�
 
 - Node.js `>= 22.13`
 - 至少安装一个已支持的 CLI：Claude Code、Codex/ChatGPT、Cursor CLI（`cursor-agent`）、
-  独立版 Antigravity CLI（`agy`）或 GitHub Copilot CLI（`copilot`）
+  独立版 Antigravity CLI（`agy`）、GitHub Copilot CLI（`copilot`）或 OpenCode（`opencode`）
 
 Attend 会在启动时检测这些系统 CLI，只显示实际可运行的 Vendor。如果一个都不可用，选择器会
 显示所有 Vendor 并提供安装提示。Claude Code 最低要求为 `2.1.0`；版本过旧时会被禁用并
 明确提示升级。
 
 每个网页内创建的 session 都会由同 vendor 的 analyzer daemon 分析。Cursor daemon 使用原生只读
-`ask` 模式并启用 sandbox；Antigravity 与 Copilot daemon 使用各自的 headless/JSONL 接口。Claude 与
-Codex 支持原生 fork；Cursor、Antigravity 和 Copilot 的 headless CLI 没有原生 fork 命令，因此分支会
-创建新 session，并用父 session 的可见 transcript 作为上下文。
+`ask` 模式并启用 sandbox；Antigravity、Copilot 与 OpenCode daemon 使用各自的 headless/JSONL
+接口。Claude 与 Codex 支持原生 fork；Cursor、Antigravity、Copilot 和 OpenCode 的 headless CLI
+没有原生 fork 命令，因此分支会创建新 session，并用父 session 的可见 transcript 作为上下文。
+
+### OpenCode 会话
+
+Attend 直接读取 OpenCode 的原生存储：当前版本位于 `~/.local/share/opencode/opencode.db` 的
+SQLite 数据库，旧版本则是 `~/.local/share/opencode/storage/` 的 JSON 目录树。每个会话会被镜像
+到 `~/.attend/opencode-sessions/`，使浏览、搜索和 analyzer daemon 继续走文件层。即使没有安装
+CLI，这条只读路径也可用。网页内聊天使用 Attend 管理的 `opencode serve` 进程，支持流式输出、
+停止、生成中追加指导，以及不重启当前轮次的问答；analyzer daemon 使用 `opencode run --format json`。
+两者都需要独立的 `opencode` CLI：用 `npm install --global opencode-ai` 或官方安装脚本安装后
+重启 Attend。可用 `ATTEND_OPENCODE_DATA`、`ATTEND_OPENCODE_SESSIONS`、`ATTEND_OPENCODE_BIN`
+覆盖这些位置。
 
 ### Windows 上的 Codex CLI
 

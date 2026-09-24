@@ -399,6 +399,60 @@ describe("console browser behavior", () => {
     await browser.close();
   });
 
+  it.each(["dark", "light"] as const)(
+    "edits an analyzing label in a %s menu without overflowing on narrow screens",
+    async (theme) => {
+      const page = await browser.newPage({
+        viewport: { width: 390, height: 844 },
+        colorScheme: theme,
+      });
+      const first = raceView.sessions[0];
+      if (!first) throw new Error("Missing session fixture");
+      const pendingView = {
+        ...raceView,
+        sessions: [{ ...first, state: null, analysisPending: true }],
+      };
+      let saved: unknown;
+      await page.addInitScript(() => {
+        class StubEventSource {
+          addEventListener() {}
+          close() {}
+        }
+        Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      });
+      await page.route("**/*", async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/")
+          await route.fulfill({ contentType: "text/html", body: renderConsole(pendingView) });
+        else if (url.pathname === "/session/override") {
+          saved = route.request().postDataJSON();
+          await route.fulfill({ json: { ok: true, override: saved } });
+        } else if (url.pathname === "/chat/messages") await route.fulfill({ json: [] });
+        else await route.fulfill({ json: { ok: true, items: [] } });
+      });
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.getByRole("button", { name: "Change state: analyzing" }).first().click();
+      const menu = page.locator(".state-menu");
+      await page.getByRole("textbox", { name: "State text" }).fill("等待验收");
+      await page.getByRole("button", { name: "Teal", exact: true }).click();
+      const geometry = await menu.evaluate((node) => {
+        const r = node.getBoundingClientRect();
+        return { left: r.left, right: r.right, overflow: node.scrollWidth > node.clientWidth };
+      });
+      expect(geometry.left).toBeGreaterThanOrEqual(0);
+      expect(geometry.right).toBeLessThanOrEqual(390);
+      expect(geometry.overflow).toBe(false);
+      if (process.env.ATTEND_STATE_SCREENSHOT)
+        await menu.screenshot({ path: `${process.env.ATTEND_STATE_SCREENSHOT}-${theme}.png` });
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect.poll(() => saved).toMatchObject({ state: "等待验收", stateColor: "#0f766e" });
+      expect(
+        await page.getByRole("button", { name: "Change state: 等待验收" }).first().isVisible(),
+      ).toBe(true);
+      await page.close();
+    },
+  );
+
   it("tracks the focused session directory in the tab title using only the vetted label", async () => {
     const page = await browser.newPage();
     const secret = "do-not-project-this-passphrase";
@@ -1754,9 +1808,8 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("starts a comment from a pinned text selection without an existing thread", async () => {
+  it("keeps pinned text selection jumps available without an existing comment thread", async () => {
     const page = await browser.newPage();
-    let commentBody: Record<string, unknown> | null = null;
     const selectionKey = "assistant:0:selection:test";
     const selectionPrefix = "Context before the selected evidence. ".repeat(180);
     const selectedPinView: ConsoleView = {
@@ -1797,25 +1850,6 @@ describe("console browser behavior", () => {
               text: `${selectionPrefix}Option Beta needs evidence.`,
             },
           ],
-        });
-      } else if (url.pathname === "/comments/send") {
-        commentBody = request.postDataJSON() as Record<string, unknown>;
-        await route.fulfill({
-          json: {
-            ok: true,
-            thread: {
-              id: "selected-comment-1",
-              parentSessionId: "s1",
-              anchorKey: selectionKey,
-              anchorText: "Option Beta needs evidence.",
-              providerSessionId: "selected-comment-provider-1",
-              vendor: "claude",
-              cwd: "/tmp/project",
-              createdAt: 102,
-              status: "generating",
-              messageCount: 1,
-            },
-          },
         });
       } else {
         await route.fulfill({ json: { ok: true, items: [] } });
@@ -1878,7 +1912,7 @@ describe("console browser behavior", () => {
       selectedPosition.viewportHeight - 14,
     );
     const comment = pin.locator(".pincomment");
-    expect(await comment.getAttribute("aria-label")).toBe("Comment on this pin");
+    expect(await comment.getAttribute("aria-label")).toBe("No comments on this pin");
     expect(await comment.getAttribute("class")).toContain("idle");
     expect(
       await comment.evaluate((button) => {
@@ -1886,22 +1920,9 @@ describe("console browser behavior", () => {
         return { background: style?.backgroundColor, color: style?.color };
       }),
     ).toEqual({ background: "rgba(0, 0, 0, 0)", color: "rgb(156, 163, 175)" });
-    await comment.click();
-
-    expect(await page.locator("#commentDrawer").isVisible()).toBe(true);
-    expect(await page.locator("#commentAnchorContent").textContent()).toContain(
-      "Option Beta needs evidence.",
-    );
-    await page.locator("#commentInput").fill("Check the evidence for this selection.");
-    await page.locator("#commentSend").click();
-    await expect
-      .poll(() => commentBody)
-      .toMatchObject({
-        parentSessionId: "s1",
-        anchorKey: selectionKey,
-        anchorText: "Option Beta needs evidence.",
-        question: "Check the evidence for this selection.",
-      });
+    expect(await comment.isDisabled()).toBe(true);
+    await comment.evaluate((button) => (button as unknown as { click(): void }).click());
+    expect(await page.locator("#commentDrawer").isHidden()).toBe(true);
     await page.close();
   });
 
@@ -2870,6 +2891,125 @@ describe("console browser behavior", () => {
     await expect.poll(() => optimisticRow.count()).toBe(1);
     await expect.poll(() => optimisticRow.textContent()).toContain("keep this optimistic opener");
     expect(await page.locator("#h-title").textContent()).toContain("keep this optimistic opener");
+    await page.close();
+  });
+
+  it("folds an opencode session surfaced by the scan before the provider id is bound", async () => {
+    const page = await browser.newPage();
+    let clientSessionId = "";
+    await page.addInitScript(() => {
+      const browserGlobal = globalThis as unknown as {
+        __newSessionEventSource?: {
+          onmessage: ((event: { data: string }) => void) | null;
+        };
+      };
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        onopen: (() => void) | null = null;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          browserGlobal.__newSessionEventSource = this;
+        }
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({
+            ...view,
+            knownDirs: ["/tmp/project"],
+            defaultNewDir: "/tmp/project",
+            vendors: [
+              { vendor: "claude", available: true, chat: true },
+              { vendor: "opencode", available: true, chat: true },
+            ],
+          }),
+        });
+      } else if (url.pathname === "/chat/new") {
+        const body = request.postDataJSON() as { clientSessionId?: string };
+        clientSessionId = body.clientSessionId ?? "";
+        await route.fulfill({
+          status: 202,
+          json: { ok: true, accepted: true, operationId: "operation-new-1", clientSessionId },
+        });
+      } else if (url.pathname === "/chat/messages") {
+        await route.fulfill({ json: [] });
+      } else {
+        await route.fulfill({ json: { ok: true } });
+      }
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#newToggle").click();
+    await page.locator("#nvendor").fill("opencode");
+    await page.locator("#np").fill("fold the duplicate");
+    await page.locator("#nbtn").click();
+    await expect.poll(() => clientSessionId).not.toBe("");
+
+    await page.evaluate(
+      ({ clientId, scanned }) => {
+        const source = (
+          globalThis as unknown as {
+            __newSessionEventSource?: {
+              onmessage: ((event: { data: string }) => void) | null;
+            };
+          }
+        ).__newSessionEventSource;
+        const emit = (message: Record<string, unknown>) =>
+          source?.onmessage?.({ data: JSON.stringify(message) });
+        // `opencode run` creates its native session row at process start, so the
+        // disk scan can publish an index revision while `/chat/new` is still
+        // awaiting the first stream event that carries the provider id.
+        emit({
+          kind: "session_index",
+          epoch: "opencode-race",
+          revision: 1,
+          pending: false,
+          scannedAt: Date.now(),
+          sessions: [scanned],
+          knownDirs: ["/tmp/project"],
+          defaultNewDir: "/tmp/project",
+          tags: [],
+        });
+        emit({
+          kind: "session_operation",
+          operationId: "operation-new-1",
+          clientSessionId: clientId,
+          operation: "new",
+          status: "completed",
+          result: {
+            ok: true,
+            session: "provider-new-1",
+            clientSessionId: clientId,
+            vendor: "opencode",
+            cwd: "/tmp/project",
+          },
+        });
+      },
+      {
+        clientId: clientSessionId,
+        scanned: {
+          ...raceView.sessions[0],
+          vendor: "opencode",
+          sessionId: "provider-new-1",
+          title: "provider title",
+          lastPrompt: null,
+          prompts: 0,
+          brief: null,
+          file: "/tmp/provider-new-1.jsonl",
+        },
+      },
+    );
+
+    await expect.poll(() => page.locator("#list .item").count()).toBe(1);
+    await expect
+      .poll(() => page.locator("#list .item").first().textContent())
+      .toContain("fold the duplicate");
     await page.close();
   });
 
@@ -9086,6 +9226,14 @@ describe("console browser behavior", () => {
     expect(drawerBox.x).toBeCloseTo(mainBox.x, 0);
     expect(drawerBox.width).toBeCloseTo(mainBox.width, 0);
     expect(await session.getAttribute("class")).toContain("active");
+
+    const commentStatus = page.locator("#commentStatus");
+    await expect.poll(() => commentStatus.isVisible()).toBe(true);
+    await expect.poll(() => commentStatus.getAttribute("class")).toContain("read");
+    await commentStatus.click();
+    await expect.poll(() => commentStatus.getAttribute("class")).toContain("unread");
+    await commentStatus.click();
+    await expect.poll(() => commentStatus.getAttribute("class")).toContain("read");
 
     await page.locator("#sessionPanelToggle").click();
     const resizedDrawerBox = await page.locator("#commentDrawer").boundingBox();

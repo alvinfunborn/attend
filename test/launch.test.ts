@@ -33,6 +33,9 @@ describe("buildCommand", () => {
     expect(() => buildCommand("fork", "copilot", { sessionId: "x1" })).toThrow(
       "does not expose a native fork",
     );
+    expect(() => buildCommand("fork", "opencode", { sessionId: "x1" })).toThrow(
+      "does not expose a native fork",
+    );
   });
   it("new, with and without an initial prompt", () => {
     expect(displayCommand(buildCommand("new", "claude"))).toBe("claude");
@@ -63,6 +66,16 @@ describe("buildCommand", () => {
         }),
       ),
     ).toBe("copilot --model gpt-5.3-codex --reasoning-effort high --interactive review");
+  });
+  it("OpenCode terminal commands", () => {
+    expect(displayCommand(buildCommand("resume", "opencode", { sessionId: "o1" }))).toBe(
+      "opencode --session o1",
+    );
+    expect(
+      displayCommand(
+        buildCommand("new", "opencode", { model: "deepseek/deepseek-v4-flash", prompt: "fix it" }),
+      ),
+    ).toBe("opencode --model deepseek/deepseek-v4-flash 'fix it'");
   });
   it("new, with model and effort overrides", () => {
     expect(displayCommand(buildCommand("new", "claude", { model: "sonnet", effort: "high" }))).toBe(

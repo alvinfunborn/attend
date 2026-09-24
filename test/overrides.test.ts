@@ -58,6 +58,18 @@ describe("OverrideStore", () => {
     expect(store.get("s1")).toBeNull();
   });
 
+  it("persists custom state text and color, clears both for the next turn", () => {
+    const file = tmpFile();
+    const store = new OverrideStore(file);
+    store.set("s1", { state: "  等待测试  ", stateColor: "#ABCDEF" });
+    expect(new OverrideStore(file).get("s1")).toEqual({ state: "等待测试", stateColor: "#abcdef" });
+    store.set("s1", { stateColor: "red;display:none" });
+    expect(store.get("s1")?.stateColor).toBe("#abcdef");
+    store.set("s1", { state: "done" });
+    expect(store.get("s1")).toEqual({ state: "done" });
+    expect(store.set("s1", { state: null })).toBeNull();
+  });
+
   it("persists across instances", () => {
     const file = tmpFile();
     new OverrideStore(file).set("s2", { priority: 3, etaMin: 15 });

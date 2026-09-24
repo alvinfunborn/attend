@@ -5,6 +5,7 @@ import { parseAntigravityTranscript } from "./antigravity/transcript.js";
 import { parseCodexTranscriptMessages } from "./codex/transcript.js";
 import { parseCopilotTranscript } from "./copilot/transcript.js";
 import { parseCursorTranscript } from "./cursor/transcript.js";
+import { parseOpencodeTranscript } from "./opencode/transcript.js";
 import { type ToolCall, type TranscriptMsg, parseClaudeTranscriptMessages } from "./transcript.js";
 
 const INITIAL_TAIL_BYTES = 2 * 1024 * 1024;
@@ -71,6 +72,7 @@ function parseHistory(
   if (vendor === "cursor") return parseCursorTranscript(raw, limit);
   if (vendor === "antigravity") return parseAntigravityTranscript(raw, limit);
   if (vendor === "copilot") return parseCopilotTranscript(raw, limit);
+  if (vendor === "opencode") return parseOpencodeTranscript(raw, limit);
   return parseClaudeTranscriptMessages(raw, limit);
 }
 

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 
-export type LaunchVendor = "claude" | "codex" | "cursor" | "antigravity" | "copilot";
+export type LaunchVendor = "claude" | "codex" | "cursor" | "antigravity" | "copilot" | "opencode";
 export type LaunchAction = "resume" | "fork" | "new";
 
 export interface LaunchOpts {
@@ -34,6 +34,7 @@ export function buildCommand(
     if (vendor === "codex") return { file: "codex", args: ["resume", id] };
     if (vendor === "cursor") return { file: "cursor-agent", args: [`--resume=${id}`] };
     if (vendor === "antigravity") return { file: "agy", args: ["--conversation", id] };
+    if (vendor === "opencode") return { file: "opencode", args: ["--session", id] };
     return { file: "copilot", args: [`--resume=${id}`] };
   }
   if (action === "fork") {
@@ -85,6 +86,12 @@ export function buildCommand(
         ...(effort ? ["--reasoning-effort", effort] : []),
         ...(prompt ? ["--interactive", prompt] : []),
       ],
+    };
+  }
+  if (vendor === "opencode") {
+    return {
+      file: "opencode",
+      args: [...(model ? ["--model", model] : []), ...(prompt ? [prompt] : [])],
     };
   }
   return {

@@ -41,8 +41,16 @@ import type {
 import type { UiEvent } from "./chat/events.js";
 import type { TranscriptHistoryReader } from "./chat/history-cache.js";
 import { WorkerTranscriptHistory } from "./chat/history-worker-client.js";
+import { makeOpencodeExec } from "./chat/opencode/exec.js";
+import { OpencodeServerClient } from "./chat/opencode/server/client.js";
+import { OpencodeServerDriver } from "./chat/opencode/server/driver.js";
+import { readOpencodeTranscript } from "./chat/opencode/transcript.js";
 import { ProcessChatDriver } from "./chat/process/driver.js";
-import { classifyAntigravityError, classifyCopilotError } from "./chat/process/errors.js";
+import {
+  classifyAntigravityError,
+  classifyCopilotError,
+  classifyOpencodeError,
+} from "./chat/process/errors.js";
 import { ChatQueueStore, type QueuedChatTurn } from "./chat/queue.js";
 import { ChatDriverRegistry } from "./chat/registry.js";
 import type { SessionSearch } from "./chat/search-service.js";
@@ -53,7 +61,7 @@ import type { AlignmentModelReader } from "./core/alignment-model.js";
 import { WorkerAlignmentModel } from "./core/alignment-model.js";
 import { type AlignmentModel, scoreAlignment } from "./core/alignment.js";
 import { CollaborationStore } from "./core/collaboration.js";
-import { type Analysis, AnalysisCache, type AnalysisState } from "./core/daemon/cache.js";
+import { type Analysis, AnalysisCache } from "./core/daemon/cache.js";
 import { OverrideStore } from "./core/daemon/overrides.js";
 import { DaemonRegistry } from "./core/daemon/registry.js";
 import { EngagementStore } from "./core/engagement.js";
@@ -128,6 +136,7 @@ import {
   type ProcessCliModelInspection,
   inspectAntigravityModels,
   inspectCopilotModels,
+  inspectOpencodeModels,
 } from "./core/vendor/process-cli-models.js";
 import {
   type SessionIndex,
@@ -813,6 +822,8 @@ export interface AppDeps {
   antigravity?: ChatDriver;
   /** GitHub Copilot CLI chat backend (driven via prompt-mode JSONL). */
   copilot?: ChatDriver;
+  /** OpenCode chat backend (driven via one persistent `opencode serve`). */
+  opencode?: ChatDriver;
   /** Effective Codex model catalog. Injectable so tests never spawn the CLI. */
   codexModelCatalog?: () => CodexModelCacheInspection | Promise<CodexModelCacheInspection>;
   /** Effective Claude model catalog. Injectable so tests never spawn the SDK subprocess. */
@@ -824,6 +835,7 @@ export interface AppDeps {
   /** Model catalogs/defaults owned by the standalone Antigravity and Copilot CLIs. */
   antigravityModelCatalog?: () => ProcessCliModelInspection | Promise<ProcessCliModelInspection>;
   copilotModelCatalog?: () => ProcessCliModelInspection | Promise<ProcessCliModelInspection>;
+  opencodeModelCatalog?: () => ProcessCliModelInspection | Promise<ProcessCliModelInspection>;
   /** Startup snapshot of the exact configured local vendor CLIs. */
   vendorAvailability?: VendorAvailability[];
   /** Non-blocking version/help inspection that refines the startup snapshot. */
@@ -848,13 +860,14 @@ export interface AppDeps {
 }
 
 function createDefaultAppDeps(config: AttendConfig): AppDeps {
-  const { claudeBin, codexBin, cursorBin, antigravityBin, copilotBin } = config;
+  const { claudeBin, codexBin, cursorBin, antigravityBin, copilotBin, opencodeBin } = config;
   const executables = {
     claude: claudeBin,
     codex: codexBin,
     cursor: cursorBin,
     antigravity: antigravityBin,
     copilot: copilotBin,
+    opencode: opencodeBin,
   };
   const vendorAvailability = configuredVendorAvailability(executables);
   const available = (vendor: VendorId): boolean =>
@@ -904,6 +917,13 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
       "copilot",
       classifyCopilotError,
     ),
+    opencode: new OpencodeServerDriver(
+      new OpencodeServerClient({
+        bin: opencodeBin ?? "opencode",
+        pidFile: path.join(path.dirname(config.opencodeSessions), "opencode-server.pid"),
+      }),
+      classifyOpencodeError,
+    ),
     ...(available("codex")
       ? {
           codexModelCatalog: () => inspectCodexModelsAsync(codexBin, config.codexModelsCache),
@@ -919,6 +939,9 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
       : {}),
     ...(available("copilot") && copilotBin
       ? { copilotModelCatalog: () => inspectCopilotModels(copilotBin) }
+      : {}),
+    ...(available("opencode") && opencodeBin
+      ? { opencodeModelCatalog: () => inspectOpencodeModels(opencodeBin) }
       : {}),
     ...(available("claude") && claudeBin
       ? {
@@ -989,6 +1012,18 @@ function createDefaultAppDeps(config: AttendConfig): AppDeps {
                 config.copilotCapturedSessions,
                 makeCopilotExec(copilotBin, config.copilotCapturedSessions),
                 readCopilotTranscript,
+                transcriptIndex,
+                analyzerContext,
+              ),
+            ]
+          : []),
+        ...(available("opencode") && opencodeBin
+          ? [
+              new ProcessAnalyzer(
+                "opencode",
+                config.opencodeSessions,
+                makeOpencodeExec(opencodeBin, config.opencodeSessions),
+                readOpencodeTranscript,
                 transcriptIndex,
                 analyzerContext,
               ),
@@ -1351,6 +1386,7 @@ function toSessionViews(
         nextStep: externalGenerating ? null : (a?.nextStep ?? null),
         probe: externalGenerating ? null : (a?.probe ?? null),
         state: ov?.state ?? a?.state ?? null,
+        stateColor: ov?.stateColor ?? null,
         score: ov?.priority ?? baseScore,
         reason: reason,
         etaMin: ov?.etaMin ?? baseEta,
@@ -1526,7 +1562,19 @@ export function createApp(
       "copilot",
       classifyCopilotError,
     );
-  const drivers = new ChatDriverRegistry([engine, codex, cursor, antigravity, copilot], "claude");
+  const opencode =
+    deps.opencode ??
+    new OpencodeServerDriver(
+      new OpencodeServerClient({
+        bin: config.opencodeBin ?? "opencode",
+        pidFile: path.join(path.dirname(config.opencodeSessions), "opencode-server.pid"),
+      }),
+      classifyOpencodeError,
+    );
+  const drivers = new ChatDriverRegistry(
+    [engine, codex, cursor, antigravity, copilot, opencode],
+    "claude",
+  );
   const configuredVendorAvailability = new Map(
     (deps.vendorAvailability ?? []).map((status) => [status.vendor, status]),
   );
@@ -1534,7 +1582,7 @@ export function createApp(
   // available unless the caller supplies a status snapshot. Production always
   // receives the startup inspection from createDefaultAppDeps().
   let vendorAvailability: VendorAvailability[] = (
-    ["claude", "codex", "cursor", "antigravity", "copilot"] as const
+    ["claude", "codex", "cursor", "antigravity", "copilot", "opencode"] as const
   ).map(
     (vendor) =>
       configuredVendorAvailability.get(vendor) ?? {
@@ -1855,6 +1903,7 @@ export function createApp(
     cursor: { model: "", effort: "", speed: "" },
     antigravity: { model: "", effort: "", speed: "" },
     copilot: { model: "", effort: "", speed: "" },
+    opencode: { model: "", effort: "", speed: "" },
   };
   let claudeModelsWarning: string | null = vendorStatus("claude").available
     ? "Discovering models from Claude…"
@@ -2022,25 +2071,39 @@ export function createApp(
   const processCatalogs = {
     antigravity: deps.antigravityModelCatalog,
     copilot: deps.copilotModelCatalog,
+    opencode: deps.opencodeModelCatalog,
   };
-  const processModelSnapshots: Record<"antigravity" | "copilot", ModelOption[]> = {
+  const processModelSnapshots: Record<"antigravity" | "copilot" | "opencode", ModelOption[]> = {
     antigravity: [],
     copilot: [],
+    opencode: [],
   };
-  const processModelWarnings: Record<"antigravity" | "copilot", string | null> = {
+  const processModelWarnings: Record<"antigravity" | "copilot" | "opencode", string | null> = {
     antigravity: processCatalogs.antigravity ? "Discovering models from Antigravity…" : null,
     copilot: processCatalogs.copilot ? "Discovering models from Copilot…" : null,
+    opencode: processCatalogs.opencode ? "Discovering models from OpenCode…" : null,
   };
-  const processModelRefreshes: Record<"antigravity" | "copilot", Promise<void> | null> = {
+  const processModelRefreshes: Record<
+    "antigravity" | "copilot" | "opencode",
+    Promise<void> | null
+  > = {
     antigravity: null,
     copilot: null,
+    opencode: null,
   };
-  const processModelRefreshedAt: Record<"antigravity" | "copilot", number> = {
+  const processModelRefreshedAt: Record<"antigravity" | "copilot" | "opencode", number> = {
     antigravity: Number.NEGATIVE_INFINITY,
     copilot: Number.NEGATIVE_INFINITY,
+    opencode: Number.NEGATIVE_INFINITY,
+  };
+  const processModelFallbackWarning = (vendor: "antigravity" | "copilot" | "opencode"): string => {
+    if (vendor === "antigravity")
+      return "Antigravity model discovery failed; Attend will use the CLI default.";
+    if (vendor === "copilot") return "GitHub Copilot model discovery failed; Attend will use Auto.";
+    return "OpenCode model discovery failed; Attend will use the CLI default.";
   };
   const refreshProcessModels = (
-    vendor: "antigravity" | "copilot",
+    vendor: "antigravity" | "copilot" | "opencode",
     maxAgeMs = 60_000,
   ): Promise<void> => {
     const catalog = processCatalogs[vendor];
@@ -2058,10 +2121,7 @@ export function createApp(
         processModelWarnings[vendor] = inspection.warning;
       })
       .catch(() => {
-        processModelWarnings[vendor] =
-          vendor === "antigravity"
-            ? "Antigravity model discovery failed; Attend will use the CLI default."
-            : "GitHub Copilot model discovery failed; Attend will use Auto.";
+        processModelWarnings[vendor] = processModelFallbackWarning(vendor);
       })
       .finally(() => {
         processModelRefreshes[vendor] = null;
@@ -2071,9 +2131,11 @@ export function createApp(
   };
   void refreshProcessModels("antigravity");
   void refreshProcessModels("copilot");
+  void refreshProcessModels("opencode");
   const processModelRefreshTimer = setInterval(() => {
     void refreshProcessModels("antigravity");
     void refreshProcessModels("copilot");
+    void refreshProcessModels("opencode");
   }, 60_000);
   processModelRefreshTimer.unref();
   const resolveRunOptions = (
@@ -2401,12 +2463,14 @@ export function createApp(
       cursorModels: cursorModelOptions(),
       antigravityModels: processModelSnapshots.antigravity,
       copilotModels: processModelSnapshots.copilot,
+      opencodeModels: processModelSnapshots.opencode,
       modelWarnings: {
         claude: claudeModelsWarning,
         codex: codexModelsWarning,
         cursor: cursorModelsWarning,
         antigravity: processModelWarnings.antigravity,
         copilot: processModelWarnings.copilot,
+        opencode: processModelWarnings.opencode,
       },
       modelDefaults,
       tags: scopeTagList(all, tags, orchestrator, {
@@ -2480,6 +2544,7 @@ export function createApp(
     cursorModels: [],
     antigravityModels: [],
     copilotModels: [],
+    opencodeModels: [],
     modelWarnings: {},
     modelDefaults: {},
     tags: [],
@@ -2509,12 +2574,14 @@ export function createApp(
       cursorModels: cursorModelOptions(),
       antigravityModels: processModelSnapshots.antigravity,
       copilotModels: processModelSnapshots.copilot,
+      opencodeModels: processModelSnapshots.opencode,
       modelWarnings: {
         claude: claudeModelsWarning,
         codex: codexModelsWarning,
         cursor: cursorModelsWarning,
         antigravity: processModelWarnings.antigravity,
         copilot: processModelWarnings.copilot,
+        opencode: processModelWarnings.opencode,
       },
       modelDefaults,
       tags: [],
@@ -3361,6 +3428,7 @@ export function createApp(
           cursorModels: cursorModelRefresh !== null,
           antigravityModels: processModelRefreshes.antigravity !== null,
           copilotModels: processModelRefreshes.copilot !== null,
+          opencodeModels: processModelRefreshes.opencode !== null,
         },
       },
     });
@@ -3600,6 +3668,16 @@ export function createApp(
     });
   });
 
+  app.get("/models/opencode", (c) => {
+    c.header("Cache-Control", "no-store");
+    void refreshProcessModels("opencode");
+    return c.json({
+      models: processModelSnapshots.opencode,
+      defaults: modelDefaults.opencode,
+      warning: processModelWarnings.opencode,
+    });
+  });
+
   // Resolve a session id back to its transcript source file. This is mainly for
   // product-created sessions that were opened in the current page lifetime: the
   // browser knows the new session id immediately, but not the eventual JSONL
@@ -3641,23 +3719,27 @@ export function createApp(
     const body = (await c.req.json().catch(() => ({}))) as {
       priority?: number | null;
       etaMin?: number | null;
-      state?: AnalysisState | null;
+      state?: string | null;
+      stateColor?: string | null;
       pattern?: Pattern | null;
     };
     const patch: {
       priority?: number | null;
       etaMin?: number | null;
-      state?: AnalysisState | null;
+      state?: string | null;
+      stateColor?: string | null;
       pattern?: Pattern | null;
     } = {};
     if ("priority" in body) patch.priority = body.priority;
     if ("etaMin" in body) patch.etaMin = body.etaMin;
     if ("state" in body) patch.state = body.state;
+    if ("stateColor" in body) patch.stateColor = body.stateColor;
     if ("pattern" in body) patch.pattern = body.pattern;
     if (
       patch.priority === undefined &&
       patch.etaMin === undefined &&
       patch.state === undefined &&
+      patch.stateColor === undefined &&
       patch.pattern === undefined
     ) {
       return c.json({ ok: false, error: "nothing to set" }, 400);
@@ -4060,6 +4142,34 @@ export function createApp(
       return c.json({ ok: true, stale: true, thread: current });
     }
     const thread = current ? patchCommentThread(id, { status: "read" }) : null;
+    return thread
+      ? c.json({ ok: true, thread })
+      : c.json({ ok: false, error: "comment thread not found" }, 404);
+  });
+
+  app.post("/comments/status", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      id?: string;
+      status?: unknown;
+      readAt?: unknown;
+    };
+    const id = body.id?.trim() ?? "";
+    const status = body.status === "read" ? "read" : body.status === "unread" ? "unread" : "";
+    if (!id || !status) return c.json({ ok: false, error: "invalid request" }, 400);
+    const current = commentThreads()[id] ?? null;
+    if (!current) return c.json({ ok: false, error: "comment thread not found" }, 404);
+    // A manual toggle can't dismiss work that is still running, and reading must
+    // not swallow a reply that arrived after the click (same guard as /comments/read).
+    if (current.status === "generating" || current.status === "scheduled") {
+      return c.json({ ok: true, stale: true, thread: current });
+    }
+    if (status === "read") {
+      const readAt = Number(body.readAt ?? Date.now());
+      if (Number(current.lastUserMessageAt ?? 0) > readAt) {
+        return c.json({ ok: true, stale: true, thread: current });
+      }
+    }
+    const thread = patchCommentThread(id, { status });
     return thread
       ? c.json({ ok: true, thread })
       : c.json({ ok: false, error: "comment thread not found" }, 404);
@@ -6317,7 +6427,14 @@ export interface RunningServer {
 }
 
 function recordShutdownTurns(config: AttendConfig, deps: AppDeps, at: number): void {
-  const drivers = [deps.engine, deps.codex, deps.cursor, deps.antigravity, deps.copilot];
+  const drivers = [
+    deps.engine,
+    deps.codex,
+    deps.cursor,
+    deps.antigravity,
+    deps.copilot,
+    deps.opencode,
+  ];
   try {
     const events = new WorkEventStore(config.workEvents);
     for (const driver of drivers) {
@@ -6378,6 +6495,7 @@ export function startServer(
           appDeps.cursor?.shutdown?.();
           appDeps.antigravity?.shutdown?.();
           appDeps.copilot?.shutdown?.();
+          appDeps.opencode?.shutdown?.();
           backgroundRuntime?.close();
           appDeps.sessionIndex?.close();
           appDeps.transcriptHistory?.close?.();
@@ -6399,12 +6517,14 @@ export function startServer(
           port,
           vendors:
             appDeps.vendorAvailability ??
-            (["claude", "codex", "cursor", "antigravity", "copilot"] as const).map((vendor) => ({
-              vendor,
-              available: true,
-              chat: true,
-              capabilities: vendorCapabilities(vendor),
-            })),
+            (["claude", "codex", "cursor", "antigravity", "copilot", "opencode"] as const).map(
+              (vendor) => ({
+                vendor,
+                available: true,
+                chat: true,
+                capabilities: vendorCapabilities(vendor),
+              }),
+            ),
           close,
         });
       });

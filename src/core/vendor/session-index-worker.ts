@@ -25,6 +25,7 @@ const caches: Required<SourceCaches> = {
   cursorCaptured: new ScanCache(),
   antigravity: new ScanCache(),
   copilot: new ScanCache(),
+  opencode: new ScanCache(),
 };
 const cacheNames = Object.keys(caches) as Array<keyof typeof caches>;
 let current = store.readSnapshot();

@@ -98,6 +98,7 @@ const view: ConsoleView = {
 const openConsole = async (
   browser: Browser,
   onRequest?: (request: Request) => void,
+  consoleView: ConsoleView = view,
 ): Promise<Page> => {
   const page = await browser.newPage();
   await page.addInitScript(() => {
@@ -116,10 +117,14 @@ const openConsole = async (
     onRequest?.(route.request());
     const url = new URL(route.request().url());
     if (url.pathname === "/") {
-      await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      await route.fulfill({ contentType: "text/html", body: renderConsole(consoleView) });
     } else if (url.pathname === "/models/claude") {
       await route.fulfill({
-        json: { models: view.claudeModels, defaults: view.modelDefaults?.claude, warning: null },
+        json: {
+          models: consoleView.claudeModels,
+          defaults: consoleView.modelDefaults?.claude,
+          warning: null,
+        },
       });
     } else if (url.pathname === "/chat/messages") {
       await route.fulfill({ json: [] });
@@ -390,6 +395,87 @@ describe("per-session run config in the composer rail", () => {
       expect(await input.evaluate((node) => node.ownerDocument.activeElement === node)).toBe(true);
       expect(await railEffort(page).textContent()).toBe("xhigh");
       expect(sends).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+  it("opens model/vendor pickers and selects case-insensitive configuration prefixes", async () => {
+    const requests: string[] = [];
+    const page = await openConsole(
+      browser,
+      (request) => {
+        if (request.method() === "POST") requests.push(new URL(request.url()).pathname);
+      },
+      {
+        ...view,
+        vendors: (["claude", "codex", "cursor"] as const).map((vendor) => ({
+          vendor,
+          available: true,
+          chat: true,
+        })),
+        codexModels: [
+          {
+            value: "gpt-6-mini",
+            label: "GPT-6 Mini",
+            efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          },
+          {
+            value: "gpt-6",
+            label: "GPT-6",
+            efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          },
+        ],
+      },
+    );
+    try {
+      await page.locator("#list .item", { hasText: "High effort session" }).click();
+      const input = page.locator("#input");
+      for (const [command, rail] of [
+        ["M", "Model"],
+        ["model", "Model"],
+        ["V", "Vendor"],
+        ["vendor", "Vendor"],
+      ]) {
+        await input.fill(`Draft /${command} `);
+        expect(await input.inputValue()).toBe("Draft ");
+        expect(await page.locator(`#rail${rail}`).getAttribute("aria-expanded")).toBe("true");
+        await page.keyboard.press("Escape");
+      }
+      for (const [command, select, value] of [
+        ["Lo", "reffort", "low"],
+        ["XHIGH", "reffort", "xhigh"],
+        ["CuR", "rvendor", "cursor"],
+        ["CLAUDE", "rvendor", "claude"],
+        ["CoDeX", "rvendor", "codex"],
+        ["GPT-6", "rmodel", "gpt-6"],
+        ["gpt-6-m", "rmodel", "gpt-6-mini"],
+        ...["low", "medium", "high", "xhigh", "max", "ultra"].map((effort) => [
+          effort.toUpperCase(),
+          "reffort",
+          effort,
+        ]),
+      ]) {
+        await input.fill(`Draft /${command} `);
+        expect(await input.inputValue()).toBe("Draft ");
+        expect(await page.locator(`#${select}`).inputValue()).toBe(value);
+        expect(await page.locator("#composerRailPop").isHidden()).toBe(true);
+      }
+      // Every command follows the same rule: the slash needs no leading space.
+      await input.fill("Draft/e ");
+      expect(await input.inputValue()).toBe("Draft");
+      expect(await page.locator("#railEffort").getAttribute("aria-expanded")).toBe("true");
+      await page.keyboard.press("Escape");
+
+      await input.fill("Draft/high ");
+      expect(await input.inputValue()).toBe("Draft");
+      expect(await page.locator("#reffort").inputValue()).toBe("high");
+
+      // Only a slash directly after another slash (a URL) stays untouched.
+      for (const text of ["Draft /unknown ", "https://codex ", "/high"]) {
+        await input.fill(text);
+        expect(await input.inputValue()).toBe(text);
+      }
+      expect(requests.filter((path) => path === "/chat/send" || path === "/chat/fork")).toEqual([]);
     } finally {
       await page.close();
     }

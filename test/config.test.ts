@@ -26,6 +26,9 @@ const ENV_KEYS = [
   "ATTEND_COPILOT_SESSIONS",
   "ATTEND_COPILOT_CAPTURED_SESSIONS",
   "ATTEND_COPILOT_BIN",
+  "ATTEND_OPENCODE_DATA",
+  "ATTEND_OPENCODE_SESSIONS",
+  "ATTEND_OPENCODE_BIN",
   "ATTEND_SESSION_INDEX",
   "ATTEND_TAGS",
   "ATTEND_ENGAGEMENT",
@@ -176,6 +179,16 @@ describe("resolveConfig precedence", () => {
     expect(config.copilotBin).toBe("/opt/bin/copilot");
     expect(config.copilotSessions).toBe(path.resolve("/tmp/copilot-native"));
     expect(config.copilotCapturedSessions).toBe(path.resolve("/tmp/copilot-captured"));
+  });
+
+  it("allows overriding OpenCode CLI, native data, and mirror locations", () => {
+    process.env.ATTEND_OPENCODE_BIN = "/opt/bin/opencode";
+    process.env.ATTEND_OPENCODE_DATA = "/tmp/opencode-data";
+    process.env.ATTEND_OPENCODE_SESSIONS = "/tmp/opencode-mirror";
+    const config = resolveConfig({ positionals: [] });
+    expect(config.opencodeBin).toBe("/opt/bin/opencode");
+    expect(config.opencodeData).toBe(path.resolve("/tmp/opencode-data"));
+    expect(config.opencodeSessions).toBe(path.resolve("/tmp/opencode-mirror"));
   });
 
   it("keeps tags global when the session list is directory-scoped", () => {

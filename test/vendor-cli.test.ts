@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { ProcessAnalyzer } from "../src/chat/analyzer/process.js";
 import { antigravityToProcessEvent, buildAntigravityArgs } from "../src/chat/antigravity/exec.js";
@@ -9,14 +10,22 @@ import type { CodexEvent } from "../src/chat/codex/events.js";
 import { buildCopilotArgs, copilotToProcessEvent } from "../src/chat/copilot/exec.js";
 import { parseCopilotTranscript } from "../src/chat/copilot/transcript.js";
 import { readCursorTranscript } from "../src/chat/cursor/transcript.js";
-import { classifyAntigravityError, classifyCopilotError } from "../src/chat/process/errors.js";
+import { buildOpencodeArgs, opencodeToProcessEvent } from "../src/chat/opencode/exec.js";
+import { parseOpencodeTranscript } from "../src/chat/opencode/transcript.js";
+import {
+  classifyAntigravityError,
+  classifyCopilotError,
+  classifyOpencodeError,
+} from "../src/chat/process/errors.js";
 import { makeJsonlExec } from "../src/chat/process/jsonl-exec.js";
 import type { ProcessTurnFn } from "../src/chat/process/types.js";
 import { AntigravitySource } from "../src/core/vendor/antigravity.js";
 import { capabilityUnavailable, vendorCapabilities } from "../src/core/vendor/capabilities.js";
 import { CopilotSource } from "../src/core/vendor/copilot.js";
+import { OpencodeSource } from "../src/core/vendor/opencode.js";
 import {
   parseCopilotHelpModels,
+  parseOpencodeModels,
   parseProcessCliModels,
 } from "../src/core/vendor/process-cli-models.js";
 import { TranscriptPathIndex } from "../src/core/vendor/transcript-index.js";
@@ -347,6 +356,361 @@ describe("GitHub Copilot CLI integration", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("OpenCode CLI integration", () => {
+  it("builds json run, resume, model, and read-only daemon arguments", () => {
+    expect(
+      buildOpencodeArgs({
+        cwd: "/work/repo",
+        prompt: "inspect",
+        resume: "ses_abc",
+        model: "deepseek/deepseek-v4-flash",
+        effort: "high",
+        sandbox: "read-only",
+      }),
+    ).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--session",
+      "ses_abc",
+      "--model",
+      "deepseek/deepseek-v4-flash",
+      "--variant",
+      "high",
+      "inspect",
+    ]);
+    expect(
+      buildOpencodeArgs({ cwd: "/work/repo", prompt: "go", sandbox: "danger-full-access" }),
+    ).toEqual(["run", "--format", "json", "--auto", "go"]);
+  });
+
+  it("normalizes run JSON events into the shared process protocol", () => {
+    const state = { sessionId: null, announced: false };
+    expect(
+      opencodeToProcessEvent(
+        { type: "step_start", sessionID: "ses_a", part: { type: "step-start" } },
+        state,
+      ),
+    ).toEqual([{ type: "thread.started", thread_id: "ses_a" }]);
+    expect(
+      opencodeToProcessEvent(
+        { type: "text", sessionID: "ses_a", part: { type: "text", text: "done" } },
+        state,
+      ),
+    ).toEqual([{ type: "item.completed", item: { type: "agent_message", text: "done" } }]);
+    expect(
+      opencodeToProcessEvent({
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call_1",
+          state: { status: "completed", input: { command: "ls" }, output: "a\nb\n" },
+        },
+      }),
+    ).toEqual([
+      {
+        type: "item.started",
+        item: { id: "call_1", type: "mcp_tool_call", name: "bash", arguments: { command: "ls" } },
+      },
+      {
+        type: "item.completed",
+        item: { id: "call_1", type: "mcp_tool_call", name: "bash", aggregated_output: "a\nb\n" },
+      },
+    ]);
+    expect(
+      opencodeToProcessEvent({
+        type: "error",
+        error: { name: "UnknownError", data: { message: "no location" } },
+      }),
+    ).toEqual([{ type: "turn.failed", error: "no location" }]);
+    expect(opencodeToProcessEvent({ type: "step_finish", part: { reason: "tool-calls" } })).toEqual(
+      [],
+    );
+    expect(opencodeToProcessEvent({ type: "step_finish", part: { reason: "stop" } })).toEqual([
+      { type: "turn.completed" },
+    ]);
+    expect(opencodeToProcessEvent({ type: "step_finish" })).toEqual([]);
+  });
+
+  it("aligns the child environment with the session directory", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-oc-env-"));
+    const sessionDir = path.join(root, "session-dir");
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const exec = makeJsonlExec<{ type?: string; pwd?: string }, Record<string, never>>({
+      vendor: "opencode",
+      bin: process.execPath,
+      sessionsDir: root,
+      createState: () => ({}),
+      buildArgs: () => ["-e", "console.log(JSON.stringify({type:'pwd',pwd:process.env.PWD}))"],
+      initialSessionId: () => "ses_env",
+      sessionId: () => "ses_env",
+      env: (request, base) => ({ ...base, PWD: request.cwd }),
+      normalize: (event) =>
+        event.type === "pwd"
+          ? [{ type: "item.completed", item: { type: "agent_message", text: event.pwd ?? "" } }]
+          : [],
+    });
+    try {
+      const events: CodexEvent[] = [];
+      for await (const event of exec({
+        cwd: sessionDir,
+        prompt: "hello",
+        sandbox: "read-only",
+      }).events) {
+        events.push(event);
+      }
+      expect(events).toContainEqual({
+        type: "item.completed",
+        item: { type: "agent_message", text: sessionDir },
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ends the turn when a provider prints a terminal event but never exits", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-oc-lingering-"));
+    const exec = makeJsonlExec<{ type?: string }, Record<string, never>>({
+      vendor: "opencode",
+      bin: process.execPath,
+      sessionsDir: root,
+      createState: () => ({}),
+      buildArgs: () => [
+        "-e",
+        "console.log(JSON.stringify({type:'text',text:'done'})); console.log(JSON.stringify({type:'done'})); setInterval(function(){}, 100000)",
+      ],
+      initialSessionId: () => "ses_lingering",
+      sessionId: () => "ses_lingering",
+      normalize: (event) =>
+        event.type === "done"
+          ? [{ type: "turn.completed" }]
+          : event.type === "text"
+            ? [{ type: "item.completed", item: { type: "agent_message", text: "done" } }]
+            : [],
+    });
+    try {
+      const events: CodexEvent[] = [];
+      const consume = (async () => {
+        for await (const event of exec({
+          cwd: root,
+          prompt: "hello",
+          sandbox: "danger-full-access",
+        }).events) {
+          events.push(event);
+        }
+      })();
+      const timeout = new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 4000),
+      );
+      expect(await Promise.race([consume.then(() => "done" as const), timeout])).toBe("done");
+      expect(events).toContainEqual({ type: "turn.completed" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-announce an id on a resumed session", () => {
+    const state = { sessionId: "ses_a", announced: true };
+    expect(
+      opencodeToProcessEvent(
+        { type: "step_start", sessionID: "ses_a", part: { type: "step-start" } },
+        state,
+      ),
+    ).toEqual([]);
+  });
+
+  it("reads per-model effort variants from `opencode models --verbose`", () => {
+    const plain = parseOpencodeModels("opencode-go/deepseek-v4.1-flash\nopencode/big-pickle");
+    expect(plain.map((model) => model.value)).toEqual([
+      "opencode-go/deepseek-v4.1-flash",
+      "opencode/big-pickle",
+    ]);
+    expect(plain[0]?.efforts).toBeUndefined();
+
+    const verbose = [
+      "opencode-go/deepseek-v4.1-flash",
+      "{",
+      '  "id": "deepseek-v4.1-flash",',
+      '  "name": "DeepSeek V4.1 Flash",',
+      '  "variants": { "low": { "reasoningEffort": "low" }, "high": { "reasoningEffort": "high" } }',
+      "}",
+      "opencode/big-pickle",
+      "{",
+      '  "id": "big-pickle",',
+      '  "variants": {}',
+      "}",
+    ].join("\n");
+    const models = parseOpencodeModels(verbose);
+    expect(models).toMatchObject([
+      { value: "opencode-go/deepseek-v4.1-flash", efforts: ["low", "high"] },
+      { value: "opencode/big-pickle" },
+    ]);
+  });
+
+  it("parses both mirrored TranscriptMsg lines and raw run events", () => {
+    const raw = [
+      JSON.stringify({ role: "user", text: "Explain closures", ts: 10 }),
+      JSON.stringify({
+        type: "text",
+        time: 20,
+        part: { type: "text", text: "A closure captures scope." },
+      }),
+      JSON.stringify({
+        type: "tool_use",
+        time: 21,
+        part: {
+          type: "tool",
+          tool: "read",
+          callID: "call_9",
+          state: { status: "completed", input: { path: "a.ts" }, output: "ok" },
+        },
+      }),
+    ].join("\n");
+    expect(parseOpencodeTranscript(raw)).toMatchObject([
+      { role: "user", text: "Explain closures" },
+      { role: "assistant", text: "A closure captures scope." },
+      { role: "assistant", text: "", tools: [{ name: "read", result: "ok" }] },
+    ]);
+  });
+
+  it("mirrors legacy JSON-tree sessions into a readable transcript", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-opencode-"));
+    const storage = path.join(root, "storage");
+    const write = (file: string, value: unknown) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(value));
+    };
+    write(path.join(storage, "session", "proj", "ses_1.json"), {
+      id: "ses_1",
+      directory: "/work/repo",
+      title: "Fix login",
+      time: { created: 1, updated: 3 },
+    });
+    write(path.join(storage, "message", "ses_1", "msg_user.json"), {
+      id: "msg_user",
+      role: "user",
+      time: { created: 2 },
+    });
+    write(path.join(storage, "part", "msg_user", "prt_1.json"), {
+      id: "prt_1",
+      type: "text",
+      text: "Fix login",
+      time: { start: 2 },
+    });
+    write(path.join(storage, "message", "ses_1", "msg_ai.json"), {
+      id: "msg_ai",
+      role: "assistant",
+      time: { created: 3 },
+    });
+    write(path.join(storage, "part", "msg_ai", "prt_2.json"), {
+      id: "prt_2",
+      type: "text",
+      text: "Fixed.",
+      time: { start: 3 },
+    });
+    try {
+      const sessions = new OpencodeSource(root, path.join(root, "mirror")).scan();
+      expect(sessions).toMatchObject([
+        {
+          vendor: "opencode",
+          sessionId: "ses_1",
+          cwd: "/work/repo",
+          title: "Fix login",
+          lastPrompt: "Fix login",
+        },
+      ]);
+      const mirrored = parseOpencodeTranscript(fs.readFileSync(sessions[0]?.path ?? "", "utf8"));
+      expect(mirrored).toMatchObject([
+        { role: "user", text: "Fix login" },
+        { role: "assistant", text: "Fixed." },
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("mirrors SQLite database sessions into a readable transcript", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-opencode-db-"));
+    const db = new DatabaseSync(path.join(root, "opencode.db"));
+    try {
+      db.exec(
+        [
+          "CREATE TABLE session (id text PRIMARY KEY, directory text, title text, time_created integer, time_updated integer, parent_id text)",
+          "CREATE TABLE message (id text PRIMARY KEY, session_id text, time_created integer, data text)",
+          "CREATE TABLE part (id text PRIMARY KEY, message_id text, session_id text, time_created integer, data text)",
+        ].join("; "),
+      );
+      const insertSession = db.prepare(
+        "INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, NULL)",
+      );
+      insertSession.run("ses_db", "/work/repo", "Add tests", 100, 200);
+      const insertMessage = db.prepare(
+        "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+      );
+      insertMessage.run("msg_u", "ses_db", 110, JSON.stringify({ role: "user" }));
+      insertMessage.run("msg_a", "ses_db", 120, JSON.stringify({ role: "assistant" }));
+      const insertPart = db.prepare(
+        "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)",
+      );
+      insertPart.run(
+        "prt_1",
+        "msg_u",
+        "ses_db",
+        111,
+        JSON.stringify({ type: "text", text: "Add tests" }),
+      );
+      insertPart.run(
+        "prt_2",
+        "msg_a",
+        "ses_db",
+        121,
+        JSON.stringify({
+          type: "tool",
+          tool: "read",
+          callID: "c1",
+          state: { status: "completed", input: { path: "a.ts" }, output: "ok" },
+        }),
+      );
+      insertPart.run(
+        "prt_3",
+        "msg_a",
+        "ses_db",
+        122,
+        JSON.stringify({ type: "text", text: "Done." }),
+      );
+    } finally {
+      db.close();
+    }
+    try {
+      const sessions = new OpencodeSource(root, path.join(root, "mirror")).scan();
+      expect(sessions).toMatchObject([
+        { vendor: "opencode", sessionId: "ses_db", cwd: "/work/repo", title: "Add tests" },
+      ]);
+      expect(
+        parseOpencodeTranscript(fs.readFileSync(sessions[0]?.path ?? "", "utf8")),
+      ).toMatchObject([
+        { role: "user", text: "Add tests" },
+        { role: "assistant", text: "", tools: [{ name: "read", result: "ok" }] },
+        { role: "assistant", text: "Done." },
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies OpenCode auth and usage-limit failures", () => {
+    expect(classifyOpencodeError(new Error("401 unauthorized: bad api key"))).toMatchObject({
+      code: "opencode_auth_required",
+      vendor: "opencode",
+    });
+    expect(classifyOpencodeError(new Error("429 too many requests"))).toMatchObject({
+      code: "opencode_usage_limit",
+      retryable: true,
+    });
   });
 });
 

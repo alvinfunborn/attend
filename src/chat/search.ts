@@ -3,6 +3,7 @@ import type { RawSession } from "../core/types.js";
 import { readCodexTranscript } from "./codex/transcript.js";
 import { readCopilotTranscript } from "./copilot/transcript.js";
 import { readCursorTranscript } from "./cursor/transcript.js";
+import { readOpencodeTranscript } from "./opencode/transcript.js";
 import { parseSearchQuery } from "./search-query.js";
 import { type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
 
@@ -70,7 +71,9 @@ export function readSearchChunks(session: RawSession): SearchHit[] {
           ? readAntigravityTranscript
           : session.vendor === "copilot"
             ? readCopilotTranscript
-            : readClaudeTranscript;
+            : session.vendor === "opencode"
+              ? readOpencodeTranscript
+              : readClaudeTranscript;
   const chunks = chunksFromMessages(read(session.path, Number.POSITIVE_INFINITY));
   const bytes = chunks.reduce((total, chunk) => total + Buffer.byteLength(chunk.text), 0);
   transcriptSearchCache.set(session.path, { mtimeMs: st.mtimeMs, size: st.size, chunks, bytes });

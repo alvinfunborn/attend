@@ -18,6 +18,61 @@ const view: ConsoleView = {
 };
 
 describe("renderConsole", () => {
+  it("opens the state editor from analyzing even without a daemon verdict", () => {
+    const html = renderConsole(view);
+    const code = html.slice(
+      html.indexOf("  function stateLabel(state){"),
+      html.indexOf("  function priorityLevel(score){"),
+    );
+    const makeBadge = new Function(`
+      var STATE_OPTIONS=['done'];
+      function el(tag,cls,text){ return {text,style:{},classList:{add(){}},setAttribute(){}}; }
+      function showSignalMenu(){ return null; }
+      ${code}
+      return stateBadge;
+    `)();
+    const badge = makeBadge({ sessionId: "s1", state: null, analysisPending: true });
+    expect(badge.text).toBe("analyzing");
+    expect(badge.tabIndex).toBe(0);
+    expect(() => badge.onclick({ stopPropagation() {} })).not.toThrow();
+    expect(
+      makeBadge({ sessionId: "s1", state: "等待发布", stateset: true, stateColor: "#123456" }).style
+        .backgroundColor,
+    ).toBe("#123456");
+  });
+
+  it("keeps manual labels when a delayed analysis lands and releases them next turn", () => {
+    const html = renderConsole(view);
+    const apply = html.slice(
+      html.indexOf("  function applyAnalysis(s, a){"),
+      html.indexOf("  // The daemon analyzes on turn-end"),
+    );
+    const clear = html.slice(
+      html.indexOf("  function clearTurnScopedSignals(s){"),
+      html.indexOf("  // Build a clickable priority/ETA badge"),
+    );
+    const functions = new Function(
+      `var titleEls={},cur=null; function renderSidebar(){}; ${apply} ${clear}; return {applyAnalysis,clearTurnScopedSignals};`,
+    )();
+    const session = {
+      sessionId: "s1",
+      state: "等待测试",
+      stateColor: "#123456",
+      stateset: true,
+      analysisPending: true,
+    };
+    functions.applyAnalysis(session, { state: "done", priority: 3, etaMin: 2 });
+    expect(session).toMatchObject({
+      state: "等待测试",
+      stateColor: "#123456",
+      stateset: true,
+      analysisPending: false,
+    });
+    functions.clearTurnScopedSignals(session);
+    functions.applyAnalysis(session, { state: "needs_review", priority: 3, etaMin: 2 });
+    expect(session).toMatchObject({ state: "needs_review", stateColor: null, stateset: false });
+  });
+
   it("marks a cold session index and consumes it through the encrypted live bus", () => {
     const html = renderConsole({
       ...view,
@@ -162,6 +217,16 @@ describe("renderConsole", () => {
       ".commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center;",
     );
     expect(html).toContain(".commentactions { flex-shrink: 0; display: flex; align-items: center;");
+    expect(html).toContain(
+      '<span class="commentstatus it-status read" id="commentStatus" title="read" hidden></span>',
+    );
+    expect(html).toContain(".commentstatus { flex-shrink: 0; }");
+    expect(html).toContain(".commentstatus[hidden] { display: none; }");
+    expect(html).toContain("function syncCommentHeaderStatus(thread)");
+    expect(html).toContain("function toggleCommentStatus()");
+    expect(html).toContain("fetch('/comments/status',{method:'POST'");
+    expect(html).toContain("syncCommentHeaderStatus(thread||null);");
+    expect(html).toContain("syncCommentHeaderStatus(null);");
     expect(html).toContain(".commentpromote { height: 1.75rem; min-height: 1.75rem;");
     expect(html).toContain(".commentclose { width: 1.75rem; height: 1.75rem;");
     expect(html).toContain('<div class="commentactions">');
@@ -691,7 +756,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function syncActivitySortTs(s, ts)");
     expect(html).toContain("function syncActivityLastTs(s, ts)");
     expect(html).toContain(
-      "['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','probe','state','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','model','effort','speed']",
+      "['pattern','patternset','patternReason','patternData','avoidancePrompt','nextStep','probe','state','stateColor','stateset','score','reason','etaMin','brief','customTitle','forkParentId','priorityset','etaset','unread','seen','model','effort','speed']",
     );
     expect(html).toContain("if(Array.isArray(next.userPromptTs)){");
     expect(html).toContain(
@@ -1540,7 +1605,7 @@ describe("renderConsole", () => {
 
   it("defines complete light and dark action palettes and binds primary actions to vendors", () => {
     const html = renderConsole(view);
-    for (const vendor of ["claude", "codex", "cursor", "antigravity", "copilot"]) {
+    for (const vendor of ["claude", "codex", "cursor", "antigravity", "copilot", "opencode"]) {
       expect(html).toContain(`--vendor-${vendor}-action-bg:`);
       expect(html).toContain(`--vendor-${vendor}-action-hover:`);
       expect(html).toContain(`--vendor-${vendor}-action-fg:`);
