@@ -3342,6 +3342,7 @@ window.__CHANGELOG__ = ${changelogJson};
   // server-side chatQueue and the same /chat/queue routes. It needs no per-key
   // stash because only one thread is open at a time; openCommentThread resets it.
   var commentPendingQueue = [];
+  var drainedCommentQueueItems = {};
   var commentQueueParked = false;
   var commentQueueSteerable = false;
   var sendingCommentQueueItems = {};
@@ -14126,7 +14127,11 @@ window.__CHANGELOG__ = ${changelogJson};
   function applyCommentServerQueue(threadId,res){
     if(!res||!res.ok) return;
     if(String(commentDrawerState.threadId||'')!==String(threadId||'')) return;
-    commentPendingQueue=Array.isArray(res.items)?res.items.map(cloneTurn):[];
+    // An SSE drain can arrive before the enqueue response that still contains
+    // that item. Once consumed, it must not reappear from an older snapshot.
+    commentPendingQueue=Array.isArray(res.items)?res.items.filter(function(item){
+      return !drainedCommentQueueItems[String(threadId)+'|'+String(item.id||'')];
+    }).map(cloneTurn):[];
     commentQueueParked=res.parked===true;
     commentQueueSteerable=res.steerable===true;
     renderCommentQueue();
@@ -18590,6 +18595,7 @@ window.__CHANGELOG__ = ${changelogJson};
       // drain/steer event is what materializes it — the same handoff the main
       // transcript makes in onEvent().
       if(ev.kind!=='user_turn_started'){
+        if(ev.queueId) objectCacheSet(drainedCommentQueueItems,String(thread.id)+'|'+String(ev.queueId),true,500);
         if(String(commentDrawerState.threadId||'')===String(thread.id)){
           // A drained turn means the queue is moving again, so it is no longer
           // parked by an earlier manual stop.

@@ -657,12 +657,16 @@ describe("console browser behavior", () => {
         .toContain("generating");
 
       // Let the initial replay's scheduled paint finish before measuring the delta.
-      await page.evaluate(
-        () =>
-          new Promise<void>((resolve) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      await page.evaluate(() => {
+        const browserWindow = globalThis as unknown as {
+          requestAnimationFrame(callback: () => void): number;
+        };
+        return new Promise<void>((resolve) =>
+          browserWindow.requestAnimationFrame(() =>
+            browserWindow.requestAnimationFrame(() => resolve()),
           ),
-      );
+        );
+      });
       // A consecutive delta patches only the changed keyed row. The unrelated
       // row keeps its DOM identity instead of paying for a full sidebar rebuild.
       await page.locator('[data-session-id="s1"]').evaluate((row) => {
@@ -1197,7 +1201,7 @@ describe("console browser behavior", () => {
     await page.close();
   }, 15_000);
 
-  it("queues a comment typed mid-turn and materializes it when the server drains it", async () => {
+  it("keeps a drained comment out of the queue when its enqueue response arrives late", async () => {
     const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
     page.setDefaultTimeout(2_000);
     const pageErrors: string[] = [];
@@ -1207,6 +1211,10 @@ describe("console browser behavior", () => {
     let commentSendCalls = 0;
     let queueGets = 0;
     let hangQueuePost = false;
+    let releaseQueuePost = () => {};
+    const queuePostGate = new Promise<void>((resolve) => {
+      releaseQueuePost = resolve;
+    });
 
     await page.addInitScript(() => {
       const browserGlobal = globalThis as unknown as Record<string, unknown>;
@@ -1250,6 +1258,7 @@ describe("console browser behavior", () => {
         // state that must not survive a thread switch.
         if (hangQueuePost) return;
         queueItems.push({ id: "queued-1", text: String(body.text), vendor: "claude" });
+        await queuePostGate;
         await route.fulfill({
           json: {
             ok: true,
@@ -1287,7 +1296,8 @@ describe("console browser behavior", () => {
       });
       expect(commentSendCalls).toBe(0);
 
-      // Draining it is what turns the row into a real user message.
+      // Drain it before the HTTP acknowledgement. The stale queue snapshot in
+      // that acknowledgement must not restore the already consumed draft.
       await page.evaluate(() => {
         const source = (globalThis as unknown as Record<string, unknown>)
           .__commentQueueEventSource as {
@@ -1308,6 +1318,7 @@ describe("console browser behavior", () => {
           }),
         });
       });
+      releaseQueuePost();
       await expect.poll(() => page.locator("#commentQueue .qitem").count()).toBe(0);
       await expect
         .poll(() => page.locator("#commentMsgs").textContent())
@@ -1334,6 +1345,7 @@ describe("console browser behavior", () => {
       expect(await page.locator("#commentQueue").textContent()).not.toContain("stuck in flight");
       expect(pageErrors).toEqual([]);
     } finally {
+      releaseQueuePost();
       await page.close();
     }
   }, 15_000);

@@ -32,6 +32,8 @@ All notable changes to Attend are documented in this file.
   analysis results and older session snapshots, and reset when the next conversation turn starts.
 - Provider-discovered sessions merge with their existing local branch identity, preventing duplicate
   session cards when provider IDs arrive or roll over.
+- Queued comments stay removed after execution starts, even when their enqueue acknowledgement
+  arrives after the live update.
 
 ## 1.3.5 — 2026-09-14
 
