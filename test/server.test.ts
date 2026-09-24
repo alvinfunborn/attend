@@ -6060,6 +6060,34 @@ describe("startServer port rollover", () => {
   });
 });
 
+describe("background settings API", () => {
+  it("persists only valid background choices and leaves work configuration unchanged", async () => {
+    const { app, config } = appWithSpy();
+    const before = readStateDocument(config.workEvents, "ui-state");
+    for (const mode of ["economical", "follow", "off"]) {
+      const saved = await app.request("/analyzer/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      expect(saved.status).toBe(200);
+      expect(await (await app.request("/analyzer/settings")).json()).toMatchObject({ mode });
+    }
+    const invalid = await app.request("/analyzer/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "legacy_vendor_default" }),
+    });
+    expect(invalid.status).toBe(400);
+    const after = readStateDocument(config.workEvents, "ui-state");
+    expect(after).toEqual(before);
+    expect(await (await app.request("/session/analysis?session=external")).json()).toMatchObject({
+      analysis: null,
+    });
+    expect(fs.existsSync(config.workEvents)).toBe(true);
+  });
+});
+
 describe("live-stream daemon analysis broadcast", () => {
   it("refreshes the authoritative index as soon as a daemon id is observed", async () => {
     const uniq = Math.random().toString(36).slice(2);
@@ -6098,6 +6126,11 @@ describe("live-stream daemon analysis broadcast", () => {
       launcher: () => "noop",
       engine: new ChatEngine(fakeQuery),
       orchestrator,
+      analyzerCatalog: async () => ({
+        live: true,
+        source: "live",
+        models: [{ value: "gpt-5.6-luna", label: "Luna", efforts: ["low"], speeds: ["default"] }],
+      }),
     });
     const res = await app.request("/chat/live-stream");
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
@@ -6114,7 +6147,7 @@ describe("live-stream daemon analysis broadcast", () => {
       const firstRevision = Number(firstIndex?.revision) || 0;
 
       const pendingSpawn = orchestrator.ensureDaemon("task-race", "codex", os.tmpdir());
-      expect(orchestrator.isDaemon("daemon-race")).toBe(true);
+      await vi.waitFor(() => expect(orchestrator.isDaemon("daemon-race")).toBe(true));
 
       const refreshed = await readSseUntil(reader, (text) =>
         sseJsonMessages(text).some(

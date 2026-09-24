@@ -12,6 +12,7 @@ export type AnalysisState =
 
 /** The daemon's structured verdict for one task session. */
 export interface Analysis {
+  analyzerProfile?: string;
   /** ≤8-word headline — the tab title */
   brief: string;
   /** why the assistant handed control back, or null for older cached verdicts */
@@ -45,6 +46,12 @@ export class AnalysisCache {
     this.data = databaseFile
       ? new SqliteDocument(databaseFile, "analysis-cache", file, normalizeAnalyses)
       : new JsonFile(file, normalizeAnalyses);
+  }
+
+  delete(taskId: string): void {
+    this.data.update((entries) => {
+      delete entries[taskId];
+    });
   }
 
   get(taskId: string): Analysis | null {

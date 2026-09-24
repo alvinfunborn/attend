@@ -173,7 +173,7 @@ describe("process CLI capability degradation", () => {
     });
   });
 
-  it("parses Antigravity/Copilot model tables with their advertised effort levels", () => {
+  it("parses CLI model tables without inventing per-model efforts", () => {
     expect(
       parseProcessCliModels(
         "gemini-3-pro  Gemini 3 Pro\nclaude-sonnet-4-5 - Claude Sonnet 4.5 (default)",
@@ -183,12 +183,10 @@ describe("process CLI capability degradation", () => {
       {
         value: "gemini-3-pro",
         label: "Gemini 3 Pro",
-        efforts: ["low", "medium", "high"],
       },
       {
         value: "claude-sonnet-4-5",
         label: "Claude Sonnet 4.5",
-        efforts: ["low", "medium", "high"],
       },
     ]);
   });
@@ -212,7 +210,6 @@ describe("process CLI capability degradation", () => {
       {
         value: "auto",
         label: "Auto",
-        efforts: ["low", "medium", "high", "xhigh", "max"],
       },
     ]);
   });
@@ -714,7 +711,53 @@ describe("OpenCode CLI integration", () => {
   });
 });
 
+describe("Copilot model readback", () => {
+  it("preserves initial model and fallback changes for the background model guard", () => {
+    const state = { sessionId: "copilot", sawAssistantDelta: false };
+    expect(
+      copilotToProcessEvent(
+        { type: "session.start", data: { selectedModel: "gpt-5.6-luna" } },
+        state,
+      ),
+    ).toEqual([{ type: "thread.started", thread_id: "copilot", model: "gpt-5.6-luna" }]);
+    expect(
+      copilotToProcessEvent(
+        { type: "session.model_change", data: { newModel: "gpt-5.6-astra" } },
+        state,
+      ),
+    ).toEqual([{ type: "model.changed", model: "gpt-5.6-astra" }]);
+  });
+});
+
 describe("process vendor daemon", () => {
+  it.each(["cursor", "antigravity", "copilot"])(
+    "passes explicit settings through every %s background turn",
+    async (vendor) => {
+      const requests: Array<Record<string, unknown>> = [];
+      const execution = { model: "exact-provider-variant", effort: "low", speed: "default" };
+      const analyzer = new ProcessAnalyzer(
+        vendor,
+        "/missing-transcripts",
+        (request) => {
+          requests.push({ ...request });
+          return {
+            events: (async function* () {
+              yield { type: "thread.started", thread_id: "daemon" };
+            })(),
+            kill: () => {},
+          };
+        },
+        () => [],
+      );
+      await analyzer.spawn("/repo", undefined, execution);
+      await analyzer.analyze("daemon", "/repo", "task", undefined, undefined, "", execution);
+      await analyzer.avoidancePrompt("daemon", "/repo", "task", "", execution);
+      expect(requests).toHaveLength(3);
+      for (const request of requests)
+        expect(request).toMatchObject({ ...execution, sandbox: "read-only" });
+    },
+  );
+
   it("spawns and resumes a Cursor analyzer using the shared daemon contract", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-cursor-daemon-"));
     const taskId = "cursor-task";

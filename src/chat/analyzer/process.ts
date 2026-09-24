@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { type AnalyzerExecution, assertAnalyzerModel } from "../../core/analyzer-policy.js";
 import { MAX_PENDING_TURNS_PER_ANALYSIS } from "../../core/collaboration.js";
 import {
   parseAnalysis,
@@ -51,9 +52,13 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     private readonly contextReader?: AnalyzerContextReader,
   ) {}
 
-  async spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null> {
+  async spawn(
+    cwd: string,
+    onSessionId?: (sessionId: string) => void,
+    execution?: AnalyzerExecution,
+  ): Promise<string | null> {
     if (!this.execFn) return null;
-    const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only" });
+    const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only", ...execution });
     let sessionId: string | null = null;
     await consumeAnalyzerStream(
       handle.events,
@@ -63,6 +68,7 @@ export class ProcessAnalyzer implements SessionAnalyzer {
           if (sessionId !== uiEvent.sessionId) onSessionId?.(uiEvent.sessionId);
           sessionId = uiEvent.sessionId;
         }
+        assertAnalyzerModel(execution, event.model);
       },
       () => handle.kill(),
     );
@@ -76,6 +82,7 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     knownTurnIds: ReadonlySet<string> = new Set(),
     analysisFromAt: number | null = null,
     uiContext = "",
+    execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null> {
     if (!this.execFn) return null;
     const file = await this.findTranscript(taskId);
@@ -91,11 +98,13 @@ export class ProcessAnalyzer implements SessionAnalyzer {
       prompt: requestPrompt(transcript, pendingTurns, uiContext),
       resume: daemonId,
       sandbox: "read-only",
+      ...execution,
     });
     let text = "";
     await consumeAnalyzerStream(
       handle.events,
       (event) => {
+        assertAnalyzerModel(execution, event.model);
         for (const uiEvent of toUiEventsFromCodex(event)) {
           if (uiEvent.kind === "assistant_text") text += uiEvent.text;
         }
@@ -116,6 +125,7 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     cwd: string,
     taskId: string,
     uiContext = "",
+    execution?: AnalyzerExecution,
   ): Promise<string | null> {
     if (!this.execFn) return null;
     const file = await this.findTranscript(taskId);
@@ -125,11 +135,13 @@ export class ProcessAnalyzer implements SessionAnalyzer {
       prompt: avoidancePromptRequest(transcript, uiContext),
       resume: daemonId,
       sandbox: "read-only",
+      ...execution,
     });
     let text = "";
     await consumeAnalyzerStream(
       handle.events,
       (event) => {
+        assertAnalyzerModel(execution, event.model);
         for (const uiEvent of toUiEventsFromCodex(event)) {
           if (uiEvent.kind === "assistant_text") text += uiEvent.text;
         }

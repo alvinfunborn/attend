@@ -2062,6 +2062,17 @@ export function renderConsole(v: ConsoleView): string {
       </svg>
     </button>
   </header>
+  <details class="analyzer-settings" style="padding:8px 14px;font-size:12px">
+    <summary>Background analysis</summary>
+    <label for="analyzerMode">Mode</label>
+    <select id="analyzerMode" disabled>
+      <option value="economical">Economical</option>
+      <option value="follow">Follow work session</option>
+      <option value="off">Off</option>
+    </select>
+    <p id="analyzerModeHelp" role="status">Loading settings...</p>
+    <p id="analyzerExecution" role="status"></p>
+  </details>
   <div class="newsession-anchor">
   <div class="topnav">
     <div class="searchwrap">
@@ -14799,6 +14810,7 @@ window.__CHANGELOG__ = ${changelogJson};
       tries++;
       fetch('/session/analysis?session='+encodeURIComponent(id)).then(function(r){return r.json();})
         .then(function(res){ var a=res&&res.analysis;
+          if(cur&&cur.sessionId===s.sessionId)showAnalyzerExecution(res.execution);
           if((Number(s._runEpoch)||0)!==runEpoch || s.generating) return;
           if(analysisChanged(s,a)){ applyAnalysis(s,a); return; }
           if(tries<ANALYSIS_POLL_TRIES) setTimeout(poll, 4500); else giveUp();
@@ -17986,7 +17998,20 @@ window.__CHANGELOG__ = ${changelogJson};
     }).catch(function(){});
   }
 
+  function showAnalyzerExecution(plan) {
+    var node=byId('analyzerExecution');
+    if(!node)return;
+    var execution=plan&&plan.execution;
+    node.textContent=!plan ? 'No background configuration resolved for this session yet.'
+      : plan.reason || (plan.mode==='legacy_vendor_default' ? 'Background: existing CLI defaults.'
+      : 'Background selection: '+[execution&&execution.model,execution&&execution.effort,execution&&execution.speed].filter(Boolean).join(' / '));
+  }
+  function refreshAnalyzerExecution(s) {
+    if(!s)return;
+    fetch('/session/analysis?session='+encodeURIComponent(providerSessionId(s))).then(function(r){return r.json();}).then(function(res){if(cur&&cur.sessionId===s.sessionId)showAnalyzerExecution(res.execution);}).catch(function(){});
+  }
   function select(s){
+    refreshAnalyzerExecution(s);
     var selectionGeneration=++transcriptSelectionGeneration;
     var previousSelection=cur;
     if(previousSelection!==s){
@@ -19571,6 +19596,26 @@ window.__CHANGELOG__ = ${changelogJson};
   setTheme(currentTheme(), false);
   // The send button is also the Stop button mid-turn.
   byId('send').onclick=function(){ if(turnActive) stopTurn(); else if(composerVendorChanged()) fork(); else send(); };
+  function showAnalyzerMode(settings) {
+    var select=byId('analyzerMode');
+    if(settings.mode==='legacy_vendor_default' && !select.querySelector('[value="legacy_vendor_default"]')) {
+      var legacy=document.createElement('option');legacy.value='legacy_vendor_default';legacy.textContent='Existing CLI defaults';legacy.disabled=true;select.appendChild(legacy);
+    }
+    select.value=settings.mode;select.disabled=false;
+    if(typeof cur!=='undefined'&&cur)refreshAnalyzerExecution(cur);
+    byId('analyzerModeHelp').textContent=settings.mode==='legacy_vendor_default'
+      ? 'Your existing background behavior is preserved. Choose Economical to reduce background cost.'
+      : settings.mode==='economical' ? 'Uses a verified lightweight model from the same provider. Falls back to local analysis when unavailable.'
+      : settings.mode==='follow' ? 'Follows this work session’s model and effort. Background calls may cost more.'
+      : 'Uses local analysis. No new background AI calls.';
+  }
+  fetch('/analyzer/settings').then(function(r){if(!r.ok)throw new Error('load');return r.json();}).then(showAnalyzerMode).catch(function(){byId('analyzerModeHelp').textContent='Background settings unavailable.';});
+  byId('analyzerMode').onchange=function(){
+    var mode=this.value;this.disabled=true;
+    fetch('/analyzer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})})
+      .then(function(r){if(!r.ok)throw new Error('save');return r.json();}).then(showAnalyzerMode)
+      .catch(function(){byId('analyzerModeHelp').textContent='Could not save. Reload to see the active setting.';});
+  };
   byId('themeToggle').onclick=toggleTheme;
   byId('sessionPanelToggle').onclick=toggleSessionPanel;
   byId('workStatsBtn').onclick=openWorkStats;

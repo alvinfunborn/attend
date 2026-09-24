@@ -308,6 +308,75 @@ describe("DaemonOrchestrator", () => {
     expect(orch.analysis("task-1")?.avoidancePrompt).toBe("Ask for the smallest next step");
   });
 
+  it("applies Claude background settings to seed, analysis and avoidance without an unsupported effort", async () => {
+    const analyzer = new ClaudeAnalyzer(os.tmpdir(), fakeQuery);
+    const execution = {
+      model: "claude-haiku-4-5-20251001",
+      disableThinking: true,
+      speed: "standard",
+    };
+    await analyzer.spawn(os.tmpdir(), undefined, execution);
+    await analyzer.analyze(
+      "daemon-1",
+      os.tmpdir(),
+      "missing-task",
+      undefined,
+      undefined,
+      "",
+      execution,
+    );
+    await analyzer.avoidancePrompt("daemon-1", os.tmpdir(), "missing-task", "", execution);
+    expect(claudeCalls).toHaveLength(3);
+    for (const call of claudeCalls) {
+      expect(call.options).toMatchObject({
+        model: execution.model,
+        thinking: { type: "disabled" },
+        settings: { fastMode: false },
+      });
+      expect(call.options).not.toHaveProperty("effort");
+    }
+  });
+
+  it("passes Codex model, effort and speed explicitly on every background turn", async () => {
+    const analyzer = new CodexAnalyzer(os.tmpdir(), fakeCodexExec);
+    const execution = { model: "gpt-5.6-luna", effort: "low", speed: "default" };
+    await analyzer.spawn(os.tmpdir(), undefined, execution);
+    await analyzer.analyze(
+      "cx-daemon-1",
+      os.tmpdir(),
+      "missing-task",
+      undefined,
+      undefined,
+      "",
+      execution,
+    );
+    await analyzer.avoidancePrompt("cx-daemon-1", os.tmpdir(), "missing-task", "", execution);
+    expect(codexCalls).toHaveLength(3);
+    for (const call of codexCalls)
+      expect(call).toMatchObject({ ...execution, sandbox: "read-only" });
+  });
+
+  it("registers and then stops a provider stream that reports an unexpected economical model", async () => {
+    let stopped = false;
+    const observed: string[] = [];
+    const analyzer = new CodexAnalyzer(os.tmpdir(), () => ({
+      events: (async function* () {
+        yield { type: "thread.started", thread_id: "unexpected-daemon", model: "gpt-5.6-astra" };
+      })(),
+      kill: () => {
+        stopped = true;
+      },
+    }));
+    await expect(
+      analyzer.spawn(os.tmpdir(), (id) => observed.push(id), {
+        model: "gpt-5.6-luna",
+        verifyModel: true,
+      }),
+    ).rejects.toThrow("different model");
+    expect(observed).toEqual(["unexpected-daemon"]);
+    expect(stopped).toBe(true);
+  });
+
   it("does not pin special Claude daemon options", async () => {
     const { orch, reg, cache } = make();
     cleanup.push(reg, cache);

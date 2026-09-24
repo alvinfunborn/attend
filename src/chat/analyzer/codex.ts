@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { type AnalyzerExecution, assertAnalyzerModel } from "../../core/analyzer-policy.js";
 import { MAX_PENDING_TURNS_PER_ANALYSIS } from "../../core/collaboration.js";
 import {
   parseAnalysis,
@@ -37,9 +38,8 @@ with brief "new session", state "done", and priority/etaMin 0.`;
 /**
  * Codex session analyzer: drives a Codex session (`codex exec`, the same vendor
  * seam the chat engine uses) as the daemon, and parses its JSON verdict. It
- * deliberately avoids pinning model/effort/sandbox so the daemon follows the
- * same Codex defaults as a normal session instead of a separate analyzer
- * profile. The exec fn is injectable so tests never spawn; a null exec (Codex
+ * applies the selected background profile to seed and resumed turns, while
+ * an absent profile preserves legacy CLI model defaults. The exec fn is injectable so tests never spawn; a null exec (Codex
  * not installed) degrades to no daemon — the session keeps the heuristic
  * fallback, never fake data (DESIGN invariant 3).
  */
@@ -53,9 +53,13 @@ export class CodexAnalyzer implements SessionAnalyzer {
     private readonly contextReader?: AnalyzerContextReader,
   ) {}
 
-  async spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null> {
+  async spawn(
+    cwd: string,
+    onSessionId?: (sessionId: string) => void,
+    execution?: AnalyzerExecution,
+  ): Promise<string | null> {
     if (!this.execFn) return null;
-    const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only" });
+    const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only", ...execution });
     let sessionId: string | null = null;
     await consumeAnalyzerStream(
       handle.events,
@@ -65,6 +69,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
           if (sessionId !== u.sessionId) onSessionId?.(u.sessionId);
           sessionId = u.sessionId;
         }
+        assertAnalyzerModel(execution, ev.model);
       },
       () => handle.kill(),
     );
@@ -78,6 +83,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     knownTurnIds: ReadonlySet<string> = new Set(),
     analysisFromAt: number | null = null,
     uiContext = "",
+    execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null> {
     if (!this.execFn) return null;
     const file = await this.findRollout(taskId);
@@ -95,11 +101,13 @@ export class CodexAnalyzer implements SessionAnalyzer {
       prompt: requestPrompt(transcript, pendingTurns, uiContext),
       resume: daemonId,
       sandbox: "read-only",
+      ...execution,
     });
     let text = "";
     await consumeAnalyzerStream(
       handle.events,
       (ev) => {
+        assertAnalyzerModel(execution, ev.model);
         for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
       },
       () => handle.kill(),
@@ -118,6 +126,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     cwd: string,
     taskId: string,
     uiContext = "",
+    execution?: AnalyzerExecution,
   ): Promise<string | null> {
     if (!this.execFn) return null;
     const file = await this.findRollout(taskId);
@@ -127,11 +136,13 @@ export class CodexAnalyzer implements SessionAnalyzer {
       prompt: avoidancePromptRequest(transcript, uiContext),
       resume: daemonId,
       sandbox: "read-only",
+      ...execution,
     });
     let text = "";
     await consumeAnalyzerStream(
       handle.events,
       (ev) => {
+        assertAnalyzerModel(execution, ev.model);
         for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
       },
       () => handle.kill(),

@@ -73,6 +73,13 @@ Attend keeps those signals next to the actual conversations, so organizing work 
 
 ### Analyzer suggestions
 
+The sidebar's **Background analysis** setting is independent of the work session's model:
+choose **Economical**, **Follow work session**, or **Off**. New installations default to
+Economical; existing installations retain their CLI defaults until a mode is chosen.
+When a compatible economical configuration is unavailable, Attend uses local heuristics.
+OpenCode currently uses local heuristics in Economical mode; Follow work session uses its
+selected model and variant. See [background analysis policy](docs/background-analysis.md).
+
 Supported sessions created by Attend receive a short `brief`, `state`, `priority`, `etaMin`, and
 `reason` after each turn. The analyzer may also provide two editable messages:
 
@@ -97,7 +104,7 @@ Attend detects those system CLIs at startup and only shows vendors it can actual
 available, the picker shows every vendor with installation guidance. Claude Code must be
 `2.1.0` or newer; an older version is disabled with an explicit update message.
 
-Every in-browser session gets an analyzer daemon from the same provider. Cursor daemons run in
+AI analysis uses a daemon from the same provider as the in-browser session. Cursor daemons run in
 native read-only `ask` mode with sandboxing enabled; Antigravity, Copilot, and OpenCode daemons use
 their headless/JSONL interfaces. Claude and Codex support native forks. Cursor, Antigravity, Copilot,
 and OpenCode branches are created as new sessions seeded with the visible parent transcript because

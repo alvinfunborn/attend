@@ -53,6 +53,11 @@ Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向�
 
 ### Analyzer 建议
 
+侧栏的 **Background analysis** 设置独立于工作 session 的模型，可选择 **Economical**、
+**Follow work session** 或 **Off**。新安装默认 Economical，已有安装在主动选择前保留 CLI 默认值。
+没有兼容的经济模型配置时会使用本地启发式分析；OpenCode 在 Economical 模式下使用本地分析，
+Follow work session 则沿用当前选择的模型和 variant。详见[后台分析策略](docs/background-analysis.md)。
+
 Attend 创建的受支持 session 会在每轮结束后得到简短的 `brief`、`state`、`priority`、`etaMin` 和
 `reason`。Analyzer 还可能提供两种可编辑消息：
 
@@ -74,7 +79,7 @@ Attend 会在启动时检测这些系统 CLI，只显示实际可运行的 Vendo
 显示所有 Vendor 并提供安装提示。Claude Code 最低要求为 `2.1.0`；版本过旧时会被禁用并
 明确提示升级。
 
-每个网页内创建的 session 都会由同 vendor 的 analyzer daemon 分析。Cursor daemon 使用原生只读
+AI 分析使用与网页内 session 相同 vendor 的 analyzer daemon。Cursor daemon 使用原生只读
 `ask` 模式并启用 sandbox；Antigravity、Copilot 与 OpenCode daemon 使用各自的 headless/JSONL
 接口。Claude 与 Codex 支持原生 fork；Cursor、Antigravity、Copilot 和 OpenCode 的 headless CLI
 没有原生 fork 命令，因此分支会创建新 session，并用父 session 的可见 transcript 作为上下文。

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { type AnalyzerExecution, assertAnalyzerModel } from "../../core/analyzer-policy.js";
 import { MAX_PENDING_TURNS_PER_ANALYSIS } from "../../core/collaboration.js";
 import {
   parseAnalysis,
@@ -37,9 +38,8 @@ This first message has no transcript yet — reply with brief "new session", sta
 
 /**
  * Claude session analyzer: drives a real Claude session (Agent SDK) as the
- * daemon, and parses its JSON verdict. It deliberately avoids pinning
- * model/effort/tool settings so the daemon follows the user's normal Claude
- * defaults instead of a separate analyzer profile. A system-CLI-bound query is
+ * daemon, and parses its JSON verdict. Background profiles explicitly override
+ * model/effort/speed; absent profiles preserve legacy CLI defaults. A system-CLI-bound query is
  * required so this adapter can never fall back to the SDK-bundled executable.
  */
 export class ClaudeAnalyzer implements SessionAnalyzer {
@@ -52,9 +52,13 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     private readonly contextReader?: AnalyzerContextReader,
   ) {}
 
-  async spawn(cwd: string, onSessionId?: (sessionId: string) => void): Promise<string | null> {
+  async spawn(
+    cwd: string,
+    onSessionId?: (sessionId: string) => void,
+    execution?: AnalyzerExecution,
+  ): Promise<string | null> {
     let sessionId: string | null = null;
-    const stream = this.queryFn({ prompt: SEED, options: this.options(cwd) });
+    const stream = this.queryFn({ prompt: SEED, options: this.options(cwd, execution) });
     await consumeAnalyzerStream(
       stream,
       (msg) => {
@@ -63,6 +67,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
           if (sessionId !== ev.sessionId) onSessionId?.(ev.sessionId);
           sessionId = ev.sessionId;
         }
+        assertAnalyzerModel(execution, "model" in msg ? msg.model : undefined);
       },
       () => stream.interrupt(),
     );
@@ -76,6 +81,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     knownTurnIds: ReadonlySet<string> = new Set(),
     analysisFromAt: number | null = null,
     uiContext = "",
+    execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null> {
     const file = await this.findSessionFile(taskId);
     // The daemon needs the true session opening, not "the first message from the
@@ -89,7 +95,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
       .filter((turn) => !knownTurnIds.has(turn.turnId))
       .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
     let text = "";
-    const options = { ...this.options(cwd), resume: daemonId };
+    const options = { ...this.options(cwd, execution), resume: daemonId };
     const stream = this.queryFn({
       prompt: requestPrompt(transcript, pendingTurns, uiContext),
       options,
@@ -97,6 +103,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     await consumeAnalyzerStream(
       stream,
       (msg) => {
+        assertAnalyzerModel(execution, "model" in msg ? msg.model : undefined);
         for (const ev of toUiEventsFromClaude(msg))
           if (ev.kind === "assistant_text") text += ev.text;
       },
@@ -116,15 +123,17 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     cwd: string,
     taskId: string,
     uiContext = "",
+    execution?: AnalyzerExecution,
   ): Promise<string | null> {
     const file = await this.findSessionFile(taskId);
     const transcript = file ? (await this.readContext(file, taskId)).transcript : "";
     let text = "";
-    const options = { ...this.options(cwd), resume: daemonId };
+    const options = { ...this.options(cwd, execution), resume: daemonId };
     const stream = this.queryFn({ prompt: avoidancePromptRequest(transcript, uiContext), options });
     await consumeAnalyzerStream(
       stream,
       (msg) => {
+        assertAnalyzerModel(execution, "model" in msg ? msg.model : undefined);
         for (const ev of toUiEventsFromClaude(msg))
           if (ev.kind === "assistant_text") text += ev.text;
       },
@@ -133,8 +142,24 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     return parseAvoidancePrompt(text);
   }
 
-  private options(cwd: string): { cwd: string } {
-    return { cwd: cwd || process.cwd() };
+  private options(
+    cwd: string,
+    execution?: AnalyzerExecution,
+  ): NonNullable<Parameters<QueryFn>[0]["options"]> {
+    return {
+      cwd: cwd || process.cwd(),
+      ...(execution?.model
+        ? {
+            model: execution.model,
+            ...(execution.verifyModel ? { fallbackModel: execution.model } : {}),
+          }
+        : {}),
+      ...(execution?.effort
+        ? { effort: execution.effort as "low" | "medium" | "high" | "max" }
+        : {}),
+      ...(execution?.disableThinking ? { thinking: { type: "disabled" as const } } : {}),
+      ...(execution?.speed ? { settings: { fastMode: execution.speed === "fast" } } : {}),
+    };
   }
 
   /** Locate a task session's JSONL by id (its cwd-encoded project dir is opaque). */

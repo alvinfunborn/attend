@@ -14,6 +14,15 @@ All notable changes to Attend are documented in this file.
   and a custom color picker alongside the existing presets.
 - Composer shortcuts open model, effort, and vendor settings, or select a matching value directly
   when followed by a space.
+- Installation-wide background analysis settings separate economical, follow-session, and off
+  modes from the work session's model. Existing installations retain their CLI defaults until
+  a mode is selected; unavailable economical configurations fall back to local analysis.
+
+### Changed
+
+- Model discovery respects provider-owned configuration and account capabilities, including
+  Copilot model policies and per-model effort. Background results are discarded when their
+  selected policy or work configuration changes.
 
 ### Fixed
 
