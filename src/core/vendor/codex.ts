@@ -6,6 +6,7 @@ import { VISIT_GAP_MINUTES } from "../pattern.js";
 import type { RawSession } from "../types.js";
 import type { SessionSource } from "./index.js";
 import { type IncrementalJsonlParser, ScanCache } from "./scan-cache.js";
+import { parseTokenUsage } from "./token-usage.js";
 import type { TranscriptPathWriter } from "./transcript-index.js";
 
 /**
@@ -59,6 +60,7 @@ interface ResponseItem {
 }
 
 interface EventPayload {
+  info?: { total_token_usage?: unknown } | null;
   turn_id?: string;
   started_at?: number;
   completed_at?: number;
@@ -231,6 +233,11 @@ function appendCodexLine(state: CodexSessionState, line: string): void {
       };
     }
   } else if (kind === "event_msg" && item) {
+    if (item.type === "token_count") {
+      const usage = parseTokenUsage(item.info?.total_token_usage, true);
+      // Native totals are cumulative; repeated notifications must not be summed.
+      if (usage) session.tokenUsage = usage;
+    }
     if (item.type === "task_started") {
       state.activeTurn = {
         turnId: item.turn_id ?? null,
@@ -295,7 +302,11 @@ const codexJsonlParser: IncrementalJsonlParser<CodexSessionState> = {
   restore: (file, checkpoint) => {
     if (!checkpoint || typeof checkpoint !== "object") return null;
     const saved = checkpoint as Partial<CodexSessionState>;
-    if (!saved.session || typeof saved.session !== "object") return null;
+    if (
+      !saved.session ||
+      typeof saved.session !== "object" ||
+      saved.session.tokenUsage === undefined
+    ) return null;
     return {
       session: { ...saved.session, path: file, vendor: "codex" },
       previousTs:
@@ -371,6 +382,7 @@ function emptyCodexSession(file: string): RawSession {
   return {
     path: file,
     vendor: "codex",
+    tokenUsage: null,
     sessionId: null,
     title: null,
     lastPrompt: null,

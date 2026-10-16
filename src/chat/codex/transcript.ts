@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { extractMemoryCitationTrailer } from "../memory-citations.js";
 import { type ToolCall, type TranscriptMsg, visiblePromptText } from "../transcript.js";
+import { asyncQuestionTool } from "./questions.js";
 
 /**
  * Read a Codex rollout transcript (`~/.codex/sessions/**​/rollout-*.jsonl`) into the
@@ -23,6 +24,7 @@ interface ContentBlock {
   text?: string;
 }
 interface Payload {
+  item?: Record<string, unknown>;
   type?: string;
   role?: string;
   content?: unknown;
@@ -90,6 +92,17 @@ function applyItem(
 ): void {
   if (p.type === "message" && p.role === "user") {
     const text = visibleUserText(p.content);
+    if (text.startsWith("Your questions have been answered: ")) {
+      for (const tool of toolById.values()) {
+        if (tool.name.split(".").pop() !== "request_user_input_async") continue;
+        const questions = (tool.input as { questions?: Array<{ title?: string }> })?.questions;
+        if (
+          questions?.length &&
+          questions.every((q) => q.title && text.includes(`"${q.title}"="`))
+        )
+          tool.result = text;
+      }
+    }
     if (text) msgs.push(withTs({ role: "user", text, tools: [] }, ts));
   } else if (p.type === "message" && p.role === "assistant") {
     const parsed = extractMemoryCitationTrailer(textOf(p.content, "output_text").trim());
@@ -151,6 +164,17 @@ export function parseCodexTranscriptMessages(
     const ts = parseTs(o.timestamp);
     if (o.type === "response_item") {
       applyItem(p, msgs, toolById, ts);
+    } else if (o.type === "event_msg" && p.type === "item_completed" && p.item) {
+      const tool = asyncQuestionTool(p.item);
+      // A rollout normally contains both forms; display the question only once.
+      if (tool?.id && !toolById.has(tool.id)) {
+        applyItem(
+          { type: "function_call", call_id: tool.id, name: tool.name, input: tool.input },
+          msgs,
+          toolById,
+          ts,
+        );
+      }
     } else if (
       allowCompactedFallback &&
       o.type === "compacted" &&

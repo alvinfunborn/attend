@@ -17,17 +17,18 @@ export function isAnalyzerMode(
 /** Initialize before any other component creates the shared database. */
 export class AnalyzerSettingsStore {
   private readonly db: DatabaseSync;
-  constructor(databaseFile: string, legacyFiles: string[] = []) {
-    const existing = fs.existsSync(databaseFile) || legacyFiles.some((file) => fs.existsSync(file));
+  constructor(databaseFile: string, _legacyFiles: string[] = []) {
     fs.mkdirSync(path.dirname(databaseFile), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(databaseFile);
     configureStateDatabase(this.db);
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS analyzer_settings (id INTEGER PRIMARY KEY CHECK(id = 1), mode TEXT NOT NULL, revision INTEGER NOT NULL) STRICT",
     );
-    this.db
-      .prepare("INSERT OR IGNORE INTO analyzer_settings VALUES (1, ?, 0)")
-      .run(existing ? "legacy_vendor_default" : "economical");
+    this.db.prepare("INSERT OR IGNORE INTO analyzer_settings VALUES (1, ?, 0)").run("economical");
+    // Upgrade the former implicit CLI default without overriding explicit API settings.
+    this.db.exec(
+      "UPDATE analyzer_settings SET mode = 'economical', revision = revision + 1 WHERE mode = 'legacy_vendor_default'",
+    );
   }
   get(): AnalyzerSettings {
     const row = this.db

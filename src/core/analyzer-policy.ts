@@ -105,7 +105,7 @@ export class AnalyzerPolicyResolver implements AnalyzerPolicy {
     return (
       settings.mode === plan.mode &&
       settings.revision === plan.revision &&
-      (plan.mode !== "follow" ||
+      (plan.workFingerprint === undefined ||
         plan.workFingerprint === JSON.stringify(this.workConfig(vendor, taskId)))
     );
   }
@@ -147,7 +147,8 @@ export class AnalyzerPolicyResolver implements AnalyzerPolicy {
         if (settings.mode === "economical") {
           const economical = economicalExecution(vendor, catalog);
           if (economical) execution = { ...economical, verifyModel: true };
-        } else {
+        }
+        if (!execution) {
           const work = this.workConfig(vendor, taskId);
           workFingerprint = JSON.stringify(work);
           const defaults = catalog.defaults ?? EMPTY_DEFAULTS;
@@ -178,11 +179,9 @@ export class AnalyzerPolicyResolver implements AnalyzerPolicy {
               execution = { model, ...(effort ? { effort } : {}), ...(speed ? { speed } : {}) };
           }
         }
-        if (!execution)
-          reason =
-            settings.mode === "economical"
-              ? "No verified lightweight configuration; using local analysis."
-              : "Work-session configuration is unresolved; using local analysis.";
+        if (!execution) reason = "Work-session configuration is unresolved; using local analysis.";
+        else if (settings.mode === "economical" && workFingerprint !== undefined)
+          reason = "No verified lightweight configuration; following work session.";
       }
     }
     return {

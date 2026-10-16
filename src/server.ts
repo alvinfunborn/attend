@@ -1394,6 +1394,7 @@ function toSessionViews(
         sortTs: s.lastTs,
         userPromptTs: s.userPromptTs ?? [],
         prompts: s.prompts,
+        tokenUsage: s.tokenUsage ?? null,
         pattern,
         patternReason: pattern === "avoidance" ? avoidanceEvidence(tel) : null,
         patternData: pattern === "avoidance" ? avoidanceEvidenceData(tel) : null,
@@ -2577,6 +2578,9 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   });
   const buildConsoleShellView = (): ConsoleView => {
     const vaultState = uiState.get();
+    // SessionView already contains the resolved model/effort/speed. This
+    // machine-wide server lookup is never read by the browser.
+    delete vaultState.sessionRunConfigs;
     const dirs = knownDirs([], vaultState.recentDirectories, config.scopeRoots);
     return {
       sessions: [],
@@ -3006,7 +3010,14 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     comments: [],
   };
   let cachedCommentIndexJson = JSON.stringify(cachedCommentIndexSnapshot);
+  let cachedCommentContentJson = JSON.stringify(cachedCommentIndexSnapshot.comments);
   const cacheCommentIndexSnapshot = (snapshot: CommentIndexMessage): void => {
+    const content = JSON.stringify(snapshot.comments);
+    if (snapshot.epoch === cachedCommentIndexSnapshot.epoch && content === cachedCommentContentJson)
+      return;
+    if (snapshot.epoch === cachedCommentIndexSnapshot.epoch)
+      snapshot.generatedAt = Math.max(snapshot.generatedAt, cachedCommentIndexSnapshot.generatedAt + 1);
+    cachedCommentContentJson = content;
     cachedCommentIndexSnapshot = snapshot;
     cachedCommentIndexJson = JSON.stringify(snapshot);
   };
@@ -3744,6 +3755,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         lastTs: match.lastTs,
         userPromptTs: match.userPromptTs ?? [],
         prompts: match.prompts,
+        tokenUsage: match.tokenUsage ?? null,
       },
     });
   });
@@ -3964,7 +3976,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     streamSSE(c, async (stream) => {
       await new Promise<void>((resolve) => {
         let closed = false;
-        const requestedLastEventId = Number(c.req.header("last-event-id") ?? 0) || 0;
+        // Native retries send the header; explicit wake-up recovery creates a
+        // new EventSource and carries the last applied cursor in the URL.
+        const requestedLastEventId =
+          Number(c.req.header("last-event-id") ?? c.req.query("lastEventId") ?? 0) || 0;
         // EventSource retains Last-Event-ID across a server restart, while this
         // process-local counter restarts at zero. A future id therefore belongs
         // to an old process and must not suppress this process's buffered events.
@@ -3976,11 +3991,12 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
           if (eventId && eventId <= lastSentId) return;
           if (eventId) lastSentId = eventId;
           const data = e2ee.enabled ? e2ee.encryptJson(message) : JSON.stringify(message);
+          const id = String(eventId ?? liveEventId);
           // One global bus must also be one ordered byte stream. Explicitly queue
           // writes so an assistant_text immediately followed by result/error can
           // never race at the HTTP stream boundary.
           sendChain = sendChain
-            .then(() => stream.writeSSE({ data, id: String(eventId ?? liveEventId) }))
+            .then(() => stream.writeSSE({ data, id }))
             .catch(() => {});
         };
         liveSubscribers.add(send);
@@ -5166,8 +5182,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     });
   });
 
-  // Answer an interactive tool call (currently Claude's AskUserQuestion) by
-  // sending a synthetic tool_result back into the live run.
+  // Blocking tools receive a tool response; async questions receive a user turn.
   app.post("/chat/answer", async (c) => {
     const id = c.req.query("session");
     const cwd = c.req.query("cwd");
@@ -5175,6 +5190,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       toolUseId?: string;
       text?: string;
       toolUseResult?: unknown;
+      asyncQuestion?: boolean;
     };
     const toolUseId = body.toolUseId?.trim();
     const text = body.text?.trim();
@@ -5186,6 +5202,33 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     const unavailable = unavailableVendorResponse(c, c.req.query("vendor"));
     if (unavailable) return unavailable;
     const drv = driverFor(c.req.query("vendor"));
+    if (body.asyncQuestion === true) {
+      if (drv.vendor !== "codex")
+        return c.json({ ok: false, error: "async questions require Codex" }, 400);
+      const startedAt = Date.now();
+      let sent = false;
+      let steered = false;
+      try {
+        if (!drv.get(id)) {
+          await drv.start({ resume: id, cwd, firstText: text });
+          sent = true;
+        } else {
+          if (drv.canSteer(id)) steered = await drv.steer(id, { text });
+          sent = steered || (!drv.activeSessions().includes(id) && drv.send(id, { text }));
+        }
+      } catch (error) {
+        return chatDriverError(c, drv, error);
+      }
+      const view = sent ? recordUserMessageSent(id) : null;
+      if (sent) {
+        if (!steered)
+          broadcastSessionEvent(id, drv.vendor, { kind: "user_turn_started", startedAt, text });
+        broadcastSessionEvent(id, drv.vendor, {
+          kind: "tool_result", id: toolUseId, text, isError: false,
+        });
+      }
+      return c.json({ ok: sent, session: id, toolUseId, view });
+    }
     if (!drv.get(id)) drv.start({ resume: id, cwd }).catch(() => {});
     const sent = drv.answer(id, { toolUseId, text, toolUseResult: body.toolUseResult });
     if (sent) {

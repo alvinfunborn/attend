@@ -787,7 +787,7 @@ describe("renderConsole", () => {
 
   it("routes every session through one ordered global SSE event bus", () => {
     const html = renderConsole(view);
-    expect(html).toContain("var source=new EventSource('/chat/live-stream');");
+    expect(html).toContain("var source=new EventSource('/chat/live-stream'+");
     expect(html).toContain("function onBusSessionEvent(message)");
     expect(html).toContain("function applySessionIndex(message)");
     expect(html).toContain("message.kind==='session_index'");
@@ -1249,14 +1249,14 @@ describe("renderConsole", () => {
   it("refreshes vendor model snapshots after first render without reloading the page", () => {
     const html = renderConsole(view);
     expect(html).toContain("function refreshClaudeModels()");
-    expect(html).toContain("fetch('/models/claude', { cache:'no-store' })");
+    expect(html).toContain("return readModelCatalog('claude',function(res)");
     expect(html).toContain("applyClaudeModelSnapshot(res && res.models);");
-    expect(html).toContain("var claudeModelRefreshTimer=window.setInterval");
+    expect(html).not.toContain("var claudeModelRefreshTimer=window.setInterval");
     expect(html).toContain("function refreshCodexModels()");
-    expect(html).toContain("fetch('/models/codex', { cache:'no-store' })");
+    expect(html).toContain("return readModelCatalog('codex',function(res)");
     expect(html).toContain("applyCodexModelSnapshot(res && res.models);");
-    expect(html).toContain("var codexModelRefreshTimer=window.setInterval");
-    expect(html).toContain("if(codexModelRefreshCount>=12)");
+    expect(html).not.toContain("var codexModelRefreshTimer=window.setInterval");
+    expect(html).toContain("if(modelCatalogReads[vendor]) return modelCatalogReads[vendor];");
     expect(html).toContain('id="nmodelWarning"');
     expect(html).toContain('id="rmodelWarning"');
     expect(html).toContain("applyModelWarning('claude', res && res.warning);");
@@ -1539,9 +1539,48 @@ describe("renderConsole", () => {
     expect(html).toContain("function isQuestionTool(name, input)");
     expect(html).toContain("base==='request_user_input'");
     expect(html).toContain(
-      "if(isQuestionTool(tc.name, tc.input) && hasQuestionAnswerResult(tc.result, tc.isError)) lockQuestionTool(d);",
+      "if(isQuestionTool(tc.name, tc.input) && hasQuestionAnswerResult(tc.result, tc.isError, tc.name)) lockQuestionTool(d);",
     );
-    expect(html).toContain("if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t);");
+    expect(html).toContain("if(hasQuestionAnswerResult(ev.text, ev.isError,t._attendTool&&t._attendTool.name)) lockQuestionTool(t);");
+  });
+
+  it("recognizes async questions without treating delivery acceptance as an answer", () => {
+    const html = renderConsole(view);
+    const code = html.slice(html.indexOf("  function isQuestionTool("), html.indexOf("  function toolBlockKey("));
+    const { isQuestionTool, hasQuestionAnswerResult } = new Function(`${code}; return {isQuestionTool,hasQuestionAnswerResult};`)();
+    expect(isQuestionTool("functions.request_user_input_async", { questions: [{ title: "Where?" }] })).toBe(true);
+    expect(hasQuestionAnswerResult('{"accepted":true}', false, "request_user_input_async")).toBe(false);
+    expect(hasQuestionAnswerResult("Your questions have been answered: US", false, "request_user_input_async")).toBe(true);
+    expect(hasQuestionAnswerResult("failed", true, "request_user_input_async")).toBe(false);
+    const collect = html.slice(html.indexOf("  function collectQuestionAnswers("), html.indexOf("  function setQuestionBusy("));
+    const collectAnswers = new Function(`${collect}; return collectQuestionAnswers;`)();
+    const root = { querySelectorAll: () => [{ value: "US" }], querySelector: () => ({ value: "Canada" }) };
+    expect(collectAnswers(root, [{ question: "Where?" }]).answers).toEqual({ "Where?": "Canada" });
+  });
+
+  it("renders async titles, string options and free-text-only questions after an accepted receipt", () => {
+    const html = renderConsole(view);
+    const questionsCode = html.slice(html.indexOf("  function renderQuestions("), html.indexOf("  function renderPlan("));
+    const helpers = html.slice(html.indexOf("  function isQuestionTool("), html.indexOf("  function toolBlockKey("));
+    const render = new Function(`
+      var questionRenderSequence=0;
+      function el(tag,cls,text){ return {tag,className:cls,text,children:[],appendChild(child){this.children.push(child);},setAttribute(){}}; }
+      var document={createElement:el};
+      ${helpers}
+      ${questionsCode}
+      return renderQuestions;
+    `)();
+    const meta = { id: "q1", name: "request_user_input_async", result: '{"accepted":true}' };
+    const rendered = render([{ title: "Where?", options: ["US", "Canada"] }, { title: "Details?" }], meta);
+    const [choiceCard, freeCard, actions] = rendered.el.children;
+    expect(choiceCard.children[0].text).toBe("Where?");
+    expect(choiceCard.children[1].children[0].value).toBe("US");
+    expect(choiceCard.children[1].children[0].checked).toBe(true);
+    expect(choiceCard.children[2].children[0].value).toBe("Canada");
+    expect(choiceCard.children[3].className).toBe("q-free");
+    expect(freeCard.children[0].text).toBe("Details?");
+    expect(freeCard.children[1].className).toBe("q-free");
+    expect(actions.children[0].text).toBe("submit answer");
   });
 
   it("renders optional and secret interaction fields without exposing their values", () => {

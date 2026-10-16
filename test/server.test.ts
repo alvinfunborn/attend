@@ -361,6 +361,48 @@ describe("new-session directory default", () => {
 });
 
 describe("GET /", () => {
+  it("omits server-only run config history from the shell without deleting it", async () => {
+    const { app, config } = appWithSpy(resolveConfig({ positionals: [] }), {
+      compactTransport: true,
+    });
+    const saved = { model: "saved-model", effort: "high", updatedAt: Date.now() };
+    const response = await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionRunConfigs: { "codex:older-session": saved },
+        sessionTitles: { "older-session": "Keep my title" },
+      }),
+    });
+    expect(response.status).toBe(200);
+    const html = await (await app.request("/")).text();
+    const state = JSON.parse(html.match(/window\.__VAULT_STATE__ = (.+);/)?.[1] ?? "null");
+    expect(state.sessionRunConfigs).toBeUndefined();
+    expect(state.sessionTitles["older-session"]).toBe("Keep my title");
+    expect(readStateDocument(config.workEvents, "ui-state")).toMatchObject({
+      sessionRunConfigs: { "codex:older-session": saved },
+    });
+  });
+
+  it("keeps an unchanged comment index version stable across stream handshakes", async () => {
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), { compactTransport: true });
+    const versions: unknown[] = [];
+    for (let i = 0; i < 2; i++) {
+      const stream = await app.request("/chat/live-stream");
+      const reader = stream.body?.getReader();
+      if (!reader) throw new Error("missing stream");
+      try {
+        const text = await readSseUntil(reader, (value) => value.includes('"kind":"comment_index"'));
+        const control = sseJsonMessages(text).find((message) => message.kind === "comment_index");
+        expect(control).toBeDefined();
+        versions.push(control?.generatedAt);
+      } finally {
+        await reader.cancel();
+      }
+    }
+    expect(versions[1]).toBe(versions[0]);
+  });
+
   it("compresses finite console responses but keeps the live handshake uncompressed", async () => {
     const { app } = appWithSpy(resolveConfig({ positionals: [] }), { compactTransport: true });
     const html = await (await app.request("/")).text();
@@ -5943,6 +5985,29 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, session: "abc", toolUseId: "toolu-1" });
+  });
+
+  it("steers async question answers during a live Codex turn and sends them after completion", async () => {
+    const codex = new FakeCodexDriver();
+    codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
+    const { app } = appWithSpy(undefined, { codex });
+    const submit = () => app.request(`/chat/answer?session=cx-1&cwd=${tmp}&vendor=codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ toolUseId: "q1", text: "Company location: US", asyncQuestion: true }),
+    });
+    expect(await (await submit()).json()).toMatchObject({ ok: true });
+    expect(codex.steers).toHaveLength(1);
+    expect(codex.sends).toHaveLength(0);
+    expect(codex.starts).toHaveLength(0);
+
+    codex.steerResult = false;
+    expect(await (await submit()).json()).toMatchObject({ ok: false });
+    expect(codex.sends).toHaveLength(0);
+
+    codex.active = [];
+    expect(await (await submit()).json()).toMatchObject({ ok: true });
+    expect(codex.sends).toEqual([{ sessionId: "cx-1", turn: { text: "Company location: US" } }]);
   });
 
   it("fork branches with a first message and returns the new session id", async () => {

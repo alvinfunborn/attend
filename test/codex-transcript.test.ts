@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexTranscript } from "../src/chat/codex/transcript.js";
+import { parseCodexTranscriptMessages, readCodexTranscript } from "../src/chat/codex/transcript.js";
 
 // A minimal rollout transcript in the captured codex-cli 0.133 schema.
 const ROLLOUT = [
@@ -80,6 +80,37 @@ afterEach(() => {
 });
 
 describe("readCodexTranscript", () => {
+  it("keeps async questions once across tool calls and delivered agent messages", () => {
+    // Captured 2026-10-13 rollout shape, with neutral question content.
+    const questions = [{ title: "Company location?", options: ["Hong Kong", "Mainland China", "US"] }];
+    const delivered = {
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        item: { type: "AgentMessage", id: "q1", delivery: "async", questions },
+      },
+    };
+    const lines = [
+      { type: "response_item", payload: {
+        type: "function_call", name: "request_user_input_async", call_id: "q1",
+        arguments: JSON.stringify({ questions }),
+      } },
+      delivered,
+      { type: "response_item", payload: {
+        type: "function_call_output", call_id: "q1", output: '{"accepted":true}',
+      } },
+    ];
+    const parse = (rows: unknown[]) => parseCodexTranscriptMessages(rows.map((row) => JSON.stringify(row)).join("\n"));
+    expect(parse(lines).flatMap((m) => m.tools)).toEqual([
+      { id: "q1", name: "request_user_input_async", input: { questions }, result: '{"accepted":true}' },
+    ]);
+    expect(parse([delivered])[0]?.tools[0]).toMatchObject({ id: "q1", input: { questions } });
+    const answer = 'Your questions have been answered: "Company location?"="US".';
+    expect(parse([...lines, { type: "response_item", payload: {
+      type: "message", role: "user", content: [{ type: "input_text", text: answer }],
+    } }])[0]?.tools[0]?.result).toBe(answer);
+  });
+
   it("reads user/assistant messages and correlates tool calls to their outputs", () => {
     file = path.join(os.tmpdir(), `attend-rollout-${Math.random().toString(36).slice(2)}.jsonl`);
     fs.writeFileSync(file, ROLLOUT.map((l) => JSON.stringify(l)).join("\n"));

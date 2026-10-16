@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ModelDefaults, ModelOption } from "../core/model-options.js";
 import type { ScheduledItem } from "../core/schedules.js";
-import type { Pattern } from "../core/types.js";
+import type { Pattern, SessionTokenUsage } from "../core/types.js";
 import type { VaultUiState } from "../core/ui-state.js";
 import type { VendorAvailability } from "../core/vendor/detect.js";
 
@@ -33,6 +33,7 @@ export interface SessionView {
   /** epoch ms timestamps for real user-authored prompts. Drives tag heat color. */
   userPromptTs?: number[];
   prompts: number;
+  tokenUsage?: SessionTokenUsage | null;
   /** behavioral observation, session-derived */
   pattern: Pattern;
   /** true when the pattern is a manual override */
@@ -886,6 +887,7 @@ const STYLE = `
   .it-context { margin-left: auto; min-width: 0; max-width: 58%; display: inline-flex; align-items: center; justify-content: flex-end; gap: 0.34rem; overflow: hidden; white-space: nowrap; font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 0.68rem; font-weight: 700; }
   .it-context .ctx-sep { color: var(--ink-4); flex-shrink: 0; opacity: 0.72; }
   .it-context .ctx-prompts { color: var(--ink-4); flex-shrink: 0; }
+  .it-context .ctx-tokens { color: var(--ink-4); flex-shrink: 0; }
   .it-context .vtag, .it-context .ptag { padding: 0; border: 0; background: transparent; border-radius: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .it-context .vtag.claude { color: var(--vendor-claude-fg); background: transparent; border-color: transparent; }
   .it-context .vtag.codex { color: var(--vendor-codex-fg); background: transparent; border-color: transparent; }
@@ -2018,7 +2020,9 @@ export function renderConsole(v: ConsoleView): string {
 
   return `<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtmlText(pageTitle)}</title><script>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtmlText(pageTitle)}</title>
+<link rel="icon" type="image/svg+xml" sizes="any" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f46e5'/%3E%3Cpath d='M8 24 16 7l8 17M11 18h10' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script>
 (function(){
   var saved = ${themeJson};
   var dark = saved ? saved === 'dark' : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -2062,17 +2066,6 @@ export function renderConsole(v: ConsoleView): string {
       </svg>
     </button>
   </header>
-  <details class="analyzer-settings" style="padding:8px 14px;font-size:12px">
-    <summary>Background analysis</summary>
-    <label for="analyzerMode">Mode</label>
-    <select id="analyzerMode" disabled>
-      <option value="economical">Economical</option>
-      <option value="follow">Follow work session</option>
-      <option value="off">Off</option>
-    </select>
-    <p id="analyzerModeHelp" role="status">Loading settings...</p>
-    <p id="analyzerExecution" role="status"></p>
-  </details>
   <div class="newsession-anchor">
   <div class="topnav">
     <div class="searchwrap">
@@ -2555,6 +2548,32 @@ window.__CHANGELOG__ = ${changelogJson};
   };
   var E2EE_SALT = 'attend-e2ee-v1';
   var E2EE_ITERATIONS = 150000;
+  var pendingConsoleReads = new Map();
+  // Bound the entire read, including the body. A stalled read must release its
+  // caller's in-flight slot even if the transport never settles after abort.
+  function readConsoleJson(url){
+    var controller=new AbortController(),cancel,timer;
+    var interrupted=new Promise(function(_resolve,reject){
+      cancel=function(){ controller.abort(); reject(new Error('Connection interrupted. Please retry.')); };
+      timer=window.setTimeout(function(){ controller.abort(); reject(new Error('Loading timed out. Please retry.')); },30000);
+    });
+    pendingConsoleReads.set(cancel,url);
+    var request=Promise.resolve().then(function(){
+      return fetch(url,{signal:controller.signal,cache:'no-store'});
+    }).then(function(response){
+      if(!response.ok) throw new Error('Could not load data ('+response.status+'). Please retry.');
+      return response.json();
+    });
+    return Promise.race([request,interrupted]).finally(function(){
+      window.clearTimeout(timer);
+      pendingConsoleReads.delete(cancel);
+    });
+  }
+  function cancelConsoleReads(historyOnly){
+    pendingConsoleReads.forEach(function(url,cancel){
+      if(!historyOnly||url.indexOf('/chat/messages?')===0||url.indexOf('/comments/messages?')===0) cancel();
+    });
+  }
   var textEncoder = new TextEncoder();
   var textDecoder = new TextDecoder();
   function bytesToBase64(bytes){
@@ -2906,10 +2925,10 @@ window.__CHANGELOG__ = ${changelogJson};
       drainOrphanAnalysis(s);
     });
   }
-  function requestSessionIndexSnapshot(epoch,revision,snapshotUrl){
+  function requestSessionIndexSnapshot(epoch,revision,snapshotUrl,force){
     if(!snapshotUrl) snapshotUrl='/session-index?epoch='+encodeURIComponent(epoch)+'&revision='+revision;
     if(!sessionIndexSnapshotTarget || sessionIndexSnapshotTarget.epoch!==epoch || revision>=sessionIndexSnapshotTarget.revision){
-      sessionIndexSnapshotTarget={epoch:epoch,revision:revision,url:snapshotUrl};
+      sessionIndexSnapshotTarget={epoch:epoch,revision:revision,url:snapshotUrl,force:!!force};
     }
     // A slow download must survive newer SSE announcements. Replacing its
     // identity on every revision otherwise discards every successful response.
@@ -2918,35 +2937,30 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function fetchSessionIndexSnapshot(){
     var target=sessionIndexSnapshotTarget;
-    if(!target || sessionIndexSnapshotRequest) return;
-    if(!SESSIONS_PENDING&&(!target.epoch||(target.epoch===SESSION_INDEX_EPOCH&&target.revision<=SESSION_INDEX_REVISION))) return;
+    if(!target || sessionIndexSnapshotRequest || livePageSuspended) return;
+    if(!target.force&&!SESSIONS_PENDING&&(!target.epoch||(target.epoch===SESSION_INDEX_EPOCH&&target.revision<=SESSION_INDEX_REVISION))) return;
     var requestKey=target.epoch+':'+target.revision;
     var startingEpoch=SESSION_INDEX_EPOCH;
     sessionIndexSnapshotRequest=requestKey;
-    var controller=new AbortController();
-    var timeout=window.setTimeout(function(){ controller.abort(); },30000);
     var retry=false;
-    fetch(target.url,{signal:controller.signal}).then(function(response){
-      if(!response.ok) throw new Error('session index snapshot failed');
-      return response.json();
-    }).then(function(snapshot){
+    readConsoleJson(target.url).then(function(snapshot){
       if(!snapshot || snapshot.kind!=='session_index' || !snapshot.epoch || (!snapshot.pending&&!Array.isArray(snapshot.sessions))) throw new Error('invalid session index snapshot');
       var latest=sessionIndexSnapshotTarget;
       // An old in-flight response must not undo a newer server-epoch handshake.
       if(latest&&latest.epoch&&latest.epoch!==target.epoch&&snapshot.epoch!==latest.epoch){ retry=true; return; }
       if(SESSION_INDEX_EPOCH!==startingEpoch&&snapshot.epoch!==SESSION_INDEX_EPOCH){ retry=true; return; }
       applySessionIndex(snapshot);
+      target.force=false;
       sessionIndexRetryCount=0;
       retry=SESSIONS_PENDING || !!(latest&&latest.epoch===SESSION_INDEX_EPOCH&&latest.revision>SESSION_INDEX_REVISION);
     }).catch(function(){
       retry=true;
       sessionIndexRetryCount++;
     }).finally(function(){
-      window.clearTimeout(timeout);
       sessionIndexSnapshotRequest='';
       if(!retry) return;
       var latest=sessionIndexSnapshotTarget;
-      if(!SESSIONS_PENDING&&(!latest.epoch||(latest.epoch===SESSION_INDEX_EPOCH&&latest.revision<=SESSION_INDEX_REVISION))) return;
+      if(!latest.force&&!SESSIONS_PENDING&&(!latest.epoch||(latest.epoch===SESSION_INDEX_EPOCH&&latest.revision<=SESSION_INDEX_REVISION))) return;
       var delay=Math.min(30000,1000*Math.pow(2,Math.min(sessionIndexRetryCount,5)));
       sessionIndexRetryTimer=window.setTimeout(function(){
         sessionIndexRetryTimer=0;
@@ -3299,6 +3313,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var COMMENT_INDEX_EPOCH = '';
   var COMMENT_INDEX_AT = 0;
   var commentIndexSnapshotRequest = '';
+  var commentIndexSnapshotTarget = null, commentIndexRetryTimer = 0, commentIndexRetryCount = 0;
   var commentHistoryVersions = {};
   var commentHistoryLoadedVersions = {};
   var commentHistoryPages = {};
@@ -8582,7 +8597,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!threadId||!page||!page.hasMore||page.loading||commentDrawerState.generating) return Promise.resolve(false);
     page.loading=true;
     var anchor=commentViewportAnchor(),expectedVersion=String(page.version||commentHistoryVersions[threadId]||'');
-    return fetch(commentHistoryUrl(threadId,page.before)).then(function(r){return r.json();}).then(function(res){
+    return readConsoleJson(commentHistoryUrl(threadId,page.before)).then(function(res){
       var nextPage=res&&res.page||{},responseVersion=String(res&&res.historyVersion||nextPage.version||'');
       if(expectedVersion&&responseVersion&&responseVersion!==expectedVersion){
         page.loading=false;
@@ -8647,7 +8662,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!force&&commentHistoryRequest&&commentHistoryRequest.key===requestKey&&commentHistoryRequest.drawerEpoch===drawerEpoch) return commentHistoryRequest.promise;
     var requestId=++commentHistoryRequestClock;
     var request={id:requestId,key:requestKey,drawerEpoch:drawerEpoch,threadId:threadId,promise:null};
-    var task=fetch(commentHistoryUrl(threadId)).then(function(r){return r.json();}).then(function(res){
+    var task=readConsoleJson(commentHistoryUrl(threadId)).then(function(res){
       if(requestId!==commentHistoryRequestClock||commentDrawerState.epoch!==drawerEpoch||commentDrawerState.threadId!==threadId) return false;
       if(res&&res.ok===false) throw new Error(res.error||'Could not load comments.');
       var responseEpoch=String(res&&res.epoch||expectedEpoch||''),responseVersion=String(res&&res.historyVersion||'');
@@ -9742,6 +9757,9 @@ window.__CHANGELOG__ = ${changelogJson};
     }
     return badge;
   }
+  function formatSessionTokens(value){
+    return value>=1000000 ? (value/1000000).toFixed(1)+'M' : value>=1000 ? (value/1000).toFixed(1)+'k' : String(value);
+  }
   function sessionContextRow(s){
     var row=el('div','it-context');
     row.appendChild(vendorText(s.vendor));
@@ -9754,6 +9772,15 @@ window.__CHANGELOG__ = ${changelogJson};
     var prompts=el('span','ctx-prompts',count+'p');
     prompts.setAttribute('data-hover-tip',count+' user message'+(count===1?'':'s')+' in this session');
     row.appendChild(prompts);
+    var usage=s.tokenUsage;
+    if(usage){
+      row.appendChild(el('span','ctx-sep','·'));
+      var tokens=el('span','ctx-tokens',formatSessionTokens(usage.total));
+      var usageTip='Session total: '+usage.total.toLocaleString()+' tokens · Input: '+usage.input.toLocaleString()+' (cache read: '+usage.cachedInput.toLocaleString()+', cache write: '+usage.cacheWriteInput.toLocaleString()+') · Output: '+usage.output.toLocaleString()+' · Includes recorded inherited history';
+      tokens.setAttribute('data-hover-tip',usageTip);
+      tokens.setAttribute('aria-label',usageTip);
+      row.appendChild(tokens);
+    }
     return row;
   }
   var STATE_OPTIONS=['continue_ready','needs_decision','needs_input','blocked','needs_review','followup_suggested','done'];
@@ -10607,6 +10634,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // <option> for — and assigning an absent value to a <select> yields "".
     if(kind==='vendor'||kind==='model'||kind==='effort'||kind==='speed') populateRunConfigControls();
     composerRailKind=kind; composerRailEditing=null;
+    if(runPopOpen()) refreshVendorModels(String(cur.runVendor||cur.vendor||''));
     var foot=document.querySelector('.foot'); if(foot) foot.classList.add('rail-open');
     renderComposerRail();
     renderComposerRailPanel();
@@ -11531,25 +11559,25 @@ window.__CHANGELOG__ = ${changelogJson};
     refreshRunConfigButton();
   }
   function refreshClaudeModels(){
-    fetch('/models/claude', { cache:'no-store' }).then(function(r){ return r.json(); }).then(function(res){
+    return readModelCatalog('claude',function(res){
       applyModelWarning('claude', res && res.warning);
       applyModelDefaults('claude', res && res.defaults);
       applyClaudeModelSnapshot(res && res.models);
-    }).catch(function(){});
+    });
   }
   function refreshCodexModels(){
-    fetch('/models/codex', { cache:'no-store' }).then(function(r){ return r.json(); }).then(function(res){
+    return readModelCatalog('codex',function(res){
       applyModelWarning('codex', res && res.warning);
       applyModelDefaults('codex', res && res.defaults);
       applyCodexModelSnapshot(res && res.models);
-    }).catch(function(){});
+    });
   }
   function refreshCursorModels(){
-    fetch('/models/cursor', { cache:'no-store' }).then(function(r){ return r.json(); }).then(function(res){
+    return readModelCatalog('cursor',function(res){
       applyModelWarning('cursor', res && res.warning);
       applyModelDefaults('cursor', res && res.defaults);
       applyCursorModelSnapshot(res && res.models);
-    }).catch(function(){});
+    });
   }
   function applyProcessModelSnapshot(vendor,models){
     var next=normalizedModelOptions(models); if(!next.length) return;
@@ -11566,11 +11594,28 @@ window.__CHANGELOG__ = ${changelogJson};
     if(rvendor===vendor&&runPopOpen()) refreshRunConfigControls(false);
   }
   function refreshProcessModels(vendor){
-    fetch('/models/'+vendor,{cache:'no-store'}).then(function(r){ return r.json(); }).then(function(res){
+    return readModelCatalog(vendor,function(res){
       applyModelWarning(vendor,res&&res.warning);
       applyModelDefaults(vendor,res&&res.defaults);
       applyProcessModelSnapshot(vendor,res&&res.models);
-    }).catch(function(){});
+    });
+  }
+  var modelCatalogReads={},modelCatalogUpdatedAt={};
+  function readModelCatalog(vendor,apply){
+    if(modelCatalogReads[vendor]) return modelCatalogReads[vendor];
+    if(modelCatalogUpdatedAt[vendor]&&Date.now()-modelCatalogUpdatedAt[vendor]<60000) return Promise.resolve();
+    var request=readConsoleJson('/models/'+vendor).then(function(res){
+      apply(res);
+      modelCatalogUpdatedAt[vendor]=Date.now();
+    }).catch(function(){}).finally(function(){ delete modelCatalogReads[vendor]; });
+    modelCatalogReads[vendor]=request;
+    return request;
+  }
+  function refreshVendorModels(vendor){
+    if(vendor==='claude') return refreshClaudeModels();
+    if(vendor==='codex') return refreshCodexModels();
+    if(vendor==='cursor') return refreshCursorModels();
+    if(vendor==='antigravity'||vendor==='copilot'||vendor==='opencode') return refreshProcessModels(vendor);
   }
   function modelOptionsFor(vendor){
     if(vendor==='claude') return claudeModelOptions();
@@ -11584,6 +11629,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function applyNewSessionPrefs(force){
     var vendor=((byId('nvendor')||{}).value||'').trim().toLowerCase();
     if(!vendorInfo(vendor)) return;
+    if(newBoxOpen()) refreshVendorModels(vendor);
     if(!force && appliedNewVendor===vendor) return;
     var remembered=newPrefs[vendor] || {};
     var rememberedModel=String(remembered.model||'').trim() || cliDefault(vendor, 'model');
@@ -11736,6 +11782,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function refreshRunConfigControls(changedVendor){
     var defaults=currentForkDefaults();
     var vendor=String((byId('rvendor')||{}).value || defaults.vendor || '').trim().toLowerCase();
+    if(runPopOpen()) refreshVendorModels(vendor);
     var keep=!changedVendor && vendor===defaults.vendor;
     var recent=newPrefs[vendor] || {};
     var model=(keep ? defaults.model : String(recent.model||'').trim()) || cliDefault(vendor, 'model');
@@ -12530,7 +12577,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function openNewBox(){
     if(!todoHubPinned) closeTodoHub();
-    refreshCodexModels();
+    refreshVendorModels(String((byId('nvendor')||{}).value||'').trim().toLowerCase());
     refreshNewGoalToggle();
     var box=byId('newbox'); if(box) box.classList.add('open');
     var btn=byId('newToggle'); if(btn) btn.setAttribute('aria-expanded','true');
@@ -14815,7 +14862,6 @@ window.__CHANGELOG__ = ${changelogJson};
       tries++;
       fetch('/session/analysis?session='+encodeURIComponent(id)).then(function(r){return r.json();})
         .then(function(res){ var a=res&&res.analysis;
-          if(cur&&cur.sessionId===s.sessionId)showAnalyzerExecution(res.execution);
           if((Number(s._runEpoch)||0)!==runEpoch || s.generating) return;
           if(analysisChanged(s,a)){ applyAnalysis(s,a); return; }
           if(tries<ANALYSIS_POLL_TRIES) setTimeout(poll, 4500); else giveUp();
@@ -14954,6 +15000,7 @@ window.__CHANGELOG__ = ${changelogJson};
             s.userPromptTs = merged;
           }
           if(found.prompts!=null) s.prompts = pendingLatest ? Math.max(Number(s.prompts||0), found.prompts) : found.prompts;
+          if(found.tokenUsage!==undefined) s.tokenUsage=found.tokenUsage;
           if(cur===s) syncPageTitle(s);
         }
         return s;
@@ -17522,7 +17569,7 @@ window.__CHANGELOG__ = ${changelogJson};
       for(var j=0;j<picks.length;j++){ if(picks[j].value) vals.push(picks[j].value); }
       var other=root.querySelector('.q-free[data-qindex="'+i+'"]');
       var typed=other&&other.value ? other.value.trim() : '';
-      if(typed){ vals.push(typed); freeform.push(typed); }
+      if(typed){ if(q.multiSelect) vals.push(typed); else vals=[typed]; freeform.push(typed); }
       if(!vals.length){
         if(q.optional) continue;
         return {ok:false, error:'Please answer every required question before submitting.'};
@@ -17538,7 +17585,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var submit=root.querySelector('.q-submit');
     if(submit) submit.textContent=label || 'submit answer';
   }
-  function submitQuestionAnswer(toolId, qs, root){
+  function submitQuestionAnswer(toolId, qs, root, asyncQuestion){
     if(!cur || !cur.sessionId) return;
     var target=cur, providerId=providerSessionId(target); if(!providerId) return;
     var operation=beginOperation('answer:'+toolId,target);
@@ -17571,22 +17618,22 @@ window.__CHANGELOG__ = ${changelogJson};
       assistantEl=null;
     }
     var previousAvoidance=clearDerivedAvoidance(target);
-    beginTurn();
-    expectSessionRun(target,genStart);
+    var wasActive=turnActive;
+    if(!asyncQuestion || !wasActive){ beginTurn(); expectSessionRun(target,genStart); }
     var runEpoch=Number(target._runEpoch)||0;
     touchSession(target);
     function failAnswer(message){
       if(!operationIsCurrent(operation)) return;
-      if(sessionRunWasAcknowledged(target,runEpoch)) return;
+      if(!asyncQuestion && sessionRunWasAcknowledged(target,runEpoch)) return;
       if(codexAnswer) forgetPendingUserMsg(target.sessionId, answerText);
       restoreDerivedAvoidance(target,previousAvoidance);
       if(cur===target){
         if(err) err.textContent=message;
         setQuestionBusy(root, false, 'submit answer');
         target._awaitingLiveStart=false; target._awaitingLiveStartAt=null;
-        endTurn('failed');
+        if(!asyncQuestion || !wasActive) endTurn('failed');
       } else {
-        rejectSessionRun(target,'failed');
+        if(!asyncQuestion || !wasActive) rejectSessionRun(target,'failed');
         renderSidebar();
         showToast(message,'warn');
       }
@@ -17596,12 +17643,13 @@ window.__CHANGELOG__ = ${changelogJson};
       headers:{'content-type':'application/json'},
       body:JSON.stringify({
         toolUseId:toolId,
+        asyncQuestion:!!asyncQuestion,
         text:answerText,
         toolUseResult:toolUseResult
       })
     }).then(function(r){ return r.json(); }).then(function(res){
       if(!operationIsCurrent(operation)) return;
-      if(res.ok){ if(res.view) patchSessionView(res.view,{source:'answer'}); }
+      if(res.ok){ if(asyncQuestion) setQuestionBusy(root,true,'answered'); if(res.view) patchSessionView(res.view,{source:'answer'}); }
       else failAnswer(res.error||'answer failed');
     }).catch(function(e){
       failAnswer('network error: '+(e&&e.message?e.message:e));
@@ -17609,18 +17657,22 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   var questionRenderSequence=0;
   function renderQuestions(qs, meta){
+    var asyncQuestion=meta && isAsyncQuestionTool(meta.name);
+    qs=qs.map(function(q){ return Object.assign({},q,{question:q.question||q.title||'',options:(q.options||[]).map(function(o){return typeof o==='string'?{label:o}:o;})}); });
+    var answered=meta && hasQuestionAnswerResult(meta.result,meta.isError,meta.name);
     var wrap=el('div','rq'),groupPrefix='qpick-'+(++questionRenderSequence)+'-';
     qs.forEach(function(q, qi){
       var card=el('div','q-card');
       if(q.header||q.multiSelect) card.appendChild(el('div','q-head', (q.header||'Question')+(q.multiSelect?' · multi-select':'')));
       if(q.question) card.appendChild(el('div','q-text', q.question));
-      (q.options||[]).forEach(function(o){
+      (q.options||[]).forEach(function(o, oi){
         var row=el('label','q-opt q-choice');
         var pick=document.createElement('input');
         pick.className='q-pick';
         pick.type=q.multiSelect ? 'checkbox' : 'radio';
         pick.name=groupPrefix+qi;
         pick.value=o.label||'';
+        if(asyncQuestion && oi===0) pick.checked=true;
         pick.setAttribute('data-qindex', String(qi));
         row.appendChild(pick);
         var body=el('span','q-choice-body');
@@ -17629,7 +17681,7 @@ window.__CHANGELOG__ = ${changelogJson};
         row.appendChild(body);
         card.appendChild(row);
       });
-      if(meta && meta.id && !meta.result){
+      if(meta && meta.id && !answered){
         var other=document.createElement('input');
         other.className='q-free';
         other.type=q.isSecret?'password':'text';
@@ -17640,11 +17692,11 @@ window.__CHANGELOG__ = ${changelogJson};
       }
       wrap.appendChild(card);
     });
-    if(meta && meta.id && !meta.result){
+    if(meta && meta.id && !answered){
       var actions=el('div','q-actions');
       var submit=el('button','q-submit','submit answer');
       submit.type='button';
-      submit.onclick=function(){ submitQuestionAnswer(meta.id, qs, wrap); };
+      submit.onclick=function(){ submitQuestionAnswer(meta.id, qs, wrap, asyncQuestion); };
       actions.appendChild(submit);
       actions.appendChild(el('div','q-err'));
       wrap.appendChild(actions);
@@ -17666,14 +17718,20 @@ window.__CHANGELOG__ = ${changelogJson};
   function isQuestionTool(name, input){
     if(!input || typeof input!=='object' || !Array.isArray(input.questions)) return false;
     var base=String(name||'').split('.').pop();
-    return name==='AskUserQuestion' || base==='request_user_input';
+    return name==='AskUserQuestion' || base==='request_user_input' || isAsyncQuestionTool(name);
+  }
+  function isAsyncQuestionTool(name){
+    return String(name||'').split('.').pop()==='request_user_input_async';
   }
   function lockQuestionTool(d){
     if(!d) return;
     var body=d.querySelector('.rq');
     if(body) setQuestionBusy(body, true, 'answered');
   }
-  function hasQuestionAnswerResult(result, isError){
+  function hasQuestionAnswerResult(result, isError, name){
+    if(isAsyncQuestionTool(name)){
+      try{ if(JSON.parse(result).accepted===true) return false; }catch(e){}
+    }
     return !isError && typeof result==='string' && !!result.trim();
   }
   function toolBlockKey(tc){
@@ -17755,7 +17813,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var out=el('pre','tool-out'+(tc.isError?' err':''));
     if(tc.result!=null && tc.result!==''){ out.textContent=String(tc.result).slice(0,8000); } else { out.style.display='none'; }
     d.appendChild(out);
-    if(isQuestionTool(tc.name, tc.input) && hasQuestionAnswerResult(tc.result, tc.isError)) lockQuestionTool(d);
+    if(isQuestionTool(tc.name, tc.input) && hasQuestionAnswerResult(tc.result, tc.isError, tc.name)) lockQuestionTool(d);
     if(opts.readonly && isQuestionTool(tc.name, tc.input)) lockQuestionTool(d);
     if(opts.reference){
       d.classList.add('commentanchor-tool');
@@ -17834,8 +17892,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var busVersion=Number(s._busVersion||0);
     var load=Promise.resolve().then(function(){
       if(!providerSessionId(s)&&!s.file) return cachedTranscriptFor(s)||[];
-      return fetch(transcriptHistoryUrl(s))
-        .then(function(r){ return r.json(); })
+      return readConsoleJson(transcriptHistoryUrl(s))
         .then(function(response){
           var parsed=parseTranscriptHistoryResponse(response),msgs=parsed.messages;
           setTranscriptPage(s,Object.assign({},parsed.page,{loading:false}));
@@ -17917,7 +17974,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!s||!page||!page.hasMore||page.loading||s.generating) return Promise.resolve(false);
     page.loading=true;
     var expectedVersion=String(page.version||''),anchor=cur===s?transcriptViewportAnchor():null;
-    return fetch(transcriptHistoryUrl(s,page.before)).then(function(r){ return r.json(); }).then(function(response){
+    return readConsoleJson(transcriptHistoryUrl(s,page.before)).then(function(response){
       var parsed=parseTranscriptHistoryResponse(response),nextPage=parsed.page||{};
       if(expectedVersion&&nextPage.version&&String(nextPage.version)!==expectedVersion){
         page.loading=false;
@@ -18003,20 +18060,7 @@ window.__CHANGELOG__ = ${changelogJson};
     }).catch(function(){});
   }
 
-  function showAnalyzerExecution(plan) {
-    var node=byId('analyzerExecution');
-    if(!node)return;
-    var execution=plan&&plan.execution;
-    node.textContent=!plan ? 'No background configuration resolved for this session yet.'
-      : plan.reason || (plan.mode==='legacy_vendor_default' ? 'Background: existing CLI defaults.'
-      : 'Background selection: '+[execution&&execution.model,execution&&execution.effort,execution&&execution.speed].filter(Boolean).join(' / '));
-  }
-  function refreshAnalyzerExecution(s) {
-    if(!s)return;
-    fetch('/session/analysis?session='+encodeURIComponent(providerSessionId(s))).then(function(r){return r.json();}).then(function(res){if(cur&&cur.sessionId===s.sessionId)showAnalyzerExecution(res.execution);}).catch(function(){});
-  }
   function select(s){
-    refreshAnalyzerExecution(s);
     var selectionGeneration=++transcriptSelectionGeneration;
     var previousSelection=cur;
     if(previousSelection!==s){
@@ -18140,9 +18184,15 @@ window.__CHANGELOG__ = ${changelogJson};
       var next=transcriptStateRef(s)||msgs||[];
       if(!rendered || renderedStamp!==transcriptPaneStamp(s)) renderPersistedAndPending(next,s.sessionId,selectionScrollMode);
       syncOpenHeader(); syncSessionListsAfterPatch(s); finishHistoryLoad();
-    }).catch(function(){
+    }).catch(function(error){
       if(!selectionIsCurrent()) return;
-      if(!cachedTranscriptFor(s)) renderSessionHistory(s,[],selectionScrollMode);
+      if(!cachedTranscriptFor(s)){
+        var failed=el('div','placeholder','Could not load conversation. '),retry=el('button','','Retry');
+        failed.id='ph';
+        retry.type='button'; retry.onclick=function(){ select(s); }; failed.appendChild(retry);
+        replaceMessages(failed,selectionScrollMode);
+      }
+      showToast(error&&error.message||'Could not load conversation. Please retry.','error');
       finishHistoryLoad();
     });
   }
@@ -18157,8 +18207,11 @@ window.__CHANGELOG__ = ${changelogJson};
       var next=cachedTranscriptFor(s)||msgs||[];
       if(!before || !sameTranscript(before,next)) renderPersistedAndPending(next,s.sessionId);
       syncOpenHeader(); syncSessionListsAfterPatch(s); syncCurrentLiveState(s); beginVisit(s); setRefreshBusy(false);
-    }).catch(function(){
-      if(cur===s && selectionGeneration===transcriptSelectionGeneration) setRefreshBusy(false);
+    }).catch(function(error){
+      if(cur===s && selectionGeneration===transcriptSelectionGeneration){
+        setRefreshBusy(false);
+        showToast(error&&error.message||'Could not refresh conversation. Please retry.','error');
+      }
     });
   }
   function liveStartedAt(res, sessionId){
@@ -18307,6 +18360,28 @@ window.__CHANGELOG__ = ${changelogJson};
     if(liveConnectionFailed) showToast('Live connection restored.', 'live-restored');
     liveConnectionFailed=false;
   }
+  function fetchCommentIndexSnapshot(){
+    var target=commentIndexSnapshotTarget;
+    if(!target||commentIndexSnapshotRequest||commentIndexRetryTimer||livePageSuspended) return;
+    var requestKey=String(target.epoch||'')+':'+(Number(target.generatedAt)||0);
+    commentIndexSnapshotRequest=requestKey;
+    var retry=false;
+    readConsoleJson(target.snapshotUrl).then(function(snapshot){
+      if(!snapshot||snapshot.kind!=='comment_index'||!snapshot.epoch||!Array.isArray(snapshot.comments)) throw new Error('Invalid comment index');
+      var latest=commentIndexSnapshotTarget;
+      if(latest&&latest.epoch&&latest.epoch!==target.epoch&&snapshot.epoch!==latest.epoch){ retry=true; return; }
+      applyCommentIndex(snapshot);
+      commentIndexRetryCount=0;
+      retry=!!(latest&&latest.epoch&&(latest.epoch!==COMMENT_INDEX_EPOCH||Number(latest.generatedAt)>COMMENT_INDEX_AT));
+    }).catch(function(){ retry=true; commentIndexRetryCount++; }).finally(function(){
+      commentIndexSnapshotRequest='';
+      if(!retry) return;
+      commentIndexRetryTimer=window.setTimeout(function(){
+        commentIndexRetryTimer=0;
+        fetchCommentIndexSnapshot();
+      },Math.min(30000,1000*Math.pow(2,Math.min(commentIndexRetryCount,5))));
+    });
+  }
   function applyCommentIndex(message){
     if(!message||message.kind!=='comment_index') return;
     var epoch=String(message.epoch||''),generatedAt=Number(message.generatedAt)||0;
@@ -18314,20 +18389,9 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!Array.isArray(message.comments)){
       var snapshotUrl=String(message.snapshotUrl||'');
       if(!snapshotUrl) return;
-      if(epoch===COMMENT_INDEX_EPOCH&&generatedAt<COMMENT_INDEX_AT) return;
-      var requestKey=epoch+':'+generatedAt;
-      if(commentIndexSnapshotRequest===requestKey) return;
-      commentIndexSnapshotRequest=requestKey;
-      fetch(snapshotUrl).then(function(response){
-        if(!response.ok) throw new Error('comment index snapshot failed');
-        return response.json();
-      }).then(function(snapshot){
-        if(commentIndexSnapshotRequest!==requestKey) return;
-        commentIndexSnapshotRequest='';
-        applyCommentIndex(snapshot);
-      }).catch(function(){
-        if(commentIndexSnapshotRequest===requestKey) commentIndexSnapshotRequest='';
-      });
+      if(epoch===COMMENT_INDEX_EPOCH&&generatedAt<=COMMENT_INDEX_AT) return;
+      commentIndexSnapshotTarget=message;
+      fetchCommentIndexSnapshot();
       return;
     }
     if(epoch===COMMENT_INDEX_EPOCH&&generatedAt<COMMENT_INDEX_AT) return;
@@ -18335,7 +18399,6 @@ window.__CHANGELOG__ = ${changelogJson};
     if(epochChanged) commentHistoryLoadedVersions={};
     COMMENT_INDEX_EPOCH=epoch;
     COMMENT_INDEX_AT=generatedAt;
-    commentIndexSnapshotRequest='';
     var nextKnown={},nextVersions={};
     message.comments.forEach(function(entry){
       var thread=entry&&entry.thread,id=String(thread&&thread.id||'');
@@ -18373,27 +18436,82 @@ window.__CHANGELOG__ = ${changelogJson};
       }
     }
   }
-  function openLiveStateStream(){
+  var liveStateSource=null, liveLastEventId='', liveLastMessageAt=0;
+  var liveRecoveryTimer=0, liveHiddenAt=0, livePageSuspended=false, liveWatchdogAt=Date.now();
+  function closeLiveStateStream(){
+    if(liveStateSource) liveStateSource.close();
+    liveStateSource=null;
+    liveEventChain=Promise.resolve();
+  }
+  function reconcileConsoleState(){
+    window.clearTimeout(sessionIndexRetryTimer); sessionIndexRetryTimer=0;
+    window.clearTimeout(commentIndexRetryTimer); commentIndexRetryTimer=0;
+    sessionIndexRetryCount=0; commentIndexRetryCount=0;
+    requestSessionIndexSnapshot('',0,'/session-index',true);
+    commentIndexSnapshotTarget={epoch:'',generatedAt:0,snapshotUrl:'/comment-index'};
+    fetchCommentIndexSnapshot();
+    // Replay is bounded on the server. Keep cached content visible but require
+    // a fresh baseline when visiting any conversation after a connection gap.
+    transcriptBaselines={};
+    if(cur&&!cur.pendingFork) refreshCurrentChat();
+    var thread=commentThreads[String(commentDrawerState.threadId||'')];
+    if(thread) syncOpenCommentHistory(thread,true);
+  }
+  function recoverConsoleConnection(){
+    if(livePageSuspended||document.hidden||liveRecoveryTimer) return;
+    closeLiveStateStream();
+    cancelConsoleReads();
+    // Let the cancelled reads release their single-flight slots first.
+    liveRecoveryTimer=window.setTimeout(function(){
+      liveRecoveryTimer=0;
+      if(livePageSuspended||document.hidden) return;
+      window.clearTimeout(sessionIndexRetryTimer); sessionIndexRetryTimer=0;
+      window.clearTimeout(commentIndexRetryTimer); commentIndexRetryTimer=0;
+      requestSessionIndexSnapshot('',0,'/session-index',true);
+      commentIndexSnapshotTarget={epoch:'',generatedAt:0,snapshotUrl:'/comment-index'};
+      fetchCommentIndexSnapshot();
+      openLiveStateStream(true);
+    },0);
+  }
+  function openLiveStateStream(recovering){
     if(!window.EventSource){
       markLiveConnectionFailed();
       return;
     }
-    var source=new EventSource('/chat/live-stream');
+    closeLiveStateStream();
+    var source=new EventSource('/chat/live-stream'+(liveLastEventId?'?lastEventId='+encodeURIComponent(liveLastEventId):''));
+    liveStateSource=source;
+    liveLastMessageAt=Date.now();
+    var opened=false,needsReconcile=!!recovering;
     source.onopen=function(){
+      if(source!==liveStateSource) return;
+      if(opened){ cancelConsoleReads(true); needsReconcile=true; }
+      opened=true;
       markLiveRestored();
     };
     source.onmessage=function(e){
+      if(source!==liveStateSource) return;
+      liveLastMessageAt=Date.now();
       markLiveRestored();
       liveEventChain=liveEventChain.then(function(){ return e2eeEventData(e.data); }).then(function(message){
+        if(source!==liveStateSource) return;
         if(message && message.kind==='session_index') applySessionIndex(message);
         else if(message && message.kind==='comment_index') applyCommentIndex(message);
         else if(message && message.kind==='session_operation') onSessionOperation(message);
         else if(message && message.kind==='session_event') onBusSessionEvent(message);
         else if(message && message.kind==='analysis') onBusAnalysisEvent(message);
         else applyLiveSnapshot(message||{});
+        // The authoritative live snapshot follows buffered replay. Loading a
+        // disk baseline before that boundary could append replayed text twice.
+        if(needsReconcile&&message&&!message.kind&&Array.isArray(message.active)){
+          needsReconcile=false;
+          reconcileConsoleState();
+        }
+        if(e.lastEventId) liveLastEventId=String(e.lastEventId);
       }).catch(function(){});
     };
     source.onerror=function(){
+      if(source!==liveStateSource) return;
       markLiveConnectionFailed();
     };
   }
@@ -18650,7 +18768,7 @@ window.__CHANGELOG__ = ${changelogJson};
           out.textContent=String(ev.text||'').slice(0,8000); out.style.display='';
           if(ev.isError) out.className='tool-out err';
           updateToolBlockResult(tool,ev.text,ev.isError,true);
-          if(hasQuestionAnswerResult(ev.text,ev.isError)) lockQuestionTool(tool);
+          if(hasQuestionAnswerResult(ev.text,ev.isError,tool._attendTool&&tool._attendTool.name)) lockQuestionTool(tool);
         } else appendCommentTool({name:'result',input:null,result:ev.text,isError:ev.isError});
         cacheOpenCommentMessages();
       }
@@ -18760,11 +18878,11 @@ window.__CHANGELOG__ = ${changelogJson};
       cacheTranscriptToolUse(cur, {id:ev.id,name:ev.name,input:ev.input});
       var d=ev.id&&toolEls[ev.id] ? toolEls[ev.id] : addTool({id:ev.id,name:ev.name,input:ev.input});
       if(ev.id) toolEls[ev.id]=d;
-      if(isQuestionTool(ev.name, ev.input) && turnActive) endTurn();
+      if(isQuestionTool(ev.name, ev.input) && !isAsyncQuestionTool(ev.name) && turnActive) endTurn();
     }
     else if(ev.kind==='tool_result'){ finalizeStreamingMessage(assistantEl); assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
       cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
-      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; updateToolBlockResult(t,ev.text,ev.isError); if(hasQuestionAnswerResult(ev.text, ev.isError)) lockQuestionTool(t); }
+      if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; updateToolBlockResult(t,ev.text,ev.isError); if(hasQuestionAnswerResult(ev.text, ev.isError,t._attendTool&&t._attendTool.name)) lockQuestionTool(t); }
       else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
       keepGenLast(); scroll(); scheduleLatestPin(); }
     else if(ev.kind==='goal'){ applyGoalState(cur,ev.goal||null); }
@@ -19490,40 +19608,12 @@ window.__CHANGELOG__ = ${changelogJson};
   // The first list must not wait for a long-lived connection to traverse a
   // mobile proxy. SSE remains the authority for live turn/connection state.
   if(SESSIONS_PENDING) requestSessionIndexSnapshot('',0,'/session-index');
-  // Vendor CLIs can rewrite local model caches during startup. Re-read them after
-  // the first render so newly advertised models appear without reloading Attend.
-  refreshClaudeModels();
-  var claudeModelRefreshCount=0;
-  var claudeModelRefreshTimer=window.setInterval(function(){
-    refreshClaudeModels();
-    claudeModelRefreshCount++;
-    if(claudeModelRefreshCount>=12) window.clearInterval(claudeModelRefreshTimer);
-  }, 5000);
-  refreshCodexModels();
-  var codexModelRefreshCount=0;
-  var codexModelRefreshTimer=window.setInterval(function(){
-    refreshCodexModels();
-    codexModelRefreshCount++;
-    if(codexModelRefreshCount>=12) window.clearInterval(codexModelRefreshTimer);
-  }, 5000);
-  refreshCursorModels();
-  var cursorModelRefreshCount=0;
-  var cursorModelRefreshTimer=window.setInterval(function(){
-    refreshCursorModels();
-    cursorModelRefreshCount++;
-    if(cursorModelRefreshCount>=12) window.clearInterval(cursorModelRefreshTimer);
-  }, 5000);
-  refreshProcessModels('antigravity');
-  refreshProcessModels('copilot');
-  refreshProcessModels('opencode');
-  var processModelRefreshCount=0;
-  var processModelRefreshTimer=window.setInterval(function(){
-    refreshProcessModels('antigravity');
-    refreshProcessModels('copilot');
-    refreshProcessModels('opencode');
-    processModelRefreshCount++;
-    if(processModelRefreshCount>=12) window.clearInterval(processModelRefreshTimer);
-  }, 5000);
+  // Bootstrap already includes model catalogs. Refresh once after the initial
+  // data load, then on demand when a vendor's configuration is opened.
+  window.setTimeout(function(){
+    if(document.hidden||livePageSuspended) return;
+    ['claude','codex','cursor','antigravity','copilot','opencode'].forEach(refreshVendorModels);
+  },15000);
 
   // Drag the divider to resize the sidebar; width persists across reloads.
   (function(){
@@ -19602,26 +19692,6 @@ window.__CHANGELOG__ = ${changelogJson};
   setTheme(currentTheme(), false);
   // The send button is also the Stop button mid-turn.
   byId('send').onclick=function(){ if(turnActive) stopTurn(); else if(composerVendorChanged()) fork(); else send(); };
-  function showAnalyzerMode(settings) {
-    var select=byId('analyzerMode');
-    if(settings.mode==='legacy_vendor_default' && !select.querySelector('[value="legacy_vendor_default"]')) {
-      var legacy=document.createElement('option');legacy.value='legacy_vendor_default';legacy.textContent='Existing CLI defaults';legacy.disabled=true;select.appendChild(legacy);
-    }
-    select.value=settings.mode;select.disabled=false;
-    if(typeof cur!=='undefined'&&cur)refreshAnalyzerExecution(cur);
-    byId('analyzerModeHelp').textContent=settings.mode==='legacy_vendor_default'
-      ? 'Your existing background behavior is preserved. Choose Economical to reduce background cost.'
-      : settings.mode==='economical' ? 'Uses a verified lightweight model from the same provider. Falls back to local analysis when unavailable.'
-      : settings.mode==='follow' ? 'Follows this work session’s model and effort. Background calls may cost more.'
-      : 'Uses local analysis. No new background AI calls.';
-  }
-  fetch('/analyzer/settings').then(function(r){if(!r.ok)throw new Error('load');return r.json();}).then(showAnalyzerMode).catch(function(){byId('analyzerModeHelp').textContent='Background settings unavailable.';});
-  byId('analyzerMode').onchange=function(){
-    var mode=this.value;this.disabled=true;
-    fetch('/analyzer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})})
-      .then(function(r){if(!r.ok)throw new Error('save');return r.json();}).then(showAnalyzerMode)
-      .catch(function(){byId('analyzerModeHelp').textContent='Could not save. Reload to see the active setting.';});
-  };
   byId('themeToggle').onclick=toggleTheme;
   byId('sessionPanelToggle').onclick=toggleSessionPanel;
   byId('workStatsBtn').onclick=openWorkStats;
@@ -20469,13 +20539,31 @@ window.__CHANGELOG__ = ${changelogJson};
     syncOpenHeader();
   });
   document.addEventListener('visibilitychange', function(){
-    if(document.hidden) flushVisit(true);
-    else if(cur && cur.sessionId && !cur.pendingFork){
-      if(!viewVisit) beginVisit(cur);
-      syncCurrentLiveState(cur);
+    if(document.hidden){ liveHiddenAt=Date.now(); flushVisit(true); }
+    else {
+      if(!liveStateSource||liveConnectionFailed||(liveHiddenAt&&Date.now()-liveHiddenAt>15000)) recoverConsoleConnection();
+      liveHiddenAt=0;
+      if(cur && cur.sessionId && !cur.pendingFork){
+        if(!viewVisit) beginVisit(cur);
+        syncCurrentLiveState(cur);
+      }
     }
   });
-  window.addEventListener('pagehide', function(){ flushVisit(true); });
+  window.addEventListener('online',recoverConsoleConnection);
+  window.addEventListener('pageshow',function(event){
+    livePageSuspended=false;
+    if(event.persisted||!liveStateSource) recoverConsoleConnection();
+  });
+  window.setInterval(function(){
+    var now=Date.now(),paused=now-liveWatchdogAt>45000;
+    liveWatchdogAt=now;
+    if(!livePageSuspended&&!document.hidden&&(paused||now-liveLastMessageAt>90000)) recoverConsoleConnection();
+  },15000);
+  window.addEventListener('pagehide', function(){
+    livePageSuspended=true;
+    window.clearTimeout(liveRecoveryTimer); liveRecoveryTimer=0;
+    closeLiveStateStream(); cancelConsoleReads(); flushVisit(true);
+  });
   window.addEventListener('beforeunload', function(){ flushVisit(true); });
   }
   if(E2EE.enabled) startUnlockFlow();

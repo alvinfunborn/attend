@@ -4,6 +4,15 @@ import type { ProviderSessionRunConfig } from "./session-run-config.js";
 
 export type Pattern = "avoidance" | "unknown";
 
+/** Provider-reported cumulative usage. Cache reads/writes are included in input. */
+export interface SessionTokenUsage {
+  input: number;
+  output: number;
+  cachedInput: number;
+  cacheWriteInput: number;
+  total: number;
+}
+
 export interface BriefFrontMatter {
   status?: string;
   defer_until?: string | null;
@@ -53,6 +62,8 @@ export interface RawSession {
   /** timestamp + visible assistant text length for exact total char throughput. */
   assistantTextActivity?: Array<{ at: number; chars: number }>;
   prompts: number;
+  /** null/absent means the transcript has not reported token usage. */
+  tokenUsage?: SessionTokenUsage | null;
   actions: number;
   /** distinct engagement bursts — activity separated by a long idle gap counts as
    *  a fresh "visit" (you left and came back). Drives the avoidance pattern. */

@@ -2,9 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { visiblePromptText } from "../../chat/transcript.js";
 import { VISIT_GAP_MINUTES } from "../pattern.js";
-import type { RawSession } from "../types.js";
+import type { RawSession, SessionTokenUsage } from "../types.js";
 import type { SessionSource } from "./index.js";
 import { type IncrementalJsonlParser, ScanCache } from "./scan-cache.js";
+import { parseTokenUsage } from "./token-usage.js";
 import type { TranscriptPathWriter } from "./transcript-index.js";
 
 /** Tool uses that count as productive "actions". */
@@ -28,9 +29,10 @@ interface JsonlEntry {
   isMeta?: boolean;
   sessionId?: string;
   message?: {
+    id?: string;
     content?: unknown;
     model?: unknown;
-    usage?: { speed?: unknown; service_tier?: unknown };
+    usage?: { speed?: unknown; service_tier?: unknown; [key: string]: unknown };
   };
 }
 
@@ -101,12 +103,14 @@ function assistantText(content: unknown): number {
 interface ClaudeSessionState {
   session: RawSession;
   previousTs: number | null;
+  usageByMessage: Record<string, SessionTokenUsage>;
 }
 
 function emptyClaudeSession(file: string): RawSession {
   return {
     path: file,
     vendor: "claude",
+    tokenUsage: null,
     sessionId: null,
     title: null,
     lastPrompt: null,
@@ -125,7 +129,7 @@ function emptyClaudeSession(file: string): RawSession {
 }
 
 function createClaudeState(file: string): ClaudeSessionState {
-  return { session: emptyClaudeSession(file), previousTs: null };
+  return { session: emptyClaudeSession(file), previousTs: null, usageByMessage: {} };
 }
 
 function appendClaudeLine(state: ClaudeSessionState, line: string): void {
@@ -164,6 +168,34 @@ function appendClaudeLine(state: ClaudeSessionState, line: string): void {
       session.lastPrompt = snippet(text);
     }
   } else if (obj.type === "assistant") {
+    const usage = parseTokenUsage(obj.message?.usage, false);
+    if (usage) {
+      const id = obj.message?.id;
+      const previous =
+        id && Object.hasOwn(state.usageByMessage, id) ? state.usageByMessage[id] : undefined;
+      const total = session.tokenUsage ?? {
+        input: 0,
+        output: 0,
+        cachedInput: 0,
+        cacheWriteInput: 0,
+        total: 0,
+      };
+      // Claude can repeat/update usage across content blocks of one message.
+      const next = { ...usage };
+      for (const key of Object.keys(next) as Array<keyof SessionTokenUsage>) {
+        next[key] = Math.max(previous?.[key] ?? 0, usage[key]);
+        total[key] += next[key] - (previous?.[key] ?? 0);
+      }
+      session.tokenUsage = total;
+      if (id) {
+        Object.defineProperty(state.usageByMessage, id, {
+          value: next,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+    }
     const model = configValue(obj.message?.model);
     const speed = configValue(obj.message?.usage?.speed);
     if (model || speed) {
@@ -193,9 +225,15 @@ const claudeJsonlParser: IncrementalJsonlParser<ClaudeSessionState> = {
   restore: (file, checkpoint) => {
     if (!checkpoint || typeof checkpoint !== "object") return null;
     const saved = checkpoint as Partial<ClaudeSessionState>;
-    if (!saved.session || typeof saved.session !== "object") return null;
+    if (
+      !saved.session ||
+      typeof saved.session !== "object" ||
+      saved.session.tokenUsage === undefined ||
+      !saved.usageByMessage
+    ) return null;
     return {
       session: { ...saved.session, path: file, vendor: "claude" },
+      usageByMessage: { ...saved.usageByMessage },
       previousTs:
         saved.previousTs === null ||
         (typeof saved.previousTs === "number" && Number.isFinite(saved.previousTs))

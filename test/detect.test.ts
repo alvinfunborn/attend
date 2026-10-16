@@ -225,6 +225,23 @@ describe("detectVendors", () => {
     expect(parseCliVersion("unknown")).toBeNull();
   });
 
+  it.each([
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+    "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
+  ])("resolves the macOS bundled CLI without a PATH entry: %s", (bin) => {
+    expect(
+      resolveCodexBin(
+        () => null,
+        (candidate) => candidate === bin,
+        "darwin",
+      ),
+    ).toBe(bin);
+  });
+
   it("resolves a concrete Codex PATH entry before the macOS app bundle", () => {
     // both bundles present → newest layout (ChatGPT.app) wins
     expect(
@@ -233,7 +250,7 @@ describe("detectVendors", () => {
         () => true,
         "darwin",
       ),
-    ).toContain("ChatGPT.app");
+    ).toBe("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
     // only the older Codex.app bundle present → fall back to it
     expect(
       resolveCodexBin(
@@ -246,7 +263,7 @@ describe("detectVendors", () => {
     expect(
       resolveCodexBin(
         () => "/usr/local/bin/codex",
-        () => false,
+        () => true,
         "darwin",
       ),
     ).toBe("/usr/local/bin/codex");

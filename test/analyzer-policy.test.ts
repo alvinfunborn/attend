@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AnalyzerVerdict, SessionAnalyzer } from "../src/chat/analyzer/index.js";
 import { DaemonOrchestrator } from "../src/chat/daemon.js";
@@ -46,7 +47,7 @@ const verdict: AnalyzerVerdict = {
 };
 
 describe("background settings migration", () => {
-  it("defaults only a new install to economical and persists across instances", () => {
+  it("defaults to economical and persists across instances", () => {
     const db = path.join(folder(), "state.db");
     const first = new AnalyzerSettingsStore(db);
     stores.push(first);
@@ -61,7 +62,7 @@ describe("background settings migration", () => {
     expect(first.get().revision).toBe(2);
   });
   it.each(["database", "legacy-json"])(
-    "preserves %s installations without rewriting old state",
+    "defaults existing %s installations to economical without rewriting other state",
     (kind) => {
       const dir = folder();
       const db = path.join(dir, "state.db");
@@ -72,7 +73,7 @@ describe("background settings migration", () => {
       );
       const store = new AnalyzerSettingsStore(db, [old]);
       stores.push(store);
-      expect(store.get().mode).toBe("legacy_vendor_default");
+      expect(store.get().mode).toBe("economical");
       if (kind === "legacy-json")
         expect(JSON.parse(fs.readFileSync(old, "utf8")).task.daemonId).toBe("old");
       expect(() => store.set("legacy_vendor_default" as "off")).toThrow();
@@ -243,6 +244,46 @@ describe("background policy lifecycle", () => {
     expect(h.orch.isDaemon("daemon-2")).toBe(true);
     expect(h.load).toHaveBeenCalledTimes(1);
   });
+  it.each(["codex", "opencode"])(
+    "falls back to the %s work configuration when economical is unavailable",
+    async (vendor) => {
+      const h = harness();
+      h.load.mockResolvedValue({ models: [], live: false, source: "unavailable" });
+      const plan = await h.policy.resolve("task", vendor, "/repo");
+      expect(plan.execution).toEqual({ model: "gpt-main", effort: "high", speed: "priority" });
+      expect(plan.reason).toContain("following work session");
+      expect(h.policy.current("task", vendor, plan)).toBe(true);
+      h.setWork({ model: "gpt-new", effort: "low" });
+      expect(h.policy.current("task", vendor, plan)).toBe(false);
+    },
+  );
+  it("discards in-flight fallback analysis when the work configuration changes", async () => {
+    const h = harness();
+    h.load.mockResolvedValue({ models: [], live: true, source: "live" });
+    await h.orch.ensureDaemon("task", "codex", "/repo");
+    expect(h.analyzer.spawn).toHaveBeenCalledWith("/repo", expect.any(Function), {
+      model: "gpt-main",
+      effort: "high",
+      speed: "priority",
+    });
+    let finish!: (result: AnalyzerVerdict) => void;
+    vi.mocked(h.analyzer.analyze).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = h.orch.analyzeTask("task", "/repo");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    h.setWork({ model: "gpt-new", effort: "low" });
+    finish(structuredClone(verdict));
+    expect(await pending).toBeNull();
+    await h.orch.analyzeTask("task", "/repo");
+    expect(h.analyzer.spawn).toHaveBeenLastCalledWith("/repo", expect.any(Function), {
+      model: "gpt-new",
+      effort: "low",
+    });
+  });
   it("off tracks product sessions for later re-enable, never enrolls external sessions", async () => {
     const h = harness("off");
     expect(await h.orch.ensureDaemon("task", "codex", "/repo")).toBeNull();
@@ -307,9 +348,10 @@ describe("background policy lifecycle", () => {
     await h.orch.ensureDaemon("other", "codex", "/b");
     expect(h.load).toHaveBeenCalledTimes(2);
   });
-  it("fails closed on unavailable catalogs or provider errors and retries only after cooldown", async () => {
+  it("uses local analysis when neither configuration resolves and respects provider cooldown", async () => {
     const h = harness();
     h.load.mockResolvedValueOnce({ models: [], live: false, source: "unavailable" });
+    h.setWork({});
     await h.orch.ensureDaemon("task", "codex", "/repo");
     expect(h.analyzer.spawn).not.toHaveBeenCalled();
     h.tick();
@@ -416,25 +458,18 @@ describe("background policy lifecycle", () => {
     }
   });
 
-  it("keeps legacy pairings/cached output and sends no explicit model overrides", async () => {
-    const dir = folder();
-    fs.writeFileSync(path.join(dir, "state.db"), "");
-    const h = harness("legacy_vendor_default", dir);
-    h.registry.set("task", { daemonId: "legacy", cwd: "/repo", vendor: "codex" });
-    h.cache.set("task", structuredClone(verdict.analysis));
-    expect(h.orch.analysis("task")?.brief).toBe("Ready");
-    await h.orch.ensureDaemon("task", "codex", "/repo");
-    await h.orch.analyzeTask("task", "/repo");
-    expect(h.analyzer.spawn).not.toHaveBeenCalled();
-    expect(h.load).not.toHaveBeenCalled();
-    expect(h.analyzer.analyze).toHaveBeenLastCalledWith(
-      "legacy",
-      "/repo",
-      "task",
-      undefined,
-      undefined,
-      "",
-      {},
-    );
+  it("migrates persisted legacy mode to economical and increments the revision once", () => {
+    const db = path.join(folder(), "state.db");
+    const first = new AnalyzerSettingsStore(db);
+    first.close();
+    const raw = new DatabaseSync(db);
+    raw.exec("UPDATE analyzer_settings SET mode = 'legacy_vendor_default', revision = 4");
+    raw.close();
+    const migrated = new AnalyzerSettingsStore(db);
+    stores.push(migrated);
+    expect(migrated.get()).toEqual({ mode: "economical", revision: 5 });
+    const reopened = new AnalyzerSettingsStore(db);
+    stores.push(reopened);
+    expect(reopened.get()).toEqual({ mode: "economical", revision: 5 });
   });
 });

@@ -490,6 +490,26 @@ MEMORY.md:20-24|note=[Used prior routing context]
     expect(client.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
   });
 
+  it("renders async agent questions as tools while keeping the turn steerable", async () => {
+    const client = new FakeAppServer();
+    const driver = new CodexAppServerDriver(client);
+    const id = await driver.start({ cwd: "/repo", firstText: "ask" });
+    const events: UiEvent[] = [];
+    driver.subscribe(id, (event) => events.push(event));
+    const questions = [{ title: "Company location?", options: ["Hong Kong", "US"] }];
+    client.emit({ method: "item/completed", params: {
+      threadId: id, turnId: "turn-1",
+      item: { id: "q-async", type: "agentMessage", delivery: "async", questions, text: "Company location?\n- Hong Kong\n- US" },
+    } });
+    expect(events).toContainEqual({ kind: "tool_use", id: "q-async", name: "request_user_input_async", input: { questions } });
+    expect(events.some((event) => event.kind === "assistant_text")).toBe(false);
+    expect(driver.canSteer(id)).toBe(true);
+    expect(await driver.steer(id, { text: "US" })).toBe(true);
+    expect(client.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+    expect(client.responses).toEqual([]);
+    driver.shutdown();
+  });
+
   it("renders and answers a plugin-install client action instead of hanging the turn", async () => {
     const client = new FakeAppServer();
     const driver = new CodexAppServerDriver(client);

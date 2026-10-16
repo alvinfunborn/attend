@@ -2,6 +2,31 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.9 — 2026-10-16
+
+### Added
+
+- Claude and Codex session cards show compact cumulative token usage, with input,
+  output, and cache details on hover when available in the transcript.
+- Codex asynchronous questions appear as interactive questions in live conversations
+  and restored history, including their answered state.
+- Browser tabs display an Attend favicon.
+
+### Changed
+
+- Background analysis defaults to Economical for existing installations as well as
+  new ones. When a verified lightweight model is unavailable, it follows the work
+  session configuration. The sidebar settings selector has been removed.
+
+### Fixed
+
+- Conversations and comment history recover from stalled reads and page sleep/wake
+  transitions. Live-stream reconnection resumes from the last received event and
+  reconciles session and comment snapshots.
+- Unchanged comment snapshots no longer trigger repeated content refreshes, and
+  installation-wide session configuration is omitted from browser state.
+- Codex detection recognizes the newer macOS desktop app CLI bundle layouts.
+
 ## 1.3.8 — 2026-09-24
 
 ### Added

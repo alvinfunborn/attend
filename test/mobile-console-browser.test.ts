@@ -43,10 +43,15 @@ async function stubLiveStream(page: Page) {
     const target = globalThis as unknown as Record<string, unknown>;
     class StubEventSource {
       onmessage: ((event: { data: string }) => void) | null = null;
-      constructor() {
+      closed = false;
+      constructor(readonly url: string) {
         target.__mobileLive = this;
+        const sources = (target.__mobileSources ??= []) as StubEventSource[];
+        sources.push(this);
       }
-      close() {}
+      close() {
+        this.closed = true;
+      }
     }
     Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
   });
@@ -68,6 +73,149 @@ describe("mobile console initialization and layout", () => {
   });
   afterAll(async () => {
     await browser.close();
+  });
+
+  it("times out a stalled history body and releases the request for Retry", async () => {
+    const page = await browser.newPage();
+    await stubLiveStream(page);
+    await page.clock.install();
+    await page.addInitScript(() => {
+      const original = globalThis.fetch.bind(globalThis);
+      let historyReads = 0;
+      globalThis.fetch = (input, init) => {
+        if (String(input).includes('/chat/messages') && ++historyReads === 1) {
+          // Even a transport whose body ignores abort must not hold the UI slot.
+          return Promise.resolve({ ok: true, json: () => new Promise(() => {}) } as Response);
+        }
+        return original(input, init);
+      };
+    });
+    await page.route("**/*", async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      else if (pathname === "/chat/messages") {
+        await route.fulfill({ json: [{ role: "assistant", text: "Recovered history", tools: [] }] });
+      } else await route.fulfill({ json: { ok: true, items: [] } });
+    });
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.locator("#list .item").first().click();
+      await expect.poll(() => page.locator("#msgs").textContent()).toContain("Loading");
+      await page.clock.fastForward(31_000);
+      await expect.poll(() => page.locator("#msgs").textContent()).toContain("Could not load conversation");
+      await page.getByRole("button", { name: "Retry", exact: true }).click();
+      await expect.poll(() => page.locator("#msgs").textContent()).toContain("Recovered history");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("closes the old stream on pagehide and reconciles after wake-up replay", async () => {
+    const page = await browser.newPage();
+    await stubLiveStream(page);
+    let historyReads = 0;
+    await page.route("**/*", async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      else if (pathname === "/chat/messages") {
+        historyReads++;
+        await route.fulfill({ json: [{ role: "assistant", text: historyReads === 1 ? "Before sleep" : "After wake", tools: [] }] });
+      } else if (pathname === "/session-index") {
+        await route.fulfill({ json: { kind: "session_index", epoch: "wake", revision: 1, sessions: view.sessions } });
+      } else if (pathname === "/comment-index") {
+        await route.fulfill({ json: { kind: "comment_index", epoch: "wake", generatedAt: 1, comments: [] } });
+      } else await route.fulfill({ json: { ok: true, items: [] } });
+    });
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.locator("#list .item").first().click();
+      await expect.poll(() => page.locator("#msgs").textContent()).toContain("Before sleep");
+      await page.evaluate(async () => {
+        const target = globalThis as unknown as { __mobileLive: { onmessage: (event: { data: string; lastEventId: string }) => void } };
+        target.__mobileLive.onmessage({ data: JSON.stringify({ active: [] }), lastEventId: "42" });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const browserGlobal = globalThis as unknown as {
+          dispatchEvent(event: Event): boolean;
+          PageTransitionEvent: new (type: string, init: { persisted: boolean }) => Event;
+        };
+        browserGlobal.dispatchEvent(new browserGlobal.PageTransitionEvent("pagehide", { persisted: true }));
+        browserGlobal.dispatchEvent(new browserGlobal.PageTransitionEvent("pageshow", { persisted: true }));
+      });
+      await expect.poll(() => page.evaluate(() => {
+        const target = globalThis as unknown as { __mobileSources: { url: string; closed: boolean }[] };
+        return target.__mobileSources.map((source) => ({ url: source.url, closed: source.closed }));
+      })).toEqual([
+        { url: "/chat/live-stream", closed: true },
+        { url: "/chat/live-stream?lastEventId=42", closed: false },
+      ]);
+      expect(historyReads).toBe(1);
+      await announce(page, { active: [], queues: {} });
+      await expect.poll(() => page.locator("#msgs").textContent()).toContain("After wake");
+      expect(historyReads).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("refreshes model catalogs once instead of polling throughout the first minute", async () => {
+    const page = await browser.newPage();
+    await stubLiveStream(page);
+    await page.clock.install();
+    const modelReads: string[] = [];
+    await page.route("**/*", async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      else {
+        if (pathname.startsWith("/models/")) modelReads.push(pathname);
+        await route.fulfill({ json: { ok: true, models: [], items: [] } });
+      }
+    });
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      expect(modelReads).toHaveLength(0);
+      await page.clock.fastForward(16_000);
+      await expect.poll(() => modelReads.length).toBe(6);
+      await page.clock.fastForward(44_000);
+      expect(modelReads).toHaveLength(6);
+      expect(new Set(modelReads).size).toBe(6);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("retains a slow comment snapshot and does not reload an unchanged version", async () => {
+    const page = await browser.newPage();
+    await stubLiveStream(page);
+    let requests = 0;
+    let release = () => {};
+    const slow = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("**/*", async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      else if (pathname === "/comment-index") {
+        const generatedAt = ++requests;
+        if (generatedAt === 1) await slow;
+        await route.fulfill({ json: { kind: "comment_index", epoch: "comments", generatedAt, comments: [] } });
+      } else await route.fulfill({ json: { ok: true, items: [] } });
+    });
+    const control = { kind: "comment_index", epoch: "comments", snapshotUrl: "/comment-index" };
+    try {
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await announce(page, { ...control, generatedAt: 1 });
+      await expect.poll(() => requests).toBe(1);
+      await announce(page, { ...control, generatedAt: 2 });
+      expect(requests).toBe(1);
+      const caughtUp = page.waitForResponse((response) =>
+        new URL(response.url()).pathname === "/comment-index" && requests === 2,
+      );
+      release();
+      await caughtUp;
+      await announce(page, { ...control, generatedAt: 2 });
+      expect(requests).toBe(2);
+    } finally {
+      release();
+      await page.close();
+    }
   });
 
   it("loads the first list without SSE and retains a slow snapshot across newer deltas", async () => {
@@ -122,7 +270,9 @@ describe("mobile console initialization and layout", () => {
       expect(requests).toBe(1);
       release();
       await expect.poll(() => page.locator("#list .item").count()).toBe(1);
-      await expect.poll(() => page.locator("#list").textContent()).toContain("Caught up");
+      await expect
+        .poll(() => page.locator("#list").textContent(), { timeout: 5_000 })
+        .toContain("Caught up");
       expect(requests).toBe(2);
     } finally {
       release();

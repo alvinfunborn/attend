@@ -15,11 +15,15 @@ export const MIN_CLAUDE_CLI_VERSION = "2.1.0";
 
 /**
  * macOS desktop apps bundle the `codex` CLI but don't symlink it onto PATH.
- * The binary ships inside ChatGPT.app (current) and shipped inside Codex.app
- * (older builds); probe both, newest layout first.
+ * New builds put the CLI in codex-cli/bin with a nested CodexCLI.app binary;
+ * retain the flat Resources/codex paths for older builds of both desktop apps.
  */
 const CODEX_APP_BINS = [
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
   "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+  "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
   "/Applications/Codex.app/Contents/Resources/codex",
 ];
 

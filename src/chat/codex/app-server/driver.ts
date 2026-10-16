@@ -16,6 +16,7 @@ import { errorText, providerErrorPayload } from "../../provider-errors.js";
 import { type DriverRun, DriverRuntime } from "../../runtime.js";
 import { classifyCodexError } from "../errors.js";
 import { prepareCodexInput, validateCodexAttachments } from "../input.js";
+import { asyncQuestionTool } from "../questions.js";
 import { type AppServerClientLike, CodexAppServerClient } from "./client.js";
 import type {
   AppServerItem,
@@ -718,6 +719,12 @@ export class CodexAppServerDriver implements ChatDriver {
 
   private itemCompleted(run: CodexRun, item: AppServerItem): void {
     if (!item.id) return;
+    const question = asyncQuestionTool(item);
+    if (question) {
+      run.agentMessageStreams.delete(item.id);
+      this.runtime.publish(run, { kind: "tool_use", ...question });
+      return;
+    }
     if (item.type === "agentMessage" && item.text) {
       this.completeAgentMessage(run, item.id, item.text);
     } else if (item.type === "commandExecution") {

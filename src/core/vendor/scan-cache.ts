@@ -99,6 +99,9 @@ function isPersistedSession(value: unknown): value is RawSession | null {
   return (
     typeof session.path === "string" &&
     typeof session.vendor === "string" &&
+    // Rebuild pre-token-usage snapshots once, including unchanged transcripts.
+    (!(session.vendor === "codex" || session.vendor === "claude") ||
+      session.tokenUsage !== undefined) &&
     isNullableString(session.sessionId) &&
     isNullableString(session.title) &&
     isNullableString(session.lastPrompt) &&

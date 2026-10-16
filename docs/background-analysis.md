@@ -1,25 +1,26 @@
 # Background analysis policy
 
 The work session owns its provider, model, effort, and speed. Background analysis
-has a separate installation-wide setting under **Background analysis** in the
-sidebar. It never writes `modelPrefs` or `sessionRunConfigs`.
+defaults to Economical without a sidebar setting. It never writes `modelPrefs`
+or `sessionRunConfigs`. The internal API retains explicit mode overrides.
 
 | Mode | Behavior |
 | --- | --- |
-| Economical | Same provider, verified lightweight configuration; otherwise local heuristics. |
+| Economical | Same provider, verified lightweight configuration; otherwise follow the work session. Unresolved work configurations use local heuristics. |
 | Follow work session | Explicitly follows the session's saved/provider-observed configuration, filling missing values from workspace/model defaults. Unresolved configurations use local heuristics. |
 | Off | No new background AI calls. Existing in-flight results are discarded. Local heuristics remain available. |
-| Existing CLI defaults | Internal migration mode: retain the old implicit CLI defaults and existing daemon sessions until the user chooses another mode. |
+| Existing CLI defaults | Internal migration mode: migrated automatically to Economical. |
 
-New installations start in Economical. An existing database or legacy UI/daemon/
-analysis file selects Existing CLI defaults. Initialization happens before runtime
-workers create state. The SQLite setting is shared across instances; mode changes
-increment a durable revision. It is not a per-tab work-model preference.
+New and existing installations default to Economical. Persisted Existing CLI
+defaults are migrated to Economical, incrementing the durable revision to invalidate
+in-flight results. Explicit API overrides are preserved. The SQLite setting is
+shared across instances; it is not a per-tab work-model preference.
 
 ## Economical model compatibility
 
 All candidates must be present in a fresh provider-owned catalog. There is no
-cross-provider switch or automatic escalation to an expensive/default model.
+cross-provider switch. If no candidate is available, background analysis follows
+the work session, including its model, effort, and speed.
 
 | Provider | Configuration | Availability requirement |
 | --- | --- | --- |
@@ -30,7 +31,7 @@ cross-provider switch or automatic escalation to an expensive/default model.
 | Copilot | Luna Low; compatible candidates Haiku 4.5 (no effort) and GPT-5 mini Low | Authenticated account catalog, permitted policy, real per-model effort. Advertised billing multiplier ranks this audited set; missing/equal billing uses Luna, Haiku, mini order. Auto is never an economical candidate. |
 
 OpenCode uses its CLI model catalog and variants in Follow work session mode. There
-is no audited economical OpenCode profile yet, so Economical uses local heuristics.
+is no audited economical OpenCode profile yet, so Economical falls back to Follow work session.
 
 Copilot discovery uses pinned official SDK 1.0.13, explicitly bound to the user's
 configured CLI executable and inherited authentication. It starts only a metadata
@@ -44,8 +45,8 @@ Catalogs are cached for 60 seconds per provider/workspace. Authentication change
 may take up to this interval to refresh; provider errors invalidate the catalog and
 apply a 60-second cooldown, with local analysis during that interval. No paid
 availability probe is used. The currently installed Copilot CLI/account was checked
-via the SDK on 2026-09-16 and advertised only Auto, so it uses local analysis in
-Economical mode.
+via the SDK on 2026-09-16 and advertised only Auto; under the current policy, that
+catalog triggers the work-session fallback in Economical mode.
 
 ## Session lifecycle
 
@@ -62,9 +63,8 @@ prevent duplicate creation/analysis across instances. An asynchronous policy loo
 does not bypass turn-end coalescing.
 
 When a provider reports a different model, the economical stream is stopped and
-subsequent execution falls back locally. Not all providers report a model; the UI
-therefore labels the profile as **Background selection**, not verified billing or
-actual-model evidence. A provider can already have charged for work before its
+subsequent execution falls back locally. Not all providers report a model; the execution profile is requested configuration,
+not verified billing or actual-model evidence. A provider can already have charged for work before its
 first model report. No claim of guaranteed provider-side billing is made.
 
 API: `GET /analyzer/settings`, `POST /analyzer/settings` with
@@ -78,7 +78,7 @@ Targeted coverage includes legacy migration, durable revisions, five-provider
 selection, real TSV format, account capabilities, auth/protocol/timeouts, settings
 isolation, explicit parameters on all three analyzer entry points, in-flight
 invalidation, model-mismatch interruption, concurrent turn coalescing, cross-instance
-seed leases, API validation, and the browser selector.
+seed leases, API validation, and absence of the sidebar settings.
 
 No paid inference or running Attend service restart is required for these tests.
 This change retains the existing seed/transcript contract. Reducing seed calls,

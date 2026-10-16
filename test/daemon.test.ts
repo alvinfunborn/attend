@@ -309,7 +309,10 @@ describe("DaemonOrchestrator", () => {
   });
 
   it("applies Claude background settings to seed, analysis and avoidance without an unsupported effort", async () => {
-    const analyzer = new ClaudeAnalyzer(os.tmpdir(), fakeQuery);
+    const analyzer = new ClaudeAnalyzer(
+      path.join(os.tmpdir(), `attend-no-transcripts-${crypto.randomUUID()}`),
+      fakeQuery,
+    );
     const execution = {
       model: "claude-haiku-4-5-20251001",
       disableThinking: true,
@@ -338,7 +341,10 @@ describe("DaemonOrchestrator", () => {
   });
 
   it("passes Codex model, effort and speed explicitly on every background turn", async () => {
-    const analyzer = new CodexAnalyzer(os.tmpdir(), fakeCodexExec);
+    const analyzer = new CodexAnalyzer(
+      path.join(os.tmpdir(), `attend-no-transcripts-${crypto.randomUUID()}`),
+      fakeCodexExec,
+    );
     const execution = { model: "gpt-5.6-luna", effort: "low", speed: "default" };
     await analyzer.spawn(os.tmpdir(), undefined, execution);
     await analyzer.analyze(
