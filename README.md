@@ -5,6 +5,8 @@ Codex/ChatGPT, Cursor CLI, Antigravity CLI, GitHub Copilot CLI, and OpenCode.
 
 [中文 README](README.zh-CN.md)
 
+[Website & interactive tour](https://alvinfunborn.github.io/attend/) · [中文官网](https://alvinfunborn.github.io/attend/zh/)
+
 Attend began with a simple need: **add tags to tasks**.
 
 When AI coding work spreads across many sessions, finding a session by project or recency is not enough. Tags provide the first useful layer: group related tasks, build focused views, and return to the right work without reconstructing the whole workspace. From that starting point, Attend grew into a set of attention-management tools for answering the next questions: Which task is still running? Which one replied? What needs a decision? What can wait? Which side discussion deserves to become its own task?
