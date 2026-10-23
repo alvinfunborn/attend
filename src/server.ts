@@ -99,8 +99,10 @@ import {
 } from "./core/session-status.js";
 import { claimStateMaintenance, optimizeStateDatabase } from "./core/state-database.js";
 import { TagStore } from "./core/tags.js";
+import { themeEngine, validThemeId } from "./core/themes.js";
 import type { Brief, Pattern, RawSession, Telemetry } from "./core/types.js";
 import {
+  cleanLayoutPreferences,
   type CommentAnchorData,
   type CommentThreadState,
   type UiSessionGoal,
@@ -864,11 +866,11 @@ export interface AppDeps {
 }
 
 function openAnalyzerSettings(config: AttendConfig): AnalyzerSettingsStore {
-  return new AnalyzerSettingsStore(config.workEvents, [
-    config.uiState,
-    config.daemonRegistry,
-    config.analysisCache,
-  ]);
+  return new AnalyzerSettingsStore(
+    config.workEvents,
+    [config.uiState, config.daemonRegistry, config.analysisCache],
+    config.scopeId,
+  );
 }
 
 function createDefaultAppDeps(config: AttendConfig): AppDeps {
@@ -2470,6 +2472,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     const { all, vaultState, dirs, throughput } = prepared;
     return {
       sessions,
+      analyzerSettings: analyzerSettings.get(),
       schedules: visibleSchedules(),
       knownDirs: dirs,
       scopeRoots: config.scopeRoots,
@@ -2656,6 +2659,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     overrides.set(sessionId, { etaMin: null, state: null });
   };
   const liveSnapshot = () => {
+    orchestrator.syncSettings();
     const now = Date.now();
     const sessions = visibleSessions();
     const hiddenComments = new Set(
@@ -2670,6 +2674,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       sessions.filter((s) => !!s.sessionId).map((s) => [s.sessionId as string, s]),
     );
     return {
+      analyzerSettings: analyzerSettings.get(),
       active: states.map((s) => s.sessionId),
       startedAt: Object.fromEntries(states.map((s) => [s.sessionId, s.startedAt])),
       lastAssistantAt: Object.fromEntries(
@@ -2691,6 +2696,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   };
   type LiveSnapshotMessage = ReturnType<typeof liveSnapshot>;
   let cachedLiveSnapshot: LiveSnapshotMessage = {
+    analyzerSettings: analyzerSettings.get(),
     active: [],
     startedAt: {},
     lastAssistantAt: {},
@@ -3016,7 +3022,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (snapshot.epoch === cachedCommentIndexSnapshot.epoch && content === cachedCommentContentJson)
       return;
     if (snapshot.epoch === cachedCommentIndexSnapshot.epoch)
-      snapshot.generatedAt = Math.max(snapshot.generatedAt, cachedCommentIndexSnapshot.generatedAt + 1);
+      snapshot.generatedAt = Math.max(
+        snapshot.generatedAt,
+        cachedCommentIndexSnapshot.generatedAt + 1,
+      );
     cachedCommentContentJson = content;
     cachedCommentIndexSnapshot = snapshot;
     cachedCommentIndexJson = JSON.stringify(snapshot);
@@ -3593,6 +3602,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (!body || !isAnalyzerMode(body.mode))
       return c.json({ error: "Expected economical, follow, or off" }, 400);
     const settings = analyzerSettings.set(body.mode);
+    orchestrator.syncSettings();
     broadcastLive();
     return c.json(settings);
   });
@@ -3801,6 +3811,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   app.post("/vault/ui-state", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       theme?: unknown;
+      customThemes?: unknown;
+      layout?: unknown;
       focusViews?: unknown;
       focusViewPatch?: unknown;
       modelPrefs?: unknown;
@@ -3819,7 +3831,57 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       chatGroups?: unknown;
     };
     const patch: Parameters<VaultUiStateStore["patch"]>[0] = {};
-    if (body.theme === "light" || body.theme === "dark") patch.theme = body.theme;
+    if (body.layout !== undefined) {
+      if (!body.layout || typeof body.layout !== "object" || Array.isArray(body.layout))
+        return c.json({ error: "Invalid layout preferences" }, 400);
+      const clean = cleanLayoutPreferences(body.layout);
+      if (
+        !Object.keys(body.layout).length ||
+        Object.keys(clean).length !== Object.keys(body.layout).length
+      )
+        return c.json({ error: "Invalid layout preferences" }, 400);
+      patch.layout = clean;
+    }
+    if (body.customThemes !== undefined) {
+      if (
+        !body.customThemes ||
+        typeof body.customThemes !== "object" ||
+        Array.isArray(body.customThemes)
+      )
+        return c.json({ error: "Invalid custom themes" }, 400);
+      const themes = Object.entries(body.customThemes);
+      if (themes.length > 64)
+        return c.json({ error: "At most 64 custom themes are supported" }, 400);
+      patch.customThemes = {};
+      for (const [id, theme] of themes) {
+        if (
+          !validThemeId(id) ||
+          ["light", "dark", "system", "__proto__", "constructor", "prototype"].includes(id)
+        )
+          return c.json({ error: "Invalid custom theme ID" }, 400);
+        try {
+          patch.customThemes[id] = theme === null ? null : themeEngine.normalize(theme);
+        } catch (error) {
+          return c.json({ error: error instanceof Error ? error.message : "Invalid theme" }, 400);
+        }
+      }
+      const merged = { ...uiState.get().customThemes, ...patch.customThemes };
+      if (Object.values(merged).filter(Boolean).length > 64)
+        return c.json({ error: "At most 64 custom themes are supported" }, 400);
+    }
+    if (body.theme !== undefined) {
+      if (!validThemeId(body.theme)) return c.json({ error: "Invalid theme ID" }, 400);
+      if (
+        !["light", "dark", "system"].includes(body.theme) &&
+        !(patch.customThemes && Object.hasOwn(patch.customThemes, body.theme)
+          ? patch.customThemes[body.theme]
+          : Object.hasOwn(uiState.get().customThemes || {}, body.theme)
+            ? uiState.get().customThemes?.[body.theme]
+            : null)
+      )
+        return c.json({ error: "Theme does not exist" }, 400);
+      patch.theme = body.theme;
+    }
     if (Array.isArray(body.focusViews)) patch.focusViews = body.focusViews;
     if (body.focusViewPatch && typeof body.focusViewPatch === "object")
       patch.focusViewPatch = body.focusViewPatch as Record<string, unknown | null>;
@@ -3876,6 +3938,26 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     rememberScopeTag(tags, config.scopeRoots, config.scopeId, name);
     tags.clearSessionBindings(name);
     return c.json({ ok: true, tags: visibleTags({ extraTags: [name] }) });
+  });
+
+  app.post("/tags/batch", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      names?: unknown;
+      action?: unknown;
+    };
+    if (
+      !Array.isArray(body.names) ||
+      !body.names.length ||
+      !body.names.every((name) => typeof name === "string" && name.trim()) ||
+      (body.action !== "delete" && body.action !== "unbind")
+    )
+      return c.json({ ok: false, error: "invalid tag operation" }, 400);
+    const names = body.names as string[];
+    if (body.action === "unbind") {
+      for (const name of names) rememberScopeTag(tags, config.scopeRoots, config.scopeId, name);
+    }
+    tags.manageMany(names, body.action);
+    return c.json({ ok: true, tags: visibleTags() });
   });
 
   app.post("/tags/order", async (c) => {
@@ -3995,9 +4077,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
           // One global bus must also be one ordered byte stream. Explicitly queue
           // writes so an assistant_text immediately followed by result/error can
           // never race at the HTTP stream boundary.
-          sendChain = sendChain
-            .then(() => stream.writeSSE({ data, id }))
-            .catch(() => {});
+          sendChain = sendChain.then(() => stream.writeSSE({ data, id })).catch(() => {});
         };
         liveSubscribers.add(send);
         if (reconnecting) {
@@ -5224,7 +5304,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         if (!steered)
           broadcastSessionEvent(id, drv.vendor, { kind: "user_turn_started", startedAt, text });
         broadcastSessionEvent(id, drv.vendor, {
-          kind: "tool_result", id: toolUseId, text, isError: false,
+          kind: "tool_result",
+          id: toolUseId,
+          text,
+          isError: false,
         });
       }
       return c.json({ ok: sent, session: id, toolUseId, view });

@@ -43,6 +43,13 @@ export type ProcessTranscriptReader = (file: string, limit?: number) => Transcri
  * Codex compatibility protocol used by ProcessChatDriver.
  */
 export class ProcessAnalyzer implements SessionAnalyzer {
+  private cancellation = new AbortController();
+
+  cancel(): void {
+    this.cancellation.abort(new Error("Session daemon is off"));
+    this.cancellation = new AbortController();
+  }
+
   constructor(
     readonly vendor: string,
     private readonly sessionsDir: string,
@@ -57,7 +64,9 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     onSessionId?: (sessionId: string) => void,
     execution?: AnalyzerExecution,
   ): Promise<string | null> {
+    const signal = this.cancellation.signal;
     if (!this.execFn) return null;
+    signal.throwIfAborted();
     const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only", ...execution });
     let sessionId: string | null = null;
     await consumeAnalyzerStream(
@@ -71,6 +80,8 @@ export class ProcessAnalyzer implements SessionAnalyzer {
         assertAnalyzerModel(execution, event.model);
       },
       () => handle.kill(),
+      undefined,
+      signal,
     );
     return sessionId;
   }
@@ -84,6 +95,7 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     uiContext = "",
     execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null> {
+    const signal = this.cancellation.signal;
     if (!this.execFn) return null;
     const file = await this.findTranscript(taskId);
     const context = file
@@ -93,6 +105,7 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     const pendingTurns = observedTurns
       .filter((turn) => !knownTurnIds.has(turn.turnId))
       .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
+    signal.throwIfAborted();
     const handle = this.execFn({
       cwd,
       prompt: requestPrompt(transcript, pendingTurns, uiContext),
@@ -110,6 +123,8 @@ export class ProcessAnalyzer implements SessionAnalyzer {
         }
       },
       () => handle.kill(),
+      undefined,
+      signal,
     );
     const analysis = parseAnalysis(text);
     if (!analysis) return null;
@@ -127,9 +142,11 @@ export class ProcessAnalyzer implements SessionAnalyzer {
     uiContext = "",
     execution?: AnalyzerExecution,
   ): Promise<string | null> {
+    const signal = this.cancellation.signal;
     if (!this.execFn) return null;
     const file = await this.findTranscript(taskId);
     const transcript = file ? (await this.readContext(file, taskId)).transcript : "";
+    signal.throwIfAborted();
     const handle = this.execFn({
       cwd,
       prompt: avoidancePromptRequest(transcript, uiContext),
@@ -147,6 +164,8 @@ export class ProcessAnalyzer implements SessionAnalyzer {
         }
       },
       () => handle.kill(),
+      undefined,
+      signal,
     );
     return parseAvoidancePrompt(text);
   }

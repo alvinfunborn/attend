@@ -22,6 +22,7 @@ export class DaemonOrchestrator {
   private readonly prompting = new Set<string>();
   private readonly analysisEpoch = new Map<string, number>();
   private policy?: AnalyzerPolicy;
+  private settingsRevision = -1;
   private readonly plans = new Map<string, AnalyzerPlan>();
   private readonly analysisOwner = crypto.randomUUID();
 
@@ -36,6 +37,16 @@ export class DaemonOrchestrator {
 
   configurePolicy(policy: AnalyzerPolicy): void {
     this.policy = policy;
+  }
+
+  /** Apply persisted settings to work already in progress as well as future turns. */
+  syncSettings(): void {
+    const settings = this.policy?.settings();
+    if (!settings || settings.revision === this.settingsRevision) return;
+    this.settingsRevision = settings.revision;
+    if (settings.mode !== "off") return;
+    this.analyzeAgain.clear();
+    for (const analyzer of this.analyzers.values()) analyzer.cancel?.();
   }
 
   executionStatus(taskId: string): AnalyzerPlan | null {
@@ -150,6 +161,7 @@ export class DaemonOrchestrator {
   /** Spawn a daemon for a product-created task session via its vendor's analyzer
    *  (idempotent). No-op for vendors without an analyzer (e.g. Codex stub). */
   ensureDaemon(taskId: string, vendor: string, cwd: string): Promise<string | null> {
+    this.syncSettings();
     this.collaboration?.ensureSession(vendor, taskId, cwd);
     const inflight = this.spawning.get(taskId);
     if (inflight) return inflight;

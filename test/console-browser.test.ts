@@ -140,6 +140,16 @@ const hiddenTagsView: ConsoleView = {
 const commentView: ConsoleView = {
   ...raceView,
   vaultState: {
+    pins: {
+      "attend.pins.v1:s1": [
+        {
+          key: "assistant:0",
+          role: "claude",
+          text: "An answer with an unread comment",
+          pinnedAt: 101,
+        },
+      ],
+    },
     commentThreads: {
       "comment-1": {
         id: "comment-1",
@@ -162,6 +172,7 @@ const commentView: ConsoleView = {
 const commentGeneratingView: ConsoleView = {
   ...raceView,
   vaultState: {
+    pins: commentView.vaultState?.pins,
     commentThreads: {
       "comment-generating": {
         id: "comment-generating",
@@ -399,6 +410,119 @@ describe("console browser behavior", () => {
     await browser.close();
   });
 
+  it.each([8, 90])(
+    "persists settings and applies columns to %i middle-panel cards",
+    async (count) => {
+      const page = await browser.newPage({ viewport: { width: 1800, height: 900 } });
+      page.setDefaultTimeout(3_000);
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      const firstSession = raceView.sessions[0];
+      if (!firstSession) throw new Error("Missing session fixture");
+      const settingsView: ConsoleView = {
+        ...raceView,
+        vaultState: { theme: "light" },
+        sessions: Array.from({ length: count }, (_, index) => ({
+          ...firstSession,
+          sessionId: `settings-${index}`,
+          title: `Session ${index}`,
+        })),
+      };
+      await page.addInitScript(() => {
+        class StubEventSource {
+          close() {}
+        }
+        Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      });
+      await page.route("**/*", async (route) => {
+        const request = route.request();
+        if (new URL(request.url()).pathname === "/")
+          await route.fulfill({ contentType: "text/html", body: renderConsole(settingsView) });
+        else {
+          if (request.url().includes("/vault/ui-state") && request.method() === "POST") {
+            const patch = request.postDataJSON();
+            settingsView.vaultState = {
+              ...settingsView.vaultState,
+              ...patch,
+              layout: { ...settingsView.vaultState?.layout, ...patch.layout },
+            };
+          }
+          await route.fulfill({ json: { ok: true } });
+        }
+      });
+      const grid = page
+        .locator(count > 60 ? ".session-panel-virtual-row" : "#sessionPanelList")
+        .first();
+      const columns = () =>
+        grid.evaluate(
+          (node) =>
+            node.ownerDocument.defaultView?.getComputedStyle(node).gridTemplateColumns.split(/\s+/)
+              .length,
+        );
+      try {
+        await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+        await page.locator("#sessionPanelToggle").click();
+        await expect.poll(columns).toBe(2);
+        await page.locator("#settingsToggle").click();
+        expect(await page.getByRole("dialog", { name: "Settings", exact: true }).isVisible()).toBe(
+          true,
+        );
+        await page.locator("#settingsDark").click();
+        expect(await page.locator("html").getAttribute("data-theme")).toBe("dark");
+        expect(await page.locator("#settingsDark").getAttribute("aria-pressed")).toBe("true");
+        await expect.poll(() => settingsView.vaultState?.theme).toBe("dark");
+        for (const value of ["1", "3"]) {
+          await page.locator("#settingsColumns").selectOption(value);
+          await expect.poll(columns).toBe(Number(value));
+        }
+        await page.locator("#settingsColumns").selectOption("custom");
+        await page.locator("#settingsCustomColumns").fill("7");
+        await expect.poll(columns).toBe(7);
+        for (const value of ["0", "-1", "2.5", ""]) {
+          await page.locator("#settingsCustomColumns").fill(value);
+          expect(await columns()).toBe(7);
+        }
+        await page.locator("#settingsCustomColumns").fill("7");
+        await page.locator("#settingsCustomColumns").press("Escape");
+        await expect.poll(() => page.locator("#settingsPanel").isVisible()).toBe(false);
+        await expect
+          .poll(() => page.locator("#settingsToggle").getAttribute("aria-expanded"))
+          .toBe("false");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await expect.poll(columns).toBe(7);
+        expect(await page.locator("html").getAttribute("data-theme")).toBe("dark");
+        await page.locator("#settingsToggle").click();
+        expect(await page.locator("#settingsColumns").inputValue()).toBe("custom");
+        expect(await page.locator("#settingsCustomColumns").inputValue()).toBe("7");
+        await page.locator("#settingsColumns").selectOption("auto");
+        await expect.poll(columns).toBe(2);
+        await page.locator("#settingsLight").click();
+        expect(await page.locator("html").getAttribute("data-theme")).toBe("light");
+        await page.locator("#settingsClose").click();
+        const box = await page.locator("#sessionPanel").boundingBox();
+        const resizer = await page.locator("#sessionPanelResizer").boundingBox();
+        if (!box || !resizer) throw new Error("Missing panel geometry");
+        await page.mouse.move(resizer.x + 3, resizer.y + 30);
+        await page.mouse.down();
+        await page.mouse.move(box.x + 320, resizer.y + 30);
+        await page.mouse.up();
+        await expect.poll(columns).toBe(1);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.locator("#settingsToggle").click();
+        const panel = await page.locator("#settingsPanel").boundingBox();
+        if (!panel) throw new Error("Missing settings geometry");
+        expect(panel.x).toBeGreaterThanOrEqual(0);
+        expect(panel.x + panel.width).toBeLessThanOrEqual(390);
+        if (process.env.ATTEND_SETTINGS_SCREENSHOT)
+          await page.screenshot({ path: `${process.env.ATTEND_SETTINGS_SCREENSHOT}-${count}.png` });
+        expect(errors).toEqual([]);
+      } finally {
+        await page.close();
+      }
+    },
+    20_000,
+  );
+
   it.each(["dark", "light"] as const)(
     "edits an analyzing label in a %s menu without overflowing on narrow screens",
     async (theme) => {
@@ -500,9 +624,15 @@ describe("console browser behavior", () => {
     await page.locator('#list .item[data-session-id="s1"]').click();
     await expect.poll(() => page.title()).toBe("Attend — safe-session-dir");
     expect(await page.title()).not.toContain(secret);
+    expect(
+      await page.locator("#input").evaluate((node) => node === node.ownerDocument.activeElement),
+    ).toBe(true);
 
     await page.locator('#list .item[data-session-id="s2"]').click();
     await expect.poll(() => page.title()).toBe("Attend — other-safe-dir");
+    expect(
+      await page.locator("#input").evaluate((node) => node === node.ownerDocument.activeElement),
+    ).toBe(true);
     await page.close();
   });
 
@@ -781,11 +911,11 @@ describe("console browser behavior", () => {
     page.setDefaultTimeout(3_000);
     const indexView: ConsoleView = {
       ...raceView,
+      vaultState: { layout: { sessionPanelOpen: true } },
       sessionIndexEpoch: "pointer-stable-index",
       sessionIndexRevision: 1,
     };
     await page.addInitScript(() => {
-      localStorage.setItem("attend.sessionPanelOpen", "1");
       const browserGlobal = globalThis as unknown as Record<string, unknown>;
       class StubEventSource {
         static readonly CLOSED = 2;
@@ -1359,7 +1489,7 @@ describe("console browser behavior", () => {
     const thread = { ...baseThread, lastUserMessageAt: startedAt };
     const timingView: ConsoleView = {
       ...commentGeneratingView,
-      vaultState: { commentThreads: { [thread.id]: thread } },
+      vaultState: { ...commentGeneratingView.vaultState, commentThreads: { [thread.id]: thread } },
     };
     let historyCalls = 0;
     let historyVersion = "comment-timing-v1";
@@ -2199,7 +2329,7 @@ describe("console browser behavior", () => {
     await page.locator("#nvendor").focus();
 
     expect(await page.locator("#nvendor").inputValue()).toBe("cursor");
-    expect(await page.locator("#nvendorSug .chooser-opt").count()).toBe(1);
+    expect(await page.locator("#nvendorSug .chooser-opt[data-value]").count()).toBe(1);
     expect(await page.locator("#nvendorSug .chooser-opt.unavailable").count()).toBe(0);
     expect(await page.locator('#nvendorSug .chooser-opt[data-value="cursor"]').count()).toBe(1);
     expect(await page.locator('#nvendorSug .chooser-opt[data-value="claude"]').count()).toBe(0);
@@ -2243,7 +2373,7 @@ describe("console browser behavior", () => {
     await page.locator("#nvendor").focus();
 
     expect(await page.locator("#nvendor").inputValue()).toBe("");
-    expect(await page.locator("#nvendorSug .chooser-opt").count()).toBe(3);
+    expect(await page.locator("#nvendorSug .chooser-opt[data-value]").count()).toBe(3);
     expect(await page.locator("#nvendorSug .chooser-opt.unavailable").count()).toBe(3);
     const claude = page.locator('#nvendorSug .chooser-opt[data-value="claude"]');
     expect(await claude.getAttribute("aria-disabled")).toBe("true");
@@ -2253,6 +2383,205 @@ describe("console browser behavior", () => {
     await claude.click();
     expect(await page.locator("#nvendor").inputValue()).toBe("");
     expect(await page.locator("#nmsg").textContent()).toContain("Update Claude Code");
+    await page.close();
+  });
+
+  it("saves and shares custom vendor configurations between New and the chat composer", async () => {
+    const page = await browser.newPage({ viewport: { width: 390, height: 720 } });
+    const presetsView: ConsoleView = {
+      ...raceView,
+      vendors: [
+        { vendor: "claude", available: true, chat: true },
+        { vendor: "codex", available: true, chat: true },
+        { vendor: "cursor", available: true, chat: true },
+      ],
+      codexModels: [
+        {
+          value: "test-codex",
+          label: "Test Codex",
+          efforts: ["low", "high"],
+          speeds: ["standard", "fast"],
+          defaultEffort: "low",
+          defaultSpeed: "standard",
+        },
+      ],
+      cursorModels: [
+        {
+          value: "test-cursor",
+          label: "Test Cursor",
+          efforts: ["low", "high"],
+          speeds: ["standard", "fast"],
+          defaultEffort: "low",
+          defaultSpeed: "standard",
+          configurations: [
+            { value: "standard", effort: "low", speed: "standard" },
+            { value: "fast", effort: "high", speed: "fast" },
+          ],
+        },
+      ],
+    };
+    const modelPrefs: Record<string, unknown> = {};
+    let rejectWrites = false;
+    await page.addInitScript(() => {
+      class StubEventSource {
+        static readonly CLOSED = 2;
+        close() {}
+      }
+      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+    });
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({ ...presetsView, vaultState: { modelPrefs } }),
+        });
+      } else if (url.pathname === "/vault/ui-state") {
+        const patch = route.request().postDataJSON() as { modelPrefs?: Record<string, unknown> };
+        if (rejectWrites) await route.fulfill({ status: 500, json: { ok: false } });
+        else {
+          Object.assign(modelPrefs, patch.modelPrefs);
+          await route.fulfill({ json: { ok: true } });
+        }
+      } else if (url.pathname === "/chat/messages") await route.fulfill({ json: [] });
+      else await route.fulfill({ json: { ok: true } });
+    });
+    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+    await page.locator("#newToggle").click();
+    await page.locator("#nvendor").click();
+    await page.locator("#nvendorSug .preset-add").click();
+    const editorBounds = await page.locator("#configPresetPanel").boundingBox();
+    expect(editorBounds?.width).toBeLessThanOrEqual(370);
+    expect(editorBounds?.height).toBeLessThanOrEqual(700);
+    await page.locator("#presetName").fill("high");
+    await page.locator("#presetVendor").selectOption("codex");
+    await page.locator("#presetModel").selectOption("test-codex");
+    await page.locator("#presetEffort").selectOption("high");
+    await page.locator("#presetSpeed").selectOption("fast");
+    rejectWrites = true;
+    await page.locator("#presetSave").click();
+    await expect.poll(() => page.locator("#presetSave").isEnabled()).toBe(true);
+    expect(await page.locator("#configPresetPanel").isVisible()).toBe(true);
+    expect(modelPrefs.configPresets).toBeUndefined();
+    rejectWrites = false;
+    await page.locator("#presetSave").click();
+    await expect.poll(() => page.locator("#nspeed").inputValue()).toBe("fast");
+    expect(await page.locator("#configPresetPanel").isHidden()).toBe(true);
+    expect(await page.locator("#nvendor").inputValue()).toBe("codex");
+    expect(await page.locator("#nmodel").inputValue()).toBe("test-codex");
+    expect(await page.locator("#neffort").inputValue()).toBe("high");
+    expect(modelPrefs.configPresets).toEqual([
+      expect.objectContaining({
+        name: "high",
+        vendor: "codex",
+        model: "test-codex",
+        effort: "high",
+        speed: "fast",
+      }),
+    ]);
+
+    for (const command of ["hi", "codex", "cod", "test-codex", "test-c", "fast"]) {
+      await page.locator("#nspeed").selectOption("standard", { force: true });
+      await page.locator("#np").fill(`Review /${command} `);
+      await expect.poll(() => page.locator("#nspeed").inputValue()).toBe("fast");
+      expect(await page.locator("#np").inputValue()).toBe("Review ");
+      expect(await page.locator("#neffort").inputValue()).toBe("high");
+    }
+    for (const [command, menuId, controlId] of [
+      ["v", "nvendorSug", "nvendor"],
+      ["vendor", "nvendorSug", "nvendor"],
+      ["m", "nmodelMenu", "nmodelButton"],
+      ["model", "nmodelMenu", "nmodelButton"],
+      ["e", "neffortMenu", "neffortButton"],
+      ["effort", "neffortMenu", "neffortButton"],
+      ["s", "nspeedMenu", "nspeedButton"],
+      ["speed", "nspeedMenu", "nspeedButton"],
+    ]) {
+      await page.locator("#np").fill(`Review /${command} `);
+      expect(await page.locator("#np").inputValue()).toBe("Review ");
+      expect(await page.locator(`#${menuId}`).isVisible()).toBe(true);
+      expect(
+        await page
+          .locator(`#${controlId}`)
+          .evaluate((node) => node.ownerDocument.activeElement === node),
+      ).toBe(true);
+      await page.locator(`#${controlId}`).press("Escape");
+      expect(await page.locator(`#${menuId}`).isHidden()).toBe(true);
+      expect(await page.locator("#newbox").isVisible()).toBe(true);
+    }
+    await page.locator("#np").fill("Review /e ");
+    await page.locator('#neffortMenu .selectopt[data-value="low"]').click();
+    expect(await page.locator("#neffort").inputValue()).toBe("low");
+    await page.locator("#np").fill("Review /high ");
+    expect(await page.locator("#neffort").inputValue()).toBe("high");
+    await page.locator("#np").fill("https://high ");
+    expect(await page.locator("#np").inputValue()).toBe("https://high ");
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator("#list .item").first().click();
+    await page.locator("#input").fill("Keep this draft");
+    await page.locator("#railVendor").click();
+    await page.locator("#composerRailPop .preset-pick", { hasText: "high" }).click();
+    await expect.poll(() => page.locator("#railVendor").textContent()).toContain("codex");
+    expect(await page.locator("#rmodel").inputValue()).toBe("test-codex");
+    expect(await page.locator("#reffort").inputValue()).toBe("high");
+    expect(await page.locator("#rspeed").inputValue()).toBe("fast");
+    expect(await page.locator("#input").inputValue()).toBe("Keep this draft");
+    expect(await page.locator("#send").textContent()).toContain("fork with codex");
+    await page.locator("#railSpeed").click();
+    await page.locator("#composerRailPop .rail-option", { hasText: "standard" }).click();
+    expect(await page.locator("#rspeed").inputValue()).toBe("standard");
+    await page.locator("#input").fill("Keep this draft /high ");
+    await expect.poll(() => page.locator("#rspeed").inputValue()).toBe("fast");
+    expect(await page.locator("#input").inputValue()).toBe("Keep this draft ");
+
+    await page.locator("#railVendor").click();
+    await page.locator("#composerRailPop .preset-edit").click();
+    await page.locator("#presetName").fill("Cursor fast");
+    await page.locator("#presetVendor").selectOption("cursor");
+    await page.locator("#presetModel").selectOption("test-cursor");
+    await page.locator("#presetSpeed").selectOption("fast");
+    expect(await page.locator("#presetEffort").inputValue()).toBe("high");
+    await page.locator("#presetSave").click();
+    await expect.poll(() => page.locator("#railVendor").textContent()).toContain("cursor");
+    expect(await page.locator("#rmodel").inputValue()).toBe("test-cursor");
+    expect(await page.locator("#reffort").inputValue()).toBe("high");
+    expect(await page.locator("#rspeed").inputValue()).toBe("fast");
+
+    // The saved name no longer contains "high": every saved axis is searchable.
+    for (const command of ["high", "hi", "cursor", "test-cursor", "Test-C", "fast"]) {
+      await page.locator("#railSpeed").click();
+      await page.locator("#composerRailPop .rail-option", { hasText: "standard" }).click();
+      expect(await page.locator("#reffort").inputValue()).toBe("low");
+      await page.locator("#input").fill(`Keep this draft /${command} `);
+      expect(await page.locator("#input").inputValue()).toBe("Keep this draft ");
+      expect(await page.locator("#railVendor").textContent()).toContain("cursor");
+      expect(await page.locator("#rmodel").inputValue()).toBe("test-cursor");
+      expect(await page.locator("#reffort").inputValue()).toBe("high");
+      expect(await page.locator("#rspeed").inputValue()).toBe("fast");
+    }
+    // An unmatched command keeps the original single-axis behavior.
+    await page.locator("#input").fill("Keep this draft /low ");
+    expect(await page.locator("#reffort").inputValue()).toBe("low");
+    expect(await page.locator("#rspeed").inputValue()).toBe("standard");
+
+    await page.locator("#railVendor").click();
+    await page.locator("#composerRailPop .preset-add").click();
+    await page.locator("#presetName").fill("Canceled configuration");
+    await page.locator("#presetName").press("Escape");
+    expect(await page.locator("#configPresetPanel").isHidden()).toBe(true);
+    expect(modelPrefs.configPresets).toEqual([expect.objectContaining({ name: "Cursor fast" })]);
+    await page.locator("#newToggle").click();
+    await page.locator("#nvendor").click();
+    await page.locator("#nvendorSug .preset-pick", { hasText: "Cursor fast" }).click();
+    await expect.poll(() => page.locator("#nvendor").inputValue()).toBe("cursor");
+    expect(await page.locator("#nmodel").inputValue()).toBe("test-cursor");
+    expect(await page.locator("#neffort").inputValue()).toBe("high");
+    expect(await page.locator("#nspeed").inputValue()).toBe("fast");
+    await page.locator("#nvendor").click();
+    await page.locator("#nvendorSug .preset-delete").click();
+    await expect.poll(() => modelPrefs.configPresets).toEqual([]);
+    await expect.poll(() => page.locator("#nvendorSug .preset-pick").count()).toBe(0);
     await page.close();
   });
 
@@ -3413,7 +3742,6 @@ describe("console browser behavior", () => {
       viewport: { width: 1100, height: 800 },
     });
     await page.addInitScript(() => {
-      localStorage.setItem("attend.sideW", "200");
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
@@ -3427,7 +3755,10 @@ describe("console browser behavior", () => {
       if (url.pathname === "/") {
         await route.fulfill({
           contentType: "text/html",
-          body: renderConsole(cursorMatrixView),
+          body: renderConsole({
+            ...cursorMatrixView,
+            vaultState: { layout: { sidebarWidth: 200 } },
+          }),
         });
       } else if (url.pathname === "/models/cursor") {
         await route.fulfill({
@@ -3523,9 +3854,9 @@ describe("console browser behavior", () => {
     const hostedNewSessionView: ConsoleView = {
       ...raceView,
       tags: ["work", "urgent"],
+      vaultState: { layout: { sidebarWidth: 240 } },
     };
     await page.addInitScript(() => {
-      localStorage.setItem("attend.sideW", "240");
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
@@ -3610,9 +3941,6 @@ describe("console browser behavior", () => {
       viewport: { width: 2200, height: 800 },
     });
     await page.addInitScript(() => {
-      localStorage.setItem("attend.sideW", "240");
-      localStorage.setItem("attend.sessionPanelW", "1500");
-      localStorage.setItem("attend.sessionPanelOpen", "1");
       class StubEventSource {
         static readonly CLOSED = 2;
         close() {}
@@ -3626,7 +3954,12 @@ describe("console browser behavior", () => {
       if (url.pathname === "/") {
         await route.fulfill({
           contentType: "text/html",
-          body: renderConsole(raceView),
+          body: renderConsole({
+            ...raceView,
+            vaultState: {
+              layout: { sessionPanelOpen: true, sessionPanelWidth: 1500, sidebarWidth: 240 },
+            },
+          }),
         });
       } else {
         await route.fulfill({ json: { ok: true, items: [] } });
@@ -6528,7 +6861,7 @@ describe("console browser behavior", () => {
     expect(configOptionStyle.boxShadow).toBe("none");
     await page.locator("#railVendor").click();
     await expectRailAlignment("#railVendor");
-    expect((await page.locator("#composerRailPop").boundingBox())?.width).toBeLessThanOrEqual(137);
+    expect((await page.locator("#composerRailPop").boundingBox())?.width).toBeLessThanOrEqual(321);
     expect(await page.locator(".rail-option-vendor-mark").count()).toBe(2);
     const claudeOptionColor = await page
       .locator('.rail-option[data-vendor="claude"] .rail-option-label')
@@ -6554,7 +6887,9 @@ describe("console browser behavior", () => {
     expect(await page.locator("#send").getAttribute("data-vendor")).toBe("codex");
     await expectProductActionTheme("#send");
     await expectProductActionTheme("#send", true);
-    await page.locator("#themeToggle").click();
+    await page.locator("#settingsToggle").click();
+    await page.locator("#settingsDark").click();
+    await page.locator("#settingsClose").click();
     expect(await page.locator("html").getAttribute("data-theme")).toBe("dark");
     await expectProductActionTheme("#send");
     await expectProductActionTheme("#send", true);
@@ -6995,6 +7330,8 @@ describe("console browser behavior", () => {
     await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
     await page.locator("#list .item", { hasText: "Avoidance session" }).click();
 
+    // Session-card navigation now focuses the composer; explicitly leave it to test the unfocused ghost.
+    await page.locator("#railTodos").focus();
     const input = page.locator("#input");
     const ghost = page.locator("#composerShortcutGhost");
     const suffix = page.locator("#composerShortcutGhostSuffix");
@@ -9269,6 +9606,127 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
+  it.each(["read", "unread", "generating"] as const)(
+    "stops tracking an unpinned %s comment on session cards while preserving its history",
+    async (status) => {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(3_000);
+      const pageErrors: string[] = [];
+      page.on("pageerror", (error) => pageErrors.push(error.message));
+      const baseThread = commentView.vaultState?.commentThreads?.["comment-1"];
+      if (!baseThread) throw new Error("Missing comment fixture");
+      const thread = {
+        ...baseThread,
+        status,
+        anchorKey: status === "generating" ? "assistant:0:selection:test" : "assistant:0",
+        lastUserMessageAt: 1000,
+      };
+      const otherThread = {
+        ...baseThread,
+        id: "comment-2",
+        anchorKey: "assistant:1",
+        anchorText: "Another pinned answer",
+        providerSessionId: "comment-provider-2",
+        lastUserMessageAt: 200,
+        status: "read" as const,
+      };
+      const currentView: ConsoleView = {
+        ...raceView,
+        sessions: raceView.sessions.map((session) =>
+          session.sessionId === "s2" ? { ...session, lastTs: 500 } : session,
+        ),
+        vaultState: {
+          pins: {
+            "attend.pins.v1:s1": [thread, otherThread].map((item) => ({
+              key: item.anchorKey,
+              text: item.anchorText,
+              role: "claude",
+              pinnedAt: 101,
+              ...(item.anchorKey.includes(":selection:")
+                ? { kind: "selection" as const, targetKey: "assistant:0" }
+                : {}),
+            })),
+          },
+          commentThreads: { [thread.id]: thread, [otherThread.id]: otherThread },
+        },
+      };
+      await page.addInitScript(() => {
+        class StubEventSource {
+          static readonly CLOSED = 2;
+          close() {}
+        }
+        Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      });
+      await page.route("**/*", async (route) => {
+        const request = route.request();
+        const url = new URL(request.url());
+        if (url.pathname === "/") {
+          await route.fulfill({ contentType: "text/html", body: renderConsole(currentView) });
+        } else if (url.pathname === "/vault/ui-state" && request.method() === "POST") {
+          const patch = request.postDataJSON();
+          for (const [key, pins] of Object.entries(patch.pins ?? {})) {
+            if (pins === null) delete currentView.vaultState?.pins?.[key];
+            else if (Array.isArray(pins) && currentView.vaultState?.pins)
+              currentView.vaultState.pins[key] = pins;
+          }
+          await route.fulfill({ json: { ok: true } });
+        } else if (url.pathname === "/chat/messages") {
+          await route.fulfill({
+            json: [{ role: "assistant", text: thread.anchorText }],
+          });
+        } else if (url.pathname === "/comments/messages") {
+          await route.fulfill({
+            json: { thread, messages: [{ role: "assistant", text: "Preserved comment reply" }] },
+          });
+        } else {
+          await route.fulfill({ json: { ok: true } });
+        }
+      });
+      try {
+        await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+        const badge = page.locator('#list .item[data-session-id="s1"] .it-comment');
+        const sessionOrder = () =>
+          page
+            .locator("#list .item")
+            .evaluateAll((items) => items.map((item) => item.getAttribute("data-session-id")));
+        expect(await sessionOrder()).toEqual(["s1", "s2"]);
+        expect(await badge.isVisible()).toBe(true);
+        await page.locator('#list .item[data-session-id="s1"]').click();
+        await page.locator("#pinTray .pinitem").first().locator(".pinx").click();
+        await expect.poll(() => badge.getAttribute("aria-label")).toBe("1 comment thread");
+        expect(await badge.getAttribute("class")).toContain("read");
+        expect(await page.locator("#pinTray .pinitem").count()).toBe(1);
+        await expect.poll(sessionOrder).toEqual(["s2", "s1"]);
+        await page.locator("#pinTray .pinx").click();
+        await expect.poll(() => badge.isHidden()).toBe(true);
+        await expect
+          .poll(() => currentView.vaultState?.pins?.["attend.pins.v1:s1"])
+          .toBeUndefined();
+
+        await page.reload({ waitUntil: "domcontentloaded" });
+        expect(await badge.isHidden()).toBe(true);
+        await page.locator('#list .item[data-session-id="s1"]').click();
+        expect(await page.locator("#pinTray .pinitem").count()).toBe(0);
+        await expect
+          .poll(() => page.locator("#msgs > .msg.assistant .bubble").first().textContent())
+          .toContain(thread.anchorText);
+        await page.locator("#msgs > .msg.assistant .bubble").first().hover();
+        await expect
+          .poll(() => page.locator("#msgFloatActions").getAttribute("aria-hidden"))
+          .toBe("false");
+        await page.locator("#msgFloatComment").click({ force: true });
+        await expect
+          .poll(() => page.locator("#commentMsgs").textContent())
+          .toContain("Preserved comment reply");
+        expect(await badge.isHidden()).toBe(true);
+        expect(pageErrors).toEqual([]);
+      } finally {
+        await page.close();
+      }
+    },
+    15_000,
+  );
+
   it("animates generating comment badges and follows the session status colors", async () => {
     const page = await browser.newPage();
     await page.addInitScript(() => {
@@ -9717,6 +10175,7 @@ describe("console browser behavior", () => {
       vaultState: {
         ...commentView.vaultState,
         pins: {
+          ...commentView.vaultState?.pins,
           "attend.pins.v1:comment:comment-1": [
             {
               key: "comment:1",
@@ -11216,12 +11675,13 @@ describe("console browser behavior", () => {
     expect(await cardBorderMatchesVariable(unreadCard, "top", "--status-unread")).toBe(false);
     const readAttentionRail = (card: typeof generatingCard) =>
       card.evaluate((node) => {
-        const style = node.ownerDocument.defaultView?.getComputedStyle(node, "::after");
+        const style = node.ownerDocument.defaultView?.getComputedStyle(node, "::before");
         return {
           opacity: style?.opacity ?? "",
-          height: style?.height ?? "",
+          width: style?.width ?? "",
           backgroundImage: style?.backgroundImage ?? "",
           backgroundColor: style?.backgroundColor ?? "",
+          topContent: node.ownerDocument.defaultView?.getComputedStyle(node, "::after").content,
         };
       });
     const [generatingRail, unreadRail] = await Promise.all([
@@ -11229,11 +11689,21 @@ describe("console browser behavior", () => {
       readAttentionRail(unreadCard),
     ]);
     expect(generatingRail.opacity).toBe("1");
-    expect(generatingRail.height).toBe("2px");
+    expect(generatingRail.width).toBe("3px");
     expect(generatingRail.backgroundImage).not.toBe("none");
-    expect(unreadRail.opacity).toBe("1");
-    expect(unreadRail.height).toBe("2px");
-    expect(unreadRail.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(generatingRail.topContent).toBe("none");
+    expect(unreadRail.topContent).toBe("none");
+    const unreadLeftRail = await unreadCard.evaluate((node) => {
+      const view = node.ownerDocument.defaultView;
+      const rail = view?.getComputedStyle(node, "::before");
+      const dot = node.querySelector(".it-status");
+      return {
+        width: rail?.width,
+        matchesStatus:
+          !!dot && rail?.backgroundColor === view?.getComputedStyle(dot).backgroundColor,
+      };
+    });
+    expect(unreadLeftRail).toEqual({ width: "3px", matchesStatus: true });
     await generatingCard.click();
     const lightActiveStyle = await generatingCard.evaluate((node) => {
       const style = node.ownerDocument.defaultView?.getComputedStyle(node);
@@ -11259,7 +11729,7 @@ describe("console browser behavior", () => {
       neutralPerimeter: true,
       borderWidth: "1px",
       railWidth: "3px",
-      railColor: "rgb(99, 102, 241)",
+      railColor: "rgb(126, 34, 206)",
       railRadius: "8px 0px 0px 8px",
     });
     await page.locator("html").evaluate((node) => node.setAttribute("data-theme", "dark"));
@@ -11291,6 +11761,22 @@ describe("console browser behavior", () => {
     await unreadCard.locator(".it-status").click();
     expect(await unreadCard.getAttribute("class")).toContain("session-status-read");
     expect(await unreadCard.getAttribute("class")).not.toContain("session-status-unread");
+    await unreadCard.click();
+    expect(await unreadCard.getAttribute("class")).toContain("active");
+    expect((await readAttentionRail(unreadCard)).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    await unreadCard.locator(".it-status").click();
+    expect(await unreadCard.getAttribute("class")).toContain("session-status-seen");
+    expect(
+      await unreadCard.evaluate((node) => {
+        const view = node.ownerDocument.defaultView;
+        const dot = node.querySelector(".it-status");
+        return (
+          !!dot &&
+          view?.getComputedStyle(node, "::before").backgroundColor ===
+            view?.getComputedStyle(dot).borderColor
+        );
+      }),
+    ).toBe(true);
 
     const columnsBefore = await page
       .locator("#sessionPanelList")
@@ -12647,6 +13133,7 @@ describe("console browser behavior", () => {
     const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
     const projectedView: ConsoleView = {
       ...raceView,
+      vaultState: { layout: { sessionPanelOpen: true } },
       sessions: raceView.sessions.map((session, index) => ({
         ...session,
         unread: index === 1,
@@ -12654,7 +13141,6 @@ describe("console browser behavior", () => {
       })),
     };
     await page.addInitScript(() => {
-      localStorage.setItem("attend.sessionPanelOpen", "1");
       class StubEventSource {
         close() {}
       }
@@ -13081,7 +13567,7 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("opens a simple unfiltered Todo popover after New and keeps standalone items unbound", async () => {
+  it("opens the Todo list from the entries before New and keeps standalone items unbound", async () => {
     const page = await browser.newPage({
       viewport: { width: 1200, height: 820 },
     });
@@ -13150,14 +13636,14 @@ describe("console browser behavior", () => {
     expect(
       await page.locator(".topnav").evaluate((topnav) => {
         const newButton = topnav.querySelector("#newToggle");
-        const todoButton = topnav.querySelector("#todoHubToggle");
-        return !!(newButton && todoButton && newButton.compareDocumentPosition(todoButton) & 4);
+        const todoButton = topnav.querySelector("#todoHubTodos");
+        return !!(newButton && todoButton && todoButton.compareDocumentPosition(newButton) & 4);
       }),
     ).toBe(true);
     expect(await page.locator("#todoHubCount").textContent()).toBe("2");
     await page.locator("#newToggle").click();
     expect(await page.locator("#newbox").getAttribute("class")).toContain("open");
-    await page.locator("#todoHubToggle").click();
+    await page.locator("#todoHubTodos").click();
     expect(await page.locator("#newbox").getAttribute("class")).not.toContain("open");
     expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
     const firstTodoBox = await page.locator("#todoHub").boundingBox();
@@ -13219,7 +13705,7 @@ describe("console browser behavior", () => {
 
     await page.locator("#todoHubClose").click();
     await page.locator("#sessionPanelToggle").click();
-    await page.locator("#todoHubToggle").click();
+    await page.locator("#todoHubTodos").click();
     const centeredTodoBox = await page.locator("#todoHub").boundingBox();
     if (!centeredTodoBox) throw new Error("Missing centered Todo panel geometry");
     expect(Math.abs(centeredTodoBox.x + centeredTodoBox.width / 2 - 600)).toBeLessThanOrEqual(2);
@@ -13350,7 +13836,7 @@ describe("console browser behavior", () => {
         });
 
     // Tabs read left→right shortcuts · notes · todo, and a fresh browser opens on todo.
-    await page.locator("#todoHubToggle").click();
+    await page.locator("#todoHubTodos").click();
     expect(
       await page
         .locator("#todoHubTabs .todohub-tab")
@@ -13366,7 +13852,8 @@ describe("console browser behavior", () => {
 
     // Shortcuts: machine-global, so no session scope, and order is data — it
     // drives completion priority, so the hub can reorder it.
-    await tab("shortcuts").click();
+    await page.locator("#todoHubShortcuts").click();
+    expect(await selectedTab()).toBe("shortcuts");
     expect(await rowTexts()).toEqual(["Review changes", "Run the tests"]);
     expect(await page.locator("#todoHubBody .todohub-scope").count()).toBe(0);
     // A list with no checkbox must not keep the checkbox column: the text would
@@ -13403,7 +13890,8 @@ describe("console browser behavior", () => {
 
     // Notes are per session: the hub gathers every session's notes, and a new one
     // attaches to the open session rather than inventing an owner.
-    await tab("notes").click();
+    await page.locator("#todoHubNotes").click();
+    expect(await selectedTab()).toBe("notes");
     expect(await rowTexts()).toEqual(["Rollout needs the flag"]);
     expect(await page.locator("#todoHubBody .todohub-scope").first().textContent()).toContain(
       "Avoidance session",
@@ -13429,12 +13917,21 @@ describe("console browser behavior", () => {
       "Check the rollback path",
     );
 
-    // The open list survives a close/reopen and a reload — it is browser-local.
-    await page.locator("#todoHubToggle").click();
+    // Each entry opens its own list, including after reload.
+    await page.locator("#todoHubNotes").click();
     expect(await selectedTab()).toBe("notes");
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.locator("#todoHubToggle").click();
+    await page.locator("#todoHubNotes").click();
     expect(await selectedTab()).toBe("notes");
+    expect(await page.locator("#todoHubNotes").getAttribute("aria-expanded")).toBe("true");
+    await page.locator("#todoHubPin").click();
+    await page.locator("#settingsToggle").click();
+    await page.locator("#settingsClose").press("Escape");
+    await expect.poll(() => page.locator("#settingsPanel").isVisible()).toBe(false);
+    expect(await page.locator("#todoHub").getAttribute("class")).toContain("open");
+    await page.locator("#todoHubNotes").click();
+    expect(await page.locator("#todoHub").getAttribute("class")).not.toContain("open");
+    expect(await page.locator("#todoHubNotes").getAttribute("aria-expanded")).toBe("false");
     await page.close();
   }, 20_000);
 

@@ -104,28 +104,23 @@ export class TagStore {
   }
 
   delete(name: string): string[] {
-    const tag = normalizeTag(name);
-    if (!tag) return this.list();
-    return this.data.update((data) => {
-      data.tags = data.tags.filter((candidate) => candidate !== tag);
-      for (const [key, assigned] of Object.entries(data.sessions)) {
-        const next = assigned.filter((candidate) => candidate !== tag);
-        if (next.length) data.sessions[key] = next;
-        else delete data.sessions[key];
-      }
-      return [...data.tags];
-    });
+    return this.manageMany([name], "delete");
   }
 
   clearSessionBindings(name: string): string[] {
-    const tag = normalizeTag(name);
-    if (!tag) return this.list();
+    return this.manageMany([name], "unbind");
+  }
+
+  /** Apply a catalog operation in one persisted update, including legacy aliases. */
+  manageMany(names: string[], action: "delete" | "unbind"): string[] {
+    const selected = new Set(names.map(normalizeTag).filter(Boolean));
     return this.data.update((data) => {
+      if (action === "delete") data.tags = data.tags.filter((tag) => !selected.has(tag));
       for (const [key, assigned] of Object.entries(data.sessions)) {
-        if (key.startsWith("scope:") || key.startsWith("scope-id:")) continue;
-        const next = assigned.filter((candidate) => candidate !== tag);
-        if (next.length) data.sessions[key] = next;
-        else delete data.sessions[key];
+        if (action === "unbind" && (key.startsWith("scope:") || key.startsWith("scope-id:")))
+          continue;
+        // Keep explicit empty canonical assignments to prevent legacy alias fallback.
+        data.sessions[key] = assigned.filter((tag) => !selected.has(tag));
       }
       return [...data.tags];
     });

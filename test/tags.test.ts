@@ -94,6 +94,20 @@ describe("TagStore", () => {
     expect(store.tagsFor("scope-id:vault")).toEqual(["urgent"]);
   });
 
+  it("batch updates bindings without reviving legacy aliases and preserves scope tags on unbind", () => {
+    const file = path.join(os.tmpdir(), `attend-tags-batch-${Math.random()}.json`);
+    const store = new TagStore(file);
+    store.setSessionTags("title:legacy", ["later"]);
+    store.setCanonicalSessionTags("s1", ["work", "urgent"]);
+    store.setSessionTags("scope-id:vault", ["work", "urgent", "later"]);
+    expect(store.manageMany([" work ", "urgent"], "unbind")).toEqual(["later", "work", "urgent"]);
+    expect(store.tagsForSession("s1", ["title:legacy"])).toEqual([]);
+    expect(store.tagsFor("scope-id:vault")).toEqual(["later", "work", "urgent"]);
+    expect(store.manageMany(["work", "urgent"], "delete")).toEqual(["later"]);
+    expect(new TagStore(file).tagsForSession("s1", ["title:legacy"])).toEqual([]);
+    expect(store.tagsFor("scope-id:vault")).toEqual(["later"]);
+  });
+
   it("reorders global tags while preserving unmentioned tags in place", () => {
     const uniq = Math.random().toString(36).slice(2);
     const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);

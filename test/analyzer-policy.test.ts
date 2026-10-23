@@ -47,7 +47,41 @@ const verdict: AnalyzerVerdict = {
 };
 
 describe("background settings migration", () => {
-  it("defaults to economical and persists across instances", () => {
+  it("isolates instances in a shared database and restores their choices on reopen", () => {
+    const db = path.join(folder(), "state.db");
+    const first = new AnalyzerSettingsStore(db, [], "scope:first");
+    stores.push(first);
+    first.set("off");
+    const second = new AnalyzerSettingsStore(db, [], "scope:second");
+    stores.push(second);
+    expect(second.get()).toEqual({ mode: "economical", revision: 0 });
+    second.set("follow");
+    const reopened = new AnalyzerSettingsStore(db, [], "scope:first");
+    stores.push(reopened);
+    expect(reopened.get()).toEqual({ mode: "off", revision: 1 });
+    expect(second.get()).toEqual({ mode: "follow", revision: 1 });
+    reopened.set("economical");
+    expect(first.get()).toEqual({ mode: "economical", revision: 2 });
+    expect(second.get()).toEqual({ mode: "follow", revision: 1 });
+  });
+  it("imports a former global choice once without following later legacy writes", () => {
+    const db = path.join(folder(), "state.db");
+    const legacy = new DatabaseSync(db);
+    legacy.exec(
+      "CREATE TABLE analyzer_settings (id INTEGER PRIMARY KEY, mode TEXT, revision INTEGER)",
+    );
+    legacy.exec("INSERT INTO analyzer_settings VALUES (1, 'off', 8)");
+    const first = new AnalyzerSettingsStore(db, [], "scope:first");
+    stores.push(first);
+    expect(first.get().mode).toBe("off");
+    legacy.exec("UPDATE analyzer_settings SET mode = 'follow'");
+    const reopened = new AnalyzerSettingsStore(db, [], "scope:first");
+    stores.push(reopened);
+    expect(reopened.get().mode).toBe("off");
+    legacy.close();
+  });
+
+  it("defaults to economical and persists across connections to the same instance", () => {
     const db = path.join(folder(), "state.db");
     const first = new AnalyzerSettingsStore(db);
     stores.push(first);
@@ -179,6 +213,7 @@ function harness(initial: AnalyzerSettings["mode"] = "economical", shared?: stri
   let n = 0;
   const analyzer: SessionAnalyzer = {
     vendor: "codex",
+    cancel: vi.fn(),
     spawn: vi.fn(async (_cwd, observe) => {
       const id = `daemon-${++n}`;
       observe?.(id);
@@ -295,6 +330,34 @@ describe("background policy lifecycle", () => {
     h.store.set("economical");
     await h.orch.analyzeTask("external", "/repo");
     expect(h.analyzer.spawn).not.toHaveBeenCalled();
+    expect(await h.orch.analyzeTask("task", "/repo")).toMatchObject({ brief: "Ready" });
+  });
+  it("cancels active daemons when disabled and does not start queued analysis", async () => {
+    const h = harness();
+    await h.orch.ensureDaemon("task", "codex", "/repo");
+    let finish!: (result: AnalyzerVerdict) => void;
+    vi.mocked(h.analyzer.analyze).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = h.orch.analyzeTask("task", "/repo");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await h.orch.analyzeTask("task", "/repo");
+    h.store.set("off");
+    h.orch.syncSettings();
+    expect(h.analyzer.cancel).toHaveBeenCalledOnce();
+    h.orch.syncSettings();
+    expect(h.analyzer.cancel).toHaveBeenCalledOnce();
+    finish(structuredClone(verdict));
+    expect(await pending).toBeNull();
+    await h.orch.analyzeTask("task", "/repo");
+    await h.orch.ensureAvoidancePrompt("task", "/repo");
+    expect(h.analyzer.analyze).toHaveBeenCalledOnce();
+    expect(h.analyzer.avoidancePrompt).not.toHaveBeenCalled();
+    expect(h.analyzer.spawn).toHaveBeenCalledOnce();
+    h.store.set("economical");
     expect(await h.orch.analyzeTask("task", "/repo")).toMatchObject({ brief: "Ready" });
   });
   it("drops in-flight results after another instance changes mode, including avoidance", async () => {
@@ -463,7 +526,7 @@ describe("background policy lifecycle", () => {
     const first = new AnalyzerSettingsStore(db);
     first.close();
     const raw = new DatabaseSync(db);
-    raw.exec("UPDATE analyzer_settings SET mode = 'legacy_vendor_default', revision = 4");
+    raw.exec("UPDATE instance_analyzer_settings SET mode = 'legacy_vendor_default', revision = 4");
     raw.close();
     const migrated = new AnalyzerSettingsStore(db);
     stores.push(migrated);

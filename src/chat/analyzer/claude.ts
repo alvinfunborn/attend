@@ -45,6 +45,13 @@ This first message has no transcript yet — reply with brief "new session", sta
 export class ClaudeAnalyzer implements SessionAnalyzer {
   readonly vendor = "claude";
 
+  private cancellation = new AbortController();
+
+  cancel(): void {
+    this.cancellation.abort(new Error("Session daemon is off"));
+    this.cancellation = new AbortController();
+  }
+
   constructor(
     private readonly claudeProjects: string,
     private readonly queryFn: QueryFn,
@@ -57,7 +64,9 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     onSessionId?: (sessionId: string) => void,
     execution?: AnalyzerExecution,
   ): Promise<string | null> {
+    const signal = this.cancellation.signal;
     let sessionId: string | null = null;
+    signal.throwIfAborted();
     const stream = this.queryFn({ prompt: SEED, options: this.options(cwd, execution) });
     await consumeAnalyzerStream(
       stream,
@@ -70,6 +79,8 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
         assertAnalyzerModel(execution, "model" in msg ? msg.model : undefined);
       },
       () => stream.interrupt(),
+      undefined,
+      signal,
     );
     return sessionId;
   }
@@ -83,6 +94,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     uiContext = "",
     execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null> {
+    const signal = this.cancellation.signal;
     const file = await this.findSessionFile(taskId);
     // The daemon needs the true session opening, not "the first message from the
     // last 200 rows"; otherwise long sessions collapse to a late subtask such as
@@ -96,6 +108,7 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
       .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
     let text = "";
     const options = { ...this.options(cwd, execution), resume: daemonId };
+    signal.throwIfAborted();
     const stream = this.queryFn({
       prompt: requestPrompt(transcript, pendingTurns, uiContext),
       options,
@@ -108,6 +121,8 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
           if (ev.kind === "assistant_text") text += ev.text;
       },
       () => stream.interrupt(),
+      undefined,
+      signal,
     );
     const analysis = parseAnalysis(text);
     if (!analysis) return null;
@@ -125,10 +140,12 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
     uiContext = "",
     execution?: AnalyzerExecution,
   ): Promise<string | null> {
+    const signal = this.cancellation.signal;
     const file = await this.findSessionFile(taskId);
     const transcript = file ? (await this.readContext(file, taskId)).transcript : "";
     let text = "";
     const options = { ...this.options(cwd, execution), resume: daemonId };
+    signal.throwIfAborted();
     const stream = this.queryFn({ prompt: avoidancePromptRequest(transcript, uiContext), options });
     await consumeAnalyzerStream(
       stream,
@@ -138,6 +155,8 @@ export class ClaudeAnalyzer implements SessionAnalyzer {
           if (ev.kind === "assistant_text") text += ev.text;
       },
       () => stream.interrupt(),
+      undefined,
+      signal,
     );
     return parseAvoidancePrompt(text);
   }

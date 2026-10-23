@@ -2,6 +2,32 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.10 — 2026-10-23
+
+### Added
+
+- Settings now include system, light, dark, and custom themes, with live JSON previews,
+  import/export, searchable color definitions, and saved theme management.
+- Panel layout controls and responsive settings make the console easier to customize.
+- Reusable vendor/model/effort presets and configuration shortcuts are available in
+  both new-session and chat composers.
+- Tag management supports batch deletion and session unbinding, with an improved
+  session tag editor.
+
+### Changed
+
+- Theme selection, custom themes, panel layout, and background analysis settings are
+  persisted independently for each directory scope across restarts and port changes.
+
+### Fixed
+
+- Turning background analysis off cancels active analyzer work and synchronizes the
+  setting across clients for the same scope.
+- Selecting a session card focuses the chat composer while retaining draft content,
+  without rebuilding unchanged session cards or interrupting header navigation.
+- Clearing tag bindings preserves explicit empty assignments so legacy aliases cannot
+  restore removed tags.
+
 ## 1.3.9 — 2026-10-16
 
 ### Added

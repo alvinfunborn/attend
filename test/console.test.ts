@@ -52,7 +52,7 @@ describe("renderConsole", () => {
       html.indexOf("  // Build a clickable priority/ETA badge"),
     );
     const functions = new Function(
-      `var titleEls={},cur=null; function renderSidebar(){}; ${apply} ${clear}; return {applyAnalysis,clearTurnScopedSignals};`,
+      `var titleEls={},cur=null; function renderSidebar(){}; function daemonEnabled(){return true;} ${apply} ${clear}; return {applyAnalysis,clearTurnScopedSignals};`,
     )();
     const session = {
       sessionId: "s1",
@@ -171,7 +171,7 @@ describe("renderConsole", () => {
     );
     expect(html).toContain('.toolc[data-tool-pending="true"] > summary::after { content: "";');
     expect(html).toContain(
-      '.toolc[data-tool-error="true"] { border-color: #dc2626; box-shadow: none;',
+      '.toolc[data-tool-error="true"] { border-color: var(--theme-tool-toolc-border); box-shadow: none;',
     );
     expect(html).toContain("border-top: 1px solid var(--tool-divider);");
     expect(html).toContain(".dline.meta { background: var(--tool-bg); color: var(--ink-3);");
@@ -303,7 +303,12 @@ describe("renderConsole", () => {
       "if(ev.key==='Enter'&&!ev.shiftKey&&!isImeConfirming(ev)){ ev.preventDefault(); sendComment(); }",
     );
     expect(html).toContain(".foot button.send, .commentfoot button.send");
-    expect(html).toContain(".foot button.send.stopping, .commentfoot button.send.stopping");
+    expect(html).toContain(
+      ".foot button.send.stopping { background: var(--theme-button-stop-background);",
+    );
+    expect(html).toContain(
+      ".commentfoot button.send.stopping { background: var(--theme-button-stop-background);",
+    );
     expect(html).toContain('class="composer commentcomposer"');
     expect(html).toContain(
       '<div class="composer commentcomposer">\n        <div class="commentcomposer-surface">',
@@ -949,7 +954,7 @@ describe("renderConsole", () => {
     expect(html).toContain("setIconButton(edit,'edit','Edit draft');");
     expect(html).toContain("if(cur!==s) select(s);");
     expect(html).toContain(".draft-edit { display: inline-flex;");
-    expect(html).toContain("background: transparent; color: #dc2626;");
+    expect(html).toContain("background: transparent; color: var(--theme-draft-edit-foreground);");
     expect(html).toContain("line.appendChild(el('span','prompt-line-text',String(value||'')));");
     expect(html).toContain("promptTail=appendLatestPrompt(item, s, 'it-firstline')||promptTail;");
     expect(html).toContain(
@@ -1190,9 +1195,13 @@ describe("renderConsole", () => {
     expect(html).toContain(
       "var del=el('button','qaction qdel'); setIconButton(del,'delete','Delete '",
     );
-    expect(html).toContain("button.qdel { color: #dc2626; }");
-    expect(html).not.toContain(".qitem button.qdel { color: #dc2626; }");
-    expect(html).toContain('html[data-theme="dark"] .qaction { color: #a5b4fc; }');
+    expect(html).toContain("button.qdel { color: var(--theme-queue-delete-foreground); }");
+    expect(html).not.toContain(
+      ".qitem button.qdel { color: var(--theme-queue-delete-foreground); }",
+    );
+    expect(html).toContain(
+      'html[data-theme="dark"] .qaction { color: var(--theme-queue-action-foreground); }',
+    );
     expect(html).toContain("var cancel=editCancelButton('Cancel edit (Esc)');");
     expect(html).toContain("edit.onkeydown=function(ev){ if(ev.key==='Escape')");
     expect(html).not.toContain("rail-item-insert");
@@ -1407,14 +1416,16 @@ describe("renderConsole", () => {
     expect(html).toContain("#avoidPanel:not([hidden]) { flex: 0 0 auto; }");
     expect(html).toContain("#queue { flex: 0 0 auto;");
     expect(html).toContain("var CHAT_MESSAGE_BOTTOM_INSETS=[];");
-    expect(html).toContain("--item-selected-row-start: #e0e7ff;");
-    expect(html).toContain("--item-selected-row-start: rgba(129,140,248,0.24);");
+    expect(html).toContain("--item-selected-row-start: #bae6fd;");
+    expect(html).toContain("--item-selected-row-start: #164e70;");
     expect(html).toContain("box-shadow: inset 3px 0 0 var(--item-selected-marker)");
     expect(html).toContain("--session-panel-selection-rail-size: 3px;");
-    expect(html).toContain("--session-panel-status-rail-size: 2px;");
     expect(html).toContain("--session-panel-turn-rail-size: 3px;");
-    expect(html).toContain(
+    expect(html).not.toContain(
       ".session-panel .item.active::before { background: var(--item-selected-marker); }",
+    );
+    expect(html).toContain(
+      ".session-panel .item.session-status-seen.active:not(.avoidance)::before { background: var(--status-seen); }",
     );
     expect(html).toContain(
       "top: -1px;\n    bottom: -1px;\n    left: -1px;\n    width: var(--session-panel-selection-rail-size);",
@@ -1428,13 +1439,13 @@ describe("renderConsole", () => {
     );
     expect(html).not.toContain(".session-panel .item.session-status-generating { border-color:");
     expect(html).not.toContain(".session-panel .item.session-status-unread { border-color:");
-    expect(html).toContain(".session-panel .item.session-status-unread::after {");
-    expect(html).toContain(".session-panel .item.session-status-generating::after {");
+    expect(html).toContain(".session-panel .item.session-status-unread::before {");
+    expect(html).toContain(".session-panel .item.session-status-generating::before {");
     expect(html).toContain("@keyframes sessionAttentionRail");
-    expect(html).toContain("background-size: 200% 100%;");
+    expect(html).toContain("background-size: 100% 200%;");
     expect(html).toContain("animation-delay: var(--session-attention-delay, 0ms);");
     expect(html).toContain(
-      "@keyframes sessionAttentionRail { from { background-position: 100% 0; } to { background-position: 0% 0; } }",
+      "@keyframes sessionAttentionRail { from { background-position: 0 100%; } to { background-position: 0 0%; } }",
     );
     expect(html).toContain("var SESSION_ATTENTION_RAIL_DURATION_MS=1450;");
     expect(html).toContain(
@@ -1541,27 +1552,56 @@ describe("renderConsole", () => {
     expect(html).toContain(
       "if(isQuestionTool(tc.name, tc.input) && hasQuestionAnswerResult(tc.result, tc.isError, tc.name)) lockQuestionTool(d);",
     );
-    expect(html).toContain("if(hasQuestionAnswerResult(ev.text, ev.isError,t._attendTool&&t._attendTool.name)) lockQuestionTool(t);");
+    expect(html).toContain(
+      "if(hasQuestionAnswerResult(ev.text, ev.isError,t._attendTool&&t._attendTool.name)) lockQuestionTool(t);",
+    );
   });
 
   it("recognizes async questions without treating delivery acceptance as an answer", () => {
     const html = renderConsole(view);
-    const code = html.slice(html.indexOf("  function isQuestionTool("), html.indexOf("  function toolBlockKey("));
-    const { isQuestionTool, hasQuestionAnswerResult } = new Function(`${code}; return {isQuestionTool,hasQuestionAnswerResult};`)();
-    expect(isQuestionTool("functions.request_user_input_async", { questions: [{ title: "Where?" }] })).toBe(true);
-    expect(hasQuestionAnswerResult('{"accepted":true}', false, "request_user_input_async")).toBe(false);
-    expect(hasQuestionAnswerResult("Your questions have been answered: US", false, "request_user_input_async")).toBe(true);
+    const code = html.slice(
+      html.indexOf("  function isQuestionTool("),
+      html.indexOf("  function toolBlockKey("),
+    );
+    const { isQuestionTool, hasQuestionAnswerResult } = new Function(
+      `${code}; return {isQuestionTool,hasQuestionAnswerResult};`,
+    )();
+    expect(
+      isQuestionTool("functions.request_user_input_async", { questions: [{ title: "Where?" }] }),
+    ).toBe(true);
+    expect(hasQuestionAnswerResult('{"accepted":true}', false, "request_user_input_async")).toBe(
+      false,
+    );
+    expect(
+      hasQuestionAnswerResult(
+        "Your questions have been answered: US",
+        false,
+        "request_user_input_async",
+      ),
+    ).toBe(true);
     expect(hasQuestionAnswerResult("failed", true, "request_user_input_async")).toBe(false);
-    const collect = html.slice(html.indexOf("  function collectQuestionAnswers("), html.indexOf("  function setQuestionBusy("));
+    const collect = html.slice(
+      html.indexOf("  function collectQuestionAnswers("),
+      html.indexOf("  function setQuestionBusy("),
+    );
     const collectAnswers = new Function(`${collect}; return collectQuestionAnswers;`)();
-    const root = { querySelectorAll: () => [{ value: "US" }], querySelector: () => ({ value: "Canada" }) };
+    const root = {
+      querySelectorAll: () => [{ value: "US" }],
+      querySelector: () => ({ value: "Canada" }),
+    };
     expect(collectAnswers(root, [{ question: "Where?" }]).answers).toEqual({ "Where?": "Canada" });
   });
 
   it("renders async titles, string options and free-text-only questions after an accepted receipt", () => {
     const html = renderConsole(view);
-    const questionsCode = html.slice(html.indexOf("  function renderQuestions("), html.indexOf("  function renderPlan("));
-    const helpers = html.slice(html.indexOf("  function isQuestionTool("), html.indexOf("  function toolBlockKey("));
+    const questionsCode = html.slice(
+      html.indexOf("  function renderQuestions("),
+      html.indexOf("  function renderPlan("),
+    );
+    const helpers = html.slice(
+      html.indexOf("  function isQuestionTool("),
+      html.indexOf("  function toolBlockKey("),
+    );
     const render = new Function(`
       var questionRenderSequence=0;
       function el(tag,cls,text){ return {tag,className:cls,text,children:[],appendChild(child){this.children.push(child);},setAttribute(){}}; }
@@ -1571,7 +1611,10 @@ describe("renderConsole", () => {
       return renderQuestions;
     `)();
     const meta = { id: "q1", name: "request_user_input_async", result: '{"accepted":true}' };
-    const rendered = render([{ title: "Where?", options: ["US", "Canada"] }, { title: "Details?" }], meta);
+    const rendered = render(
+      [{ title: "Where?", options: ["US", "Canada"] }, { title: "Details?" }],
+      meta,
+    );
     const [choiceCard, freeCard, actions] = rendered.el.children;
     expect(choiceCard.children[0].text).toBe("Where?");
     expect(choiceCard.children[1].children[0].value).toBe("US");
@@ -1685,18 +1728,19 @@ describe("renderConsole", () => {
     expect(html).toContain("var check=el('span','selectopt-check','✓');");
   });
 
-  it("renders a persisted one-click dark theme toggle", () => {
+  it("renders theme controls in the settings panel", () => {
     const html = renderConsole(view);
-    expect(html).toContain('id="themeToggle"');
-    expect(html).toContain("saveVaultUiState({theme:next});");
+    expect(html).toContain('id="settingsToggle"');
+    expect(html).toContain('<dialog class="settings-panel"');
+    expect(html).toContain("persistTheme({theme:next});");
     expect(html).toContain('html[data-theme="dark"]');
-    expect(html).toContain("function toggleTheme()");
-    expect(html).toContain("byId('themeToggle').onclick=toggleTheme;");
+    expect(html).toContain("function changeTheme(theme)");
+    expect(html).toContain("byId('settingsToggle').onclick=openSettings;");
   });
 
   it("renders a filter-driven middle chats panel from the sidebar card component", () => {
     const html = renderConsole(view);
-    const themeToggle = html.indexOf('id="themeToggle"');
+    const themeToggle = html.indexOf('id="settingsToggle"');
     const panelToggle = html.indexOf('id="sessionPanelToggle"');
     const panel = html.indexOf('id="sessionPanel"');
     const main = html.indexOf('<div class="main">');
@@ -1705,21 +1749,26 @@ describe("renderConsole", () => {
     expect(panelToggle).toBeGreaterThan(themeToggle);
     expect(panel).toBeGreaterThan(panelToggle);
     expect(main).toBeGreaterThan(panel);
-    expect(html).toContain("grid-template-columns: repeat(auto-fill, minmax(300px, 1fr))");
+    expect(html).toContain(
+      "grid-template-columns: var(--session-panel-grid-columns, repeat(auto-fill, minmax(300px, 1fr)))",
+    );
     expect(html).toContain("sidebarVisibleSessions.forEach(function(s,index){");
     expect(html).toContain(
       "if(index===boundary) fragment.appendChild(buildSessionPinDivider('panel'));",
     );
     expect(html).toContain("fragment.appendChild(buildSessionRow(s,'panel'));");
     expect(html).toContain("function setSessionPanelOpen(open,persist)");
-    expect(html).toContain("localStorage.setItem(SESSION_PANEL_OPEN_KEY,sessionPanelOpen?'1':'0')");
+    expect(html).toContain("saveInstanceLayout({sessionPanelOpen:sessionPanelOpen});");
     expect(html).toContain("byId('sessionPanelToggle').onclick=toggleSessionPanel;");
   });
 
-  it("limits overflowing tags only on mobile without collapsing them", () => {
+  it("scrolls the full tags module when it exceeds the sidebar height", () => {
     const html = renderConsole(view);
-    const mobile = html.slice(html.indexOf("@media (max-width: 760px)"));
-    expect(mobile).toContain(".tagchips { max-height: 35dvh; overflow-y: auto; }");
+    expect(html).toContain(
+      ".tagbar.overflowing { overflow-y: auto; overscroll-behavior: contain; }",
+    );
+    expect(html).toContain('class="session-list-region"><div id="list"></div>');
+    expect(html).not.toContain("max-height: 35dvh");
   });
 
   it("renders a clear brand and refreshes throughput stats without reloading", () => {
@@ -1844,7 +1893,7 @@ describe("renderConsole", () => {
     );
     expect(html).toContain("background: color-mix(in srgb, var(--surface-2) 88%, var(--surface));");
     expect(html).toContain(
-      'html[data-theme="dark"] .topstack { box-shadow: 0 8px 20px -16px rgba(0,0,0,0.72); }',
+      'html[data-theme="dark"] .topstack { box-shadow: 0 8px 20px -16px var(--theme-chat-header-shadow); }',
     );
     expect(html).toContain(".latestpin { display: none; border: 0;");
     expect(html).toContain(".pinitem { width: 100%; min-width: 0;");
@@ -1856,7 +1905,9 @@ describe("renderConsole", () => {
       "item.setAttribute('aria-label',jumpLabel+(previewText?': '+previewText:''));",
     );
     expect(html).toContain(".pinrole { flex-shrink: 0;");
-    expect(html).toContain("color: #64748b; border: 0; background: transparent; padding: 0;");
+    expect(html).toContain(
+      "color: var(--theme-chat-pinned-role-foreground); border: 0; background: transparent; padding: 0;",
+    );
     expect(html).not.toContain("Latest you");
     expect(html).not.toContain("latest · you");
     expect(html).not.toContain("latestPinJump");
@@ -2321,7 +2372,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function normalizeHoverTitles(root)");
     expect(html).toContain("setupHoverTips();");
     expect(html).toContain("attributeFilter:['title']");
-    expect(html).toContain("btn.title = dark ? 'switch to light theme' : 'switch to dark theme';");
+    expect(html).toContain('title="Settings" aria-label="Settings"');
   });
 
   it("shows custom tag activity on the actual hovered tag button", () => {
@@ -2349,15 +2400,19 @@ describe("renderConsole", () => {
     expect(html).toContain("setForkButtonLabel(b,'fork with '+vendor);");
     expect(html).toContain("badge.classList.add('editable');");
     expect(html).toContain("badge.onkeydown=function(ev)");
-    expect(html).toContain('html[data-theme="dark"] .tagadd-compact:hover,');
     expect(html).toContain(
-      'html[data-theme="dark"] .it-tagadd:hover { color: #99f6e4; background: rgba(20,184,166,0.16);',
+      'html[data-theme="dark"] .tagadd-compact:hover { color: var(--theme-tag-add-hover-foreground);',
+    );
+    expect(html).toContain(
+      'html[data-theme="dark"] .it-tagadd:hover { color: var(--theme-tag-add-hover-foreground); background: var(--theme-tag-add-hover-background);',
     );
   });
 
   it("opens the new-session form as an overlay with inline tags and a stable pending button", () => {
     const html = renderConsole(view);
-    expect(html).toContain(".newsession-anchor { position: relative; z-index: 70; }");
+    expect(html).toContain(
+      ".newsession-anchor { position: relative; z-index: 70; flex-shrink: 0; }",
+    );
     expect(html).toContain(".newbox { position: absolute; z-index: 70; top: calc(100% + 0.4rem);");
     expect(html).toContain(
       ".newbox.panel-hosted { position: fixed; right: auto; max-width: 36rem; }",
@@ -2448,7 +2503,7 @@ describe("renderConsole", () => {
     expect(html).toContain('window.__SCHEDULES__ = [{"id":"run-1"');
   });
 
-  it("shows all comment threads on their parent session cards", () => {
+  it("shows pinned comment threads on their parent session cards", () => {
     const html = renderConsole(view);
     expect(html).toContain(".it-comment { flex-shrink: 0; display: inline-flex;");
     expect(html).toContain(
@@ -2463,7 +2518,7 @@ describe("renderConsole", () => {
     );
     expect(html).toContain("function sidebarCommentThreadsForSession(s)");
     expect(html).toContain("function openSidebarCommentForSession(s)");
-    expect(html).toContain("return thread && commentBelongsToSession(thread,s) ? thread : null;");
+    expect(html).toContain("return pinnedCommentThreadsForSession(s).sort(function(a,b){");
     expect(html).toContain("badge.classList.toggle('generating',generatingCount>0);");
     expect(html).toContain(
       "badge.classList.toggle('read',threadCount>0&&unreadCount===0&&generatingCount===0);",
@@ -2511,7 +2566,9 @@ describe("renderConsole", () => {
     expect(html).toContain("defs.push(untagged); seen[untagged.key]=true;");
     expect(html).toContain("def.kind==='untagged'?' untagged':'");
     expect(html).toContain(".gtag.untagged { border-style: dashed;");
-    expect(html).toContain(".gtag.untagged.on { border-style: solid; border-color: #475569;");
+    expect(html).toContain(
+      ".gtag.untagged.on { border-style: solid; border-color: var(--theme-tag-activeuntagged-border);",
+    );
     expect(html).toContain("btn.appendChild(el('span','gtagcount',String(count)));");
     expect(html).toContain(".gtagcount { margin-left: 0.32rem; font-size: 0.58rem;");
     expect(html).toContain(".gtag.deletable .gtagbtn { padding-right: 0.18rem; }");
@@ -2522,10 +2579,10 @@ describe("renderConsole", () => {
     expect(html).toContain("byId('tagSearchClear').onclick=function()");
     expect(html).toContain("renderTagFilters(); renderSidebar();");
     expect(html).toContain(
-      ".tagbar .taghead { display: flex; flex-wrap: wrap; align-items: flex-end;",
+      ".tagbar .taghead { display: flex; flex-wrap: wrap; align-items: center;",
     );
     expect(html).toContain(
-      ".tagmode-toggle { appearance: none; align-self: flex-end; min-width: 0; padding: 0.05rem 0;",
+      ".tagmode-toggle { appearance: none; align-self: center; min-width: 0; padding: 0.05rem 0;",
     );
     expect(html).toContain(
       ".instant-tip:hover::after, .instant-tip:focus-visible::after { opacity: 1; visibility: visible; }",
@@ -2662,7 +2719,7 @@ describe("renderConsole", () => {
     const html = renderConsole(view);
     expect(html).toContain('id="bulkArchiveSeen"');
     expect(html).toContain(
-      ".bulkarchive { align-self: flex-end; flex-shrink: 0; min-width: 0; font-size: 0.62rem;",
+      ".bulkarchive { align-self: center; flex-shrink: 0; min-width: 0; font-size: 0.62rem;",
     );
     expect(html).toContain("function sessionMatchesBulkArchiveScope(s)");
     expect(html).toContain("function sessionMatchesSidebarSearch(s)");

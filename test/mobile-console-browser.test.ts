@@ -83,7 +83,7 @@ describe("mobile console initialization and layout", () => {
       const original = globalThis.fetch.bind(globalThis);
       let historyReads = 0;
       globalThis.fetch = (input, init) => {
-        if (String(input).includes('/chat/messages') && ++historyReads === 1) {
+        if (String(input).includes("/chat/messages") && ++historyReads === 1) {
           // Even a transport whose body ignores abort must not hold the UI slot.
           return Promise.resolve({ ok: true, json: () => new Promise(() => {}) } as Response);
         }
@@ -92,9 +92,12 @@ describe("mobile console initialization and layout", () => {
     });
     await page.route("**/*", async (route) => {
       const pathname = new URL(route.request().url()).pathname;
-      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      if (pathname === "/")
+        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
       else if (pathname === "/chat/messages") {
-        await route.fulfill({ json: [{ role: "assistant", text: "Recovered history", tools: [] }] });
+        await route.fulfill({
+          json: [{ role: "assistant", text: "Recovered history", tools: [] }],
+        });
       } else await route.fulfill({ json: { ok: true, items: [] } });
     });
     try {
@@ -102,7 +105,9 @@ describe("mobile console initialization and layout", () => {
       await page.locator("#list .item").first().click();
       await expect.poll(() => page.locator("#msgs").textContent()).toContain("Loading");
       await page.clock.fastForward(31_000);
-      await expect.poll(() => page.locator("#msgs").textContent()).toContain("Could not load conversation");
+      await expect
+        .poll(() => page.locator("#msgs").textContent())
+        .toContain("Could not load conversation");
       await page.getByRole("button", { name: "Retry", exact: true }).click();
       await expect.poll(() => page.locator("#msgs").textContent()).toContain("Recovered history");
     } finally {
@@ -116,14 +121,27 @@ describe("mobile console initialization and layout", () => {
     let historyReads = 0;
     await page.route("**/*", async (route) => {
       const pathname = new URL(route.request().url()).pathname;
-      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      if (pathname === "/")
+        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
       else if (pathname === "/chat/messages") {
         historyReads++;
-        await route.fulfill({ json: [{ role: "assistant", text: historyReads === 1 ? "Before sleep" : "After wake", tools: [] }] });
+        await route.fulfill({
+          json: [
+            {
+              role: "assistant",
+              text: historyReads === 1 ? "Before sleep" : "After wake",
+              tools: [],
+            },
+          ],
+        });
       } else if (pathname === "/session-index") {
-        await route.fulfill({ json: { kind: "session_index", epoch: "wake", revision: 1, sessions: view.sessions } });
+        await route.fulfill({
+          json: { kind: "session_index", epoch: "wake", revision: 1, sessions: view.sessions },
+        });
       } else if (pathname === "/comment-index") {
-        await route.fulfill({ json: { kind: "comment_index", epoch: "wake", generatedAt: 1, comments: [] } });
+        await route.fulfill({
+          json: { kind: "comment_index", epoch: "wake", generatedAt: 1, comments: [] },
+        });
       } else await route.fulfill({ json: { ok: true, items: [] } });
     });
     try {
@@ -131,23 +149,38 @@ describe("mobile console initialization and layout", () => {
       await page.locator("#list .item").first().click();
       await expect.poll(() => page.locator("#msgs").textContent()).toContain("Before sleep");
       await page.evaluate(async () => {
-        const target = globalThis as unknown as { __mobileLive: { onmessage: (event: { data: string; lastEventId: string }) => void } };
+        const target = globalThis as unknown as {
+          __mobileLive: { onmessage: (event: { data: string; lastEventId: string }) => void };
+        };
         target.__mobileLive.onmessage({ data: JSON.stringify({ active: [] }), lastEventId: "42" });
         await new Promise((resolve) => setTimeout(resolve, 0));
         const browserGlobal = globalThis as unknown as {
           dispatchEvent(event: Event): boolean;
           PageTransitionEvent: new (type: string, init: { persisted: boolean }) => Event;
         };
-        browserGlobal.dispatchEvent(new browserGlobal.PageTransitionEvent("pagehide", { persisted: true }));
-        browserGlobal.dispatchEvent(new browserGlobal.PageTransitionEvent("pageshow", { persisted: true }));
+        browserGlobal.dispatchEvent(
+          new browserGlobal.PageTransitionEvent("pagehide", { persisted: true }),
+        );
+        browserGlobal.dispatchEvent(
+          new browserGlobal.PageTransitionEvent("pageshow", { persisted: true }),
+        );
       });
-      await expect.poll(() => page.evaluate(() => {
-        const target = globalThis as unknown as { __mobileSources: { url: string; closed: boolean }[] };
-        return target.__mobileSources.map((source) => ({ url: source.url, closed: source.closed }));
-      })).toEqual([
-        { url: "/chat/live-stream", closed: true },
-        { url: "/chat/live-stream?lastEventId=42", closed: false },
-      ]);
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const target = globalThis as unknown as {
+              __mobileSources: { url: string; closed: boolean }[];
+            };
+            return target.__mobileSources.map((source) => ({
+              url: source.url,
+              closed: source.closed,
+            }));
+          }),
+        )
+        .toEqual([
+          { url: "/chat/live-stream", closed: true },
+          { url: "/chat/live-stream?lastEventId=42", closed: false },
+        ]);
       expect(historyReads).toBe(1);
       await announce(page, { active: [], queues: {} });
       await expect.poll(() => page.locator("#msgs").textContent()).toContain("After wake");
@@ -164,7 +197,8 @@ describe("mobile console initialization and layout", () => {
     const modelReads: string[] = [];
     await page.route("**/*", async (route) => {
       const pathname = new URL(route.request().url()).pathname;
-      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      if (pathname === "/")
+        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
       else {
         if (pathname.startsWith("/models/")) modelReads.push(pathname);
         await route.fulfill({ json: { ok: true, models: [], items: [] } });
@@ -188,14 +222,19 @@ describe("mobile console initialization and layout", () => {
     await stubLiveStream(page);
     let requests = 0;
     let release = () => {};
-    const slow = new Promise<void>((resolve) => { release = resolve; });
+    const slow = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await page.route("**/*", async (route) => {
       const pathname = new URL(route.request().url()).pathname;
-      if (pathname === "/") await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      if (pathname === "/")
+        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
       else if (pathname === "/comment-index") {
         const generatedAt = ++requests;
         if (generatedAt === 1) await slow;
-        await route.fulfill({ json: { kind: "comment_index", epoch: "comments", generatedAt, comments: [] } });
+        await route.fulfill({
+          json: { kind: "comment_index", epoch: "comments", generatedAt, comments: [] },
+        });
       } else await route.fulfill({ json: { ok: true, items: [] } });
     });
     const control = { kind: "comment_index", epoch: "comments", snapshotUrl: "/comment-index" };
@@ -205,8 +244,8 @@ describe("mobile console initialization and layout", () => {
       await expect.poll(() => requests).toBe(1);
       await announce(page, { ...control, generatedAt: 2 });
       expect(requests).toBe(1);
-      const caughtUp = page.waitForResponse((response) =>
-        new URL(response.url()).pathname === "/comment-index" && requests === 2,
+      const caughtUp = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/comment-index" && requests === 2,
       );
       release();
       await caughtUp;
@@ -320,9 +359,17 @@ describe("mobile console initialization and layout", () => {
   it("resizes both dividers with real touch pointers and releases a cancelled drag", async () => {
     const page = await browser.newPage({ viewport: { width: 1400, height: 800 }, hasTouch: true });
     await stubLiveStream(page);
+    let layout: NonNullable<NonNullable<ConsoleView["vaultState"]>["layout"]> = {};
     await page.route("**/*", async (route) => {
-      if (new URL(route.request().url()).pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+      const pathname = new URL(route.request().url()).pathname;
+      if (pathname === "/") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({ ...view, vaultState: { layout } }),
+        });
+      } else if (pathname === "/vault/ui-state" && route.request().method() === "POST") {
+        layout = { ...layout, ...route.request().postDataJSON().layout };
+        await route.fulfill({ json: { ok: true } });
       } else await route.fulfill({ json: { ok: true, items: [] } });
     });
     try {
@@ -357,6 +404,8 @@ describe("mobile console initialization and layout", () => {
         .toBe(380);
       expect(await page.locator(".dragging").count()).toBe(0);
       expect(await page.locator("body").evaluate((n) => n.style.userSelect)).toBe("");
+      await expect.poll(() => layout.sidebarWidth).toBe(250);
+      await expect.poll(() => layout.sessionPanelWidth).toBe(380);
       await page.reload({ waitUntil: "domcontentloaded" });
       expect(await page.locator(".side").evaluate((n) => n.getBoundingClientRect().width)).toBe(
         250,

@@ -392,7 +392,9 @@ describe("GET /", () => {
       const reader = stream.body?.getReader();
       if (!reader) throw new Error("missing stream");
       try {
-        const text = await readSseUntil(reader, (value) => value.includes('"kind":"comment_index"'));
+        const text = await readSseUntil(reader, (value) =>
+          value.includes('"kind":"comment_index"'),
+        );
         const control = sseJsonMessages(text).find((message) => message.kind === "comment_index");
         expect(control).toBeDefined();
         versions.push(control?.generatedAt);
@@ -1193,15 +1195,79 @@ describe("vault UI state", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("validates, shares and atomically updates custom themes", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-theme-api-"));
+    try {
+      const { app, config } = appWithSpy(resolveConfig({ positionals: [root] }));
+      const send = (body: unknown) =>
+        app.request("/vault/ui-state", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const midnight = { name: "Midnight", type: "dark", colors: { background: "#102030" } };
+      expect((await send({ theme: "midnight", customThemes: { midnight } })).status).toBe(200);
+      expect(
+        (await send({ customThemes: { paper: { name: "Paper", type: "light", colors: {} } } }))
+          .status,
+      ).toBe(200);
+      const restarted = appWithSpy(config).app;
+      expect(await (await restarted.request("/")).text()).toContain('"theme":"midnight"');
+      for (const body of [
+        { theme: "missing" },
+        { theme: "constructor" },
+        { customThemes: { dark: midnight } },
+        {
+          theme: "light",
+          customThemes: {
+            midnight: { ...midnight, colors: { background: "url(https://invalid.test)" } },
+          },
+        },
+        { customThemes: { midnight: { ...midnight, colors: { "unknown.color": "#fff" } } } },
+        { customThemes: { midnight: { ...midnight, colors: { background: "rgb(garbage)" } } } },
+        { theme: "midnight", customThemes: { midnight: null } },
+      ])
+        expect((await send(body)).status).toBe(400);
+      expect(readStateDocument(config.workEvents, "ui-state")).toMatchObject({
+        instances: {
+          [config.scopeId]: {
+            theme: "midnight",
+            customThemes: { midnight, paper: { name: "Paper" } },
+          },
+        },
+      });
+      expect((await send({ theme: "dark", customThemes: { midnight: null } })).status).toBe(200);
+      const stored = readStateDocument<{ instances: Record<string, unknown> }>(
+        config.workEvents,
+        "ui-state",
+      ).instances[config.scopeId];
+      expect(stored).toMatchObject({ theme: "dark", customThemes: { paper: { name: "Paper" } } });
+      expect(stored).not.toHaveProperty("customThemes.midnight");
+      expect((await send({ theme: "system" })).status).toBe(200);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("persists browser-independent preferences in the shared Attend data root", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-vault-ui-"));
     const { app, config } = appWithSpy(resolveConfig({ positionals: [root] }));
+    const configPresets = [
+      {
+        id: "fast",
+        name: "high",
+        vendor: "codex",
+        model: "test-model",
+        effort: "high",
+        speed: "fast",
+      },
+    ];
     const res = await app.request("/vault/ui-state", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         theme: "dark",
-        modelPrefs: { codex: { effort: "medium" } },
+        modelPrefs: { codex: { effort: "medium" }, configPresets },
         pinnedTags: ["urgent", "work"],
         hiddenTags: ["stable", "later"],
         shortcuts: [{ id: "s1", text: "Run tests", createdAt: 1, updatedAt: 1 }],
@@ -1228,8 +1294,8 @@ describe("vault UI state", () => {
 
     expect(res.status).toBe(200);
     expect(readStateDocument(config.workEvents, "ui-state")).toMatchObject({
-      theme: "dark",
-      modelPrefs: { codex: { effort: "medium" } },
+      instances: { [config.scopeId]: { theme: "dark" } },
+      modelPrefs: { codex: { effort: "medium" }, configPresets },
       scopes: {
         [config.scopeId]: {
           pinnedTags: ["urgent", "work"],
@@ -1252,6 +1318,7 @@ describe("vault UI state", () => {
     expect(html).toContain("Remember this");
     expect(html).toContain("Review");
     expect(html).toContain("Unassigned review");
+    expect(html).toContain(JSON.stringify(configPresets));
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -1915,6 +1982,22 @@ describe("tag routes", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, tags: ["work", "urgent"] });
+  });
+
+  it("validates and applies batch tag management", async () => {
+    const app = appWithTags();
+    await post(app, "/session/tags?session=s1", { tags: ["work", "urgent", "later"] });
+    for (const body of [
+      { names: [], action: "delete" },
+      { names: [1], action: "unbind" },
+      { names: ["work"], action: "unknown" },
+    ]) {
+      expect((await post(app, "/tags/batch", body)).status).toBe(400);
+    }
+    const unbind = await post(app, "/tags/batch", { names: ["work", "urgent"], action: "unbind" });
+    expect(await unbind.json()).toMatchObject({ ok: true, tags: ["work", "urgent", "later"] });
+    const remove = await post(app, "/tags/batch", { names: ["work", "urgent"], action: "delete" });
+    expect(await remove.json()).toMatchObject({ ok: true, tags: ["later"] });
   });
 
   it("reorders global tags", async () => {
@@ -5991,11 +6074,16 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     const codex = new FakeCodexDriver();
     codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
     const { app } = appWithSpy(undefined, { codex });
-    const submit = () => app.request(`/chat/answer?session=cx-1&cwd=${tmp}&vendor=codex`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ toolUseId: "q1", text: "Company location: US", asyncQuestion: true }),
-    });
+    const submit = () =>
+      app.request(`/chat/answer?session=cx-1&cwd=${tmp}&vendor=codex`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          toolUseId: "q1",
+          text: "Company location: US",
+          asyncQuestion: true,
+        }),
+      });
     expect(await (await submit()).json()).toMatchObject({ ok: true });
     expect(codex.steers).toHaveLength(1);
     expect(codex.sends).toHaveLength(0);
@@ -6126,6 +6214,69 @@ describe("startServer port rollover", () => {
 });
 
 describe("background settings API", () => {
+  it("keeps daemon, themes and layout independent in two instances sharing one database", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-instance-api-"));
+    try {
+      const shared = { uiState: path.join(dir, "ui.json"), workEvents: path.join(dir, "state.db") };
+      const first = appWithSpy({
+        ...resolveConfig({ positionals: [path.join(dir, "first")] }),
+        ...shared,
+      });
+      const send = (app: typeof first.app, route: string, body: unknown) =>
+        app.request(route, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      expect((await send(first.app, "/analyzer/settings", { mode: "off" })).status).toBe(200);
+      expect(
+        (
+          await send(first.app, "/vault/ui-state", {
+            theme: "dark",
+            layout: { sessionPanelColumns: 7, sessionPanelOpen: true, sidebarWidth: 260 },
+          })
+        ).status,
+      ).toBe(200);
+      const second = appWithSpy({
+        ...resolveConfig({ positionals: [path.join(dir, "second")] }),
+        ...shared,
+      });
+      expect(await (await second.app.request("/analyzer/settings")).json()).toMatchObject({
+        mode: "economical",
+      });
+      await send(second.app, "/vault/ui-state", {
+        theme: "light",
+        layout: { sessionPanelColumns: 2 },
+      });
+      await send(second.app, "/analyzer/settings", { mode: "follow" });
+      const reopened = appWithSpy({ ...first.config, port: first.config.port + 10 });
+      const firstHtml = await (await reopened.app.request("/")).text();
+      const state = JSON.parse(firstHtml.match(/window\.__VAULT_STATE__ = (.+);/)?.[1] ?? "null");
+      expect(state).toMatchObject({
+        theme: "dark",
+        layout: { sessionPanelColumns: 7, sessionPanelOpen: true, sidebarWidth: 260 },
+      });
+      expect(await (await reopened.app.request("/analyzer/settings")).json()).toMatchObject({
+        mode: "off",
+      });
+      expect(await (await second.app.request("/analyzer/settings")).json()).toMatchObject({
+        mode: "follow",
+      });
+      for (const layout of [
+        { sessionPanelColumns: 0 },
+        { sessionPanelColumns: 2.5 },
+        { sessionPanelOpen: "yes" },
+        { sidebarWidth: 1 },
+        { sessionPanelWidth: null },
+        { unknown: 2 },
+        {},
+      ])
+        expect((await send(first.app, "/vault/ui-state", { layout })).status).toBe(400);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("persists only valid background choices and leaves work configuration unchanged", async () => {
     const { app, config } = appWithSpy();
     const before = readStateDocument(config.workEvents, "ui-state");
@@ -6137,6 +6288,11 @@ describe("background settings API", () => {
       });
       expect(saved.status).toBe(200);
       expect(await (await app.request("/analyzer/settings")).json()).toMatchObject({ mode });
+      expect(await (await app.request("/chat/live")).json()).toMatchObject({
+        analyzerSettings: { mode },
+      });
+      const html = await (await app.request("/")).text();
+      expect(html).toContain(`window.__ANALYZER_SETTINGS__ = {"mode":"${mode}"`);
     }
     const invalid = await app.request("/analyzer/settings", {
       method: "POST",

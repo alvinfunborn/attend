@@ -105,6 +105,7 @@ function mergeSessionTextItems(target: JsonObject, source: JsonObject, key: stri
 }
 
 function mergeUiState(target: JsonObject, source: JsonObject): void {
+  target.customThemes = { ...record(source.customThemes), ...record(target.customThemes) };
   if (target.theme === undefined && source.theme !== undefined) target.theme = source.theme;
   if (target.focusViews === undefined && Array.isArray(source.focusViews))
     target.focusViews = source.focusViews;

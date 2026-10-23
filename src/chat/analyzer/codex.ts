@@ -46,6 +46,13 @@ with brief "new session", state "done", and priority/etaMin 0.`;
 export class CodexAnalyzer implements SessionAnalyzer {
   readonly vendor = "codex";
 
+  private cancellation = new AbortController();
+
+  cancel(): void {
+    this.cancellation.abort(new Error("Session daemon is off"));
+    this.cancellation = new AbortController();
+  }
+
   constructor(
     private readonly codexSessions: string,
     private readonly execFn: CodexExecFn | null,
@@ -58,7 +65,9 @@ export class CodexAnalyzer implements SessionAnalyzer {
     onSessionId?: (sessionId: string) => void,
     execution?: AnalyzerExecution,
   ): Promise<string | null> {
+    const signal = this.cancellation.signal;
     if (!this.execFn) return null;
+    signal.throwIfAborted();
     const handle = this.execFn({ cwd, prompt: SEED, sandbox: "read-only", ...execution });
     let sessionId: string | null = null;
     await consumeAnalyzerStream(
@@ -72,6 +81,8 @@ export class CodexAnalyzer implements SessionAnalyzer {
         assertAnalyzerModel(execution, ev.model);
       },
       () => handle.kill(),
+      undefined,
+      signal,
     );
     return sessionId;
   }
@@ -85,6 +96,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     uiContext = "",
     execution?: AnalyzerExecution,
   ): Promise<AnalyzerVerdict | null> {
+    const signal = this.cancellation.signal;
     if (!this.execFn) return null;
     const file = await this.findRollout(taskId);
     // Same rationale as ClaudeAnalyzer: keep the real opening goal available to
@@ -96,6 +108,7 @@ export class CodexAnalyzer implements SessionAnalyzer {
     const pendingTurns = observedTurns
       .filter((turn) => !knownTurnIds.has(turn.turnId))
       .slice(0, MAX_PENDING_TURNS_PER_ANALYSIS);
+    signal.throwIfAborted();
     const handle = this.execFn({
       cwd,
       prompt: requestPrompt(transcript, pendingTurns, uiContext),
@@ -111,6 +124,8 @@ export class CodexAnalyzer implements SessionAnalyzer {
         for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
       },
       () => handle.kill(),
+      undefined,
+      signal,
     );
     const analysis = parseAnalysis(text);
     if (!analysis) return null;
@@ -128,9 +143,11 @@ export class CodexAnalyzer implements SessionAnalyzer {
     uiContext = "",
     execution?: AnalyzerExecution,
   ): Promise<string | null> {
+    const signal = this.cancellation.signal;
     if (!this.execFn) return null;
     const file = await this.findRollout(taskId);
     const transcript = file ? (await this.readContext(file, taskId)).transcript : "";
+    signal.throwIfAborted();
     const handle = this.execFn({
       cwd,
       prompt: avoidancePromptRequest(transcript, uiContext),
@@ -146,6 +163,8 @@ export class CodexAnalyzer implements SessionAnalyzer {
         for (const u of toUiEventsFromCodex(ev)) if (u.kind === "assistant_text") text += u.text;
       },
       () => handle.kill(),
+      undefined,
+      signal,
     );
     return parseAvoidancePrompt(text);
   }

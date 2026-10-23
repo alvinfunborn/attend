@@ -6,6 +6,60 @@ import { SqliteDocument } from "../src/core/state-database.js";
 import { VaultUiStateStore } from "../src/core/ui-state.js";
 
 describe("VaultUiStateStore", () => {
+  it.each([false, true])(
+    "isolates appearance and layout across instances (SQLite=%s)",
+    (sqlite) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-instance-ui-"));
+      try {
+        const file = path.join(dir, "ui-state.json");
+        const db = sqlite ? path.join(dir, "state.db") : undefined;
+        fs.writeFileSync(file, JSON.stringify({ theme: "dark" }));
+        const first = new VaultUiStateStore(file, "scope:first", db);
+        first.patch({
+          theme: "custom",
+          customThemes: { custom: { name: "First", type: "dark", colors: {} } },
+          layout: {
+            sessionPanelColumns: 7,
+            sessionPanelOpen: true,
+            sessionPanelWidth: 1500,
+            sidebarWidth: 240,
+          },
+          sessionTitles: { shared: "Shared session" },
+        });
+        const second = new VaultUiStateStore(file, "scope:second", db);
+        expect(second.get().theme).toBe("dark");
+        expect(second.get().customThemes).toBeUndefined();
+        expect(second.get().layout).toBeUndefined();
+        expect(second.get().sessionTitles?.shared).toBe("Shared session");
+        second.patch({ theme: "light", layout: { sessionPanelColumns: 2 } });
+        first.patch({ layout: { sessionPanelColumns: "auto" } });
+        expect(new VaultUiStateStore(file, "scope:first", db).get()).toMatchObject({
+          theme: "custom",
+          layout: {
+            sessionPanelColumns: "auto",
+            sessionPanelOpen: true,
+            sessionPanelWidth: 1500,
+            sidebarWidth: 240,
+          },
+        });
+        expect(second.get()).toMatchObject({ theme: "light", layout: { sessionPanelColumns: 2 } });
+        const combined = new VaultUiStateStore(file, "scope:combined", db, [
+          "scope:first",
+          "scope:second",
+        ]);
+        combined.patch({ theme: "system", layout: { sessionPanelColumns: 3 } });
+        expect(first.get().theme).toBe("custom");
+        expect(second.get().layout?.sessionPanelColumns).toBe(2);
+        expect(
+          new VaultUiStateStore(file, "scope:combined", db, ["scope:first", "scope:second"]).get()
+            .theme,
+        ).toBe("system");
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("keeps Inbox todos scope-local and merges them in a multi-directory view", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-ui-inbox-"));
     const file = path.join(dir, "ui-state.json");

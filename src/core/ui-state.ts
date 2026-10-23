@@ -7,9 +7,22 @@ import {
   sessionRunConfigKey,
 } from "./session-run-config.js";
 import { SqliteDocument } from "./state-database.js";
+import { type ThemeDefinition, cleanCustomThemes, validThemeId } from "./themes.js";
 
-export interface VaultUiState {
-  theme?: "light" | "dark";
+export interface UiLayoutPreferences {
+  sessionPanelColumns?: "auto" | number;
+  sessionPanelOpen?: boolean;
+  sessionPanelWidth?: number;
+  sidebarWidth?: number;
+}
+
+interface InstanceUiPreferences {
+  theme?: string;
+  customThemes?: Record<string, ThemeDefinition>;
+  layout?: UiLayoutPreferences;
+}
+
+export interface VaultUiState extends InstanceUiPreferences {
   focusViews?: unknown[];
   modelPrefs?: Record<string, unknown>;
   /** Exact/best-known configuration Attend used for a stable provider session. */
@@ -51,6 +64,7 @@ interface PersistedScopeUiState {
 
 interface PersistedVaultUiState extends VaultUiState {
   scopes?: Record<string, PersistedScopeUiState>;
+  instances?: Record<string, InstanceUiPreferences>;
 }
 
 interface PersistedComposerTextState {
@@ -62,7 +76,9 @@ interface PersistedComposerTextState {
 }
 
 export interface VaultUiStatePatch {
-  theme?: "light" | "dark";
+  layout?: UiLayoutPreferences;
+  theme?: string;
+  customThemes?: Record<string, ThemeDefinition | null>;
   focusViews?: unknown[];
   focusViewPatch?: Record<string, unknown | null>;
   modelPrefs?: Record<string, unknown | null>;
@@ -170,6 +186,15 @@ export class VaultUiStateStore {
     this.memberScopeIds = [
       ...new Set(memberScopeIds.map((id) => id.trim()).filter((id) => id && id !== this.scopeId)),
     ];
+    // Snapshot the former machine-wide appearance once for each stable instance.
+    // Future changes never flow through the legacy shared fields.
+    this.data.transact((state) => {
+      if (Object.hasOwn(state.instances ?? {}, this.scopeId))
+        return { result: undefined, changed: false };
+      state.instances ??= {};
+      state.instances[this.scopeId] = cleanInstancePreferences(state);
+      return { result: undefined, changed: true };
+    });
     if (this.memberScopeIds.length) this.flattenCombinedScope();
     if (this.composerText) {
       const legacy = this.data.read();
@@ -189,6 +214,10 @@ export class VaultUiStateStore {
     const composerText = this.composerText?.read();
     const {
       scopes: _scopes,
+      instances: _instances,
+      theme: _legacyTheme,
+      customThemes: _legacyThemes,
+      layout: _legacyLayout,
       focusViews: legacyFocusViews,
       pinnedTags: legacyPinnedTags,
       hiddenTags: legacyHiddenTags,
@@ -201,6 +230,7 @@ export class VaultUiStateStore {
     const inboxTodos = this.scopeInboxTodos(state, legacyInboxTodos);
     return structuredClone({
       ...shared,
+      ...state.instances?.[this.scopeId],
       ...(composerText
         ? {
             shortcuts: composerText.shortcuts,
@@ -305,7 +335,26 @@ export class VaultUiStateStore {
 
   patch(next: VaultUiStatePatch): VaultUiState {
     this.data.update((state) => {
-      if (next.theme === "light" || next.theme === "dark") state.theme = next.theme;
+      state.instances ??= {};
+      const preferences = state.instances[this.scopeId] ?? {};
+      state.instances[this.scopeId] = preferences;
+      if (next.customThemes) {
+        const themes = { ...preferences.customThemes };
+        for (const [id, theme] of Object.entries(next.customThemes)) {
+          if (theme === null) delete themes[id];
+          else Object.assign(themes, cleanCustomThemes({ [id]: theme }));
+        }
+        preferences.customThemes = cleanCustomThemes(themes);
+      }
+      if (validThemeId(next.theme)) preferences.theme = next.theme;
+      if (
+        preferences.theme &&
+        !["light", "dark", "system"].includes(preferences.theme) &&
+        !Object.hasOwn(preferences.customThemes || {}, preferences.theme)
+      )
+        preferences.theme = "light";
+      if (next.layout)
+        preferences.layout = { ...preferences.layout, ...cleanLayoutPreferences(next.layout) };
       if (
         Array.isArray(next.focusViews) ||
         next.focusViewPatch ||
@@ -724,8 +773,18 @@ function patchChatGroups(
 function normalizeUiState(value: unknown): PersistedVaultUiState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const input = value as VaultUiState;
+  const customThemes = cleanCustomThemes(input.customThemes);
   return {
-    ...(input.theme === "light" || input.theme === "dark" ? { theme: input.theme } : {}),
+    ...(validThemeId(input.theme)
+      ? {
+          theme:
+            ["light", "dark", "system"].includes(input.theme) ||
+            Object.hasOwn(customThemes, input.theme)
+              ? input.theme
+              : "light",
+        }
+      : {}),
+    ...(input.customThemes ? { customThemes } : {}),
     ...(Array.isArray(input.focusViews) ? { focusViews: structuredClone(input.focusViews) } : {}),
     ...(input.modelPrefs && typeof input.modelPrefs === "object"
       ? { modelPrefs: structuredClone(input.modelPrefs) }
@@ -776,6 +835,15 @@ function normalizeUiState(value: unknown): PersistedVaultUiState {
       ? { commentThreads: cleanCommentThreads(input.commentThreads) }
       : {}),
     ...cleanScopes((input as PersistedVaultUiState).scopes),
+    ...((input as PersistedVaultUiState).instances
+      ? {
+          instances: Object.fromEntries(
+            Object.entries((input as PersistedVaultUiState).instances ?? {})
+              .filter(([id]) => id && !["__proto__", "constructor", "prototype"].includes(id))
+              .map(([id, preferences]) => [id, cleanInstancePreferences(preferences)]),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1009,4 +1077,53 @@ function cleanStringRecord(input: Record<string, unknown>): Record<string, strin
     if (key && value) out[key] = value;
   }
   return out;
+}
+
+/** Only validated, instance-local layout values are persisted. */
+export function cleanLayoutPreferences(value: unknown): UiLayoutPreferences {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const input = value as UiLayoutPreferences;
+  const out: UiLayoutPreferences = {};
+  if (
+    input.sessionPanelColumns === "auto" ||
+    (typeof input.sessionPanelColumns === "number" &&
+      Number.isSafeInteger(input.sessionPanelColumns) &&
+      input.sessionPanelColumns >= 1)
+  )
+    out.sessionPanelColumns = input.sessionPanelColumns;
+  if (typeof input.sessionPanelOpen === "boolean") out.sessionPanelOpen = input.sessionPanelOpen;
+  if (
+    typeof input.sessionPanelWidth === "number" &&
+    Number.isFinite(input.sessionPanelWidth) &&
+    input.sessionPanelWidth >= 320 &&
+    input.sessionPanelWidth <= 100_000
+  )
+    out.sessionPanelWidth = input.sessionPanelWidth;
+  if (
+    typeof input.sidebarWidth === "number" &&
+    Number.isFinite(input.sidebarWidth) &&
+    input.sidebarWidth >= 200 &&
+    input.sidebarWidth <= 720
+  )
+    out.sidebarWidth = input.sidebarWidth;
+  return out;
+}
+
+function cleanInstancePreferences(value: unknown): InstanceUiPreferences {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const input = value as InstanceUiPreferences;
+  const customThemes = cleanCustomThemes(input.customThemes);
+  return {
+    ...(validThemeId(input.theme)
+      ? {
+          theme:
+            ["light", "dark", "system"].includes(input.theme) ||
+            Object.hasOwn(customThemes, input.theme)
+              ? input.theme
+              : "light",
+        }
+      : {}),
+    ...(input.customThemes ? { customThemes } : {}),
+    ...(input.layout ? { layout: cleanLayoutPreferences(input.layout) } : {}),
+  };
 }

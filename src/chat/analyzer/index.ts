@@ -17,6 +17,8 @@ export interface AnalyzerVerdict {
  */
 export interface SessionAnalyzer {
   readonly vendor: string;
+  /** Stop all background work, including seeds and pending context reads. */
+  cancel?(): void;
   /**
    * Create the analyzer daemon session for a task in `cwd` (it shares the cwd so
    * it sees the same context). Returns its session id, or null if this vendor

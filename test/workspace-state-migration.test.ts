@@ -39,6 +39,10 @@ describe("migrateWorkspaceState", () => {
             },
           ],
         },
+        theme: "paper",
+        customThemes: {
+          paper: { name: "Paper", type: "light", colors: { background: "#fafafa" } },
+        },
         sessionTitles: { s1: "Local title" },
         sessionRunConfigs: {
           "claude:s1": { model: "claude-opus", effort: "high", updatedAt: 4 },
@@ -102,6 +106,10 @@ describe("migrateWorkspaceState", () => {
     expect(new TagStore(config.tags, config.workEvents).tagsFor("s1")).toEqual(["work"]);
     expect(new VaultUiStateStore(config.uiState, undefined, config.workEvents).get()).toMatchObject(
       {
+        theme: "paper",
+        customThemes: {
+          paper: { name: "Paper", type: "light", colors: { background: "#fafafa" } },
+        },
         sessionTitles: { s1: "Local title" },
         sessionRunConfigs: {
           "claude:s1": { model: "claude-opus", effort: "high", updatedAt: 4 },

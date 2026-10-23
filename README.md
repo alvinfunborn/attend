@@ -192,6 +192,8 @@ attend ~/projects/product-b --port 5051
 
 The instances share Attend-owned state in `~/.attend/attend.sqlite3`, while each instance only displays sessions inside its command-line scope. The database uses WAL mode and indexed event tables; smaller structured state such as titles, statuses, pins, queues, tags, and analyzer results uses transactional document rows. A multi-directory launch is only an aggregate view: it merges directory-scoped tags, Focus views, and tag-display preferences (pinned/hidden), and writes changes directly to the individual directory scopes instead of owning a separate combined scope. Legacy global JSON and older `<workspace>/.attend/` state are imported idempotently and retained as migration backups. Original transcripts remain in each vendor CLI's own storage.
 
+Theme selection, custom themes, daemon mode, and panel layout are saved per directory scope in the shared database. Restarting or changing ports preserves that scope’s preferences; another scope (including a different multi-directory combination) has independent preferences. With no directory filter, Attend uses the all-sessions scope.
+
 Retention is data-specific: activity and reconstructable telemetry expire, while queued work and explicit user preferences do not. See [Storage and retention](docs/storage-retention.md).
 
 Or install the `attend` command globally:
