@@ -5,9 +5,12 @@ import config from "./config.mjs";
 import { content } from "./content.mjs";
 import { renderShowcase } from "./showcase.mjs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const out = path.join(root, "_site");
+const favicon = await fs.readFile(path.join(root, "website/favicon.svg"));
+const faviconName = `favicon-${createHash("sha256").update(favicon).digest("hex").slice(0, 12)}.svg`;
 const escape = (s) =>
   String(s).replace(
     /[&<>"']/g,
@@ -51,7 +54,7 @@ function render(c) {
     )
     .join("");
   return `<!doctype html>
-<html lang="${c.lang}" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#07101f"><title>${escape(c.title)}</title><meta name="description" content="${escape(c.description)}"><link rel="canonical" href="${canonical}"><meta property="og:type" content="website"><meta property="og:title" content="${escape(c.title)}"><meta property="og:description" content="${escape(c.description)}"><meta property="og:url" content="${canonical}"><meta property="og:image" content="${config.url}assets/console.jpg"><meta name="twitter:card" content="summary_large_image"><link rel="icon" href="${base}favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="${base}styles.css"><link rel="stylesheet" href="${base}product-theme.css"><script src="${base}site.js" defer></script></head>
+<html lang="${c.lang}" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#07101f"><title>${escape(c.title)}</title><meta name="description" content="${escape(c.description)}"><link rel="canonical" href="${canonical}"><meta property="og:type" content="website"><meta property="og:title" content="${escape(c.title)}"><meta property="og:description" content="${escape(c.description)}"><meta property="og:url" content="${canonical}"><meta property="og:image" content="${config.url}assets/console.jpg"><meta name="twitter:card" content="summary_large_image"><link rel="icon" href="${base}${faviconName}" type="image/svg+xml" sizes="any"><link rel="stylesheet" href="${base}styles.css"><link rel="stylesheet" href="${base}product-theme.css"><script src="${base}site.js" defer></script></head>
 <body><a class="skip" href="#main">Skip to content</a>
 <header class="header wrap"><a class="brand" href="${base}" aria-label="Attend home">${mark}<span>Attend</span></a><nav aria-label="Main navigation">${c.nav.map((n, i) => link(["#organize", "#analysis", "#metrics", "#install"][i], escape(n))).join("")}</nav><div class="nav-end"><button id="website-theme" type="button" aria-label="Switch website to light theme" title="Switch theme">☼</button>${link(config.repository, "GitHub " + arrow, "nav-github")}</div></header>
 <main id="main">
@@ -74,11 +77,12 @@ execFileSync(process.execPath, ["--import", "tsx", "website/demo.ts"], {
   cwd: root,
   stdio: "inherit",
 });
+await fs.writeFile(path.join(out, faviconName), favicon);
 await fs.writeFile(path.join(out, "index.html"), render(content.en));
 // Preserve existing bookmarks while keeping one English canonical site.
 await fs.writeFile(
   path.join(out, "zh/index.html"),
-  `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Attend</title><meta http-equiv="refresh" content="0; url=../"><link rel="canonical" href="${config.url}"><meta name="robots" content="noindex"></head><body><p><a href="../">Continue to Attend</a></p></body></html>`,
+  `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Attend</title><link rel="icon" href="../${faviconName}" type="image/svg+xml" sizes="any"><meta http-equiv="refresh" content="0; url=../"><link rel="canonical" href="${config.url}"><meta name="robots" content="noindex"></head><body><p><a href="../">Continue to Attend</a></p></body></html>`,
 );
 for (const file of ["styles.css", "site.js", "favicon.svg"])
   await fs.copyFile(path.join(root, "website", file), path.join(out, file));
