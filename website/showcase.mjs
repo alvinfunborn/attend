@@ -1,0 +1,33 @@
+const esc = (s) =>
+  String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
+export function renderShowcase(c, base) {
+  return `<section class="section showcase-section wrap" id="organize">
+  <div class="section-head"><p class="eyebrow">${c.demoEyebrow}</p><h2>${c.demoTitle}</h2><p>${c.demoBody}</p></div>
+  <div class="native-demo"><div class="native-demo-top"><span class="mono">${c.demoNote}</span><a href="${base}demo/" target="_blank" rel="noopener">Open full workspace ↗</a></div>
+  <div class="demo-tour" aria-label="Explore Attend views">${c.tour.map(([view, label], i) => `<button data-tour="${view}" aria-pressed="${i === 0}">${label}</button>`).join("")}</div>
+  <iframe id="native-console" title="Attend actual console with synthetic sessions and activity" src="${base}demo/" loading="lazy" sandbox="allow-scripts allow-same-origin allow-downloads allow-modals" referrerpolicy="no-referrer"></iframe>
+  <p class="native-demo-hint" id="tour-status" role="status">${c.tourHint}</p></div>
+  <noscript><p>The interactive console needs JavaScript. You can also inspect the actual console screenshot below.</p></noscript>
+  <div class="anatomy-intro" id="session-anatomy"><p class="eyebrow">READ THE SESSION, BEFORE OPENING THE HISTORY</p><h2>${c.anatomyTitle}</h2><p>${c.anatomyBody}</p></div>
+  <div class="anatomy-grid">${c.anatomy.map(([name, body], i) => `<article><span class="mono">0${i + 1}</span><h3>${name}</h3><p>${body}</p></article>`).join("")}</div>
+  <div class="gallery-tabs" aria-label="Product screenshot gallery">${c.gallery.map(([file, label, title, caption], i) => `<button data-gallery-src="${base}assets/${file}" data-gallery-title="${esc(title)}" data-gallery-caption="${esc(caption)}" aria-pressed="${i === 0}">${label}</button>`).join("")}</div>
+  <figure class="gallery-frame"><a id="gallery-link" href="${base}assets/${c.gallery[0][0]}" target="_blank" rel="noopener"><img id="gallery-image" src="${base}assets/${c.gallery[0][0]}" width="1280" height="800" loading="lazy" alt="${c.gallery[0][2]}"></a><figcaption><strong id="gallery-title">${c.gallery[0][2]}</strong> — <span id="gallery-caption">${c.gallery[0][3]}</span><br>${c.screenCaption}</figcaption></figure>
+  </section>
+  <section class="analysis-section" id="analysis"><div class="wrap"><div class="section-head"><p class="eyebrow">${c.analysisEyebrow}</p><h2>${c.analysisTitle}</h2><p>${c.analysisBody}</p></div>
+  <div class="handoff-states">${c.handoff.map(([key, name, body]) => `<article class="handoff-${key}"><span class="state-key">${key}</span><h3>${name}</h3><p>${body}</p></article>`).join("")}</div>
+  <div class="human-label-note"><div><h3>Your own label can be more specific.</h3><p>“Waiting for device test”, “Choosing the migration path”, “Needs a second review”. Use your own text and color when the standard state is not enough. Tags keep the long-term grouping; labels describe the current handoff.</p></div><a href="#organize" data-jump-tour="analysis" class="button secondary">Try the real label editor ↗</a></div>
+  <div class="suggestion-lanes">${c.suggestions.map(([key, title, body]) => `<article><span class="eyebrow">${key}</span><h3>${title}</h3><p>${body}</p></article>`).join("")}</div><p class="fine-print">${c.analysisNote}</p></div></section>
+  <section class="section wrap" id="structure"><div class="section-head"><p class="eyebrow">${c.structureEyebrow}</p><h2>${c.structureTitle}</h2><p>${c.structureBody}</p></div>
+  <div class="relationship-map" aria-label="Session relationships"><div class="relationship-origin"><span class="mono">MAIN SESSION</span><strong>Ship a reliable release</strong><span>Turns · tools · handoff analysis · tags</span></div><div class="relationship-branches"><div><span class="relationship-arrow" aria-hidden="true">↳</span><span class="mono">FORK / CHILD SESSION</span><strong>Try another implementation</strong><span>Own history · parent link · separate run</span></div><div><span class="relationship-arrow" aria-hidden="true">↳</span><span class="mono">ANCHORED COMMENT</span><strong>Verify this assumption</strong><span>Side conversation → promote to a task</span></div><div><span class="relationship-arrow" aria-hidden="true">↳</span><span class="mono">PIN / EXPLICIT REFERENCE</span><strong>Keep the conclusion in reach</strong><span>Jump to source → @ into the next turn</span></div></div><p>Chat groups keep related sessions together. Grouping does not merge their model context.</p></div>
+  <div class="relation-grid">${c.relations.map(([key, title, body]) => `<article><span class="eyebrow">${esc(key)}</span><h3>${title}</h3><p>${body}</p></article>`).join("")}</div>
+  <div class="section-action"><a href="#organize" data-jump-tour="structure" class="button primary">Explore the real fork tree ↗</a><p>Comments share the working directory. Separate conversation context does not imply file isolation.</p></div></section>
+  <section class="metrics-section" id="metrics"><div class="wrap"><div class="section-head"><p class="eyebrow">${c.metricsEyebrow}</p><h2>${c.metricsTitle}</h2><p>${c.metricsBody}</p></div>
+  <figure class="evidence-shot"><a href="${base}assets/attend-work-patterns-light.jpg" target="_blank" rel="noopener"><img src="${base}assets/attend-work-patterns-light.jpg" width="1280" height="800" loading="lazy" alt="Actual Attend Work patterns: collaboration flow, hourly breadth, resource pressure and mode comparison"></a><figcaption>Actual Work patterns view in the Light theme. All activity and semantic labels in this sample are synthetic.</figcaption></figure>
+  <div class="metrics-grid">${c.metrics.map(([name, body], i) => `<article><span class="mono">0${i + 1}</span><h3>${name}</h3><p>${body}</p></article>`).join("")}</div>
+  <div class="semantic-mix"><div><span class="eyebrow">WORK MIX</span><p>Ask · Learn · Inspect code · Research · Design · Implement · Debug · Verify · Operate · Decide</p></div><div><span class="eyebrow">STEERING</span><p>Initiate · Continue · Accept · Clarify · Challenge · Correct · Redirect · Partial / full rejection · Repeat instruction</p></div></div>
+  <div class="metric-definitions"><p><strong>Session breadth ≠ generation overlap.</strong> Breadth counts distinct sessions prompted in an hour. Overlap measures time when recorded turns actually run together.</p><p><strong>Model busy ≠ CPU usage.</strong> It describes tracked turn intervals. Completed turns are recorded turn endings, not a count of successful project deliveries.</p></div>
+  <a href="#organize" data-jump-tour="statistics" class="button primary">Open actual Work patterns ↗</a><p class="fine-print">${c.metricsNote}</p></div></section>`;
+}

@@ -14,9 +14,41 @@ When AI coding work spreads across many sessions, finding a session by project o
 Attend keeps those signals next to the actual conversations, so organizing work and advancing it happen in the same local interface. The server binds to `127.0.0.1` by default.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend managing a large multi-project demo vault with tags, session cards, chat, and queued scheduled work">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Current Attend dark workspace with session analysis, tags, fork tabs, Pins, queues and scheduled messages">
 </p>
-<p align="center"><sub>Synthetic demo vault: 240 sessions across 12 projects, with about 4,800 generated conversation turns.</sub></p>
+<p align="center"><sub>Current source UI with 12 synthetic sessions and simulated activity. Dark, Light, and a custom Midnight theme; not real user data or performance claims.</sub></p>
+
+## Actual interface & themes
+
+[Explore the actual interface](https://alvinfunborn.github.io/attend/demo/). These screenshots use the current `renderConsole` source, showing session structure, analysis, context tools and work patterns.
+
+**Light · custom handoff labels**
+
+![ Light · custom handoff labels](docs/assets/attend-label-light.jpg)
+
+**Midnight · anchored comments and Pins**
+
+![ Midnight · anchored comments and Pins](docs/assets/attend-comments-midnight.jpg)
+
+**Dark · session fork tree**
+
+![ Dark · session fork tree](docs/assets/attend-fork-tree-dark.jpg)
+
+**Light · Work patterns and collaboration analysis**
+
+![ Light · Work patterns and collaboration analysis](docs/assets/attend-work-patterns-light.jpg)
+
+**Light · notes, todos, queue and schedule**
+
+![ Light · notes, todos, queue and schedule](docs/assets/attend-notes-light.jpg)
+
+**Midnight · themes, panel layout and analysis settings**
+
+![ Midnight · themes, panel layout and analysis settings](docs/assets/attend-settings-midnight.jpg)
+
+**Midnight · live theme JSON editor**
+
+![ Midnight · live theme JSON editor](docs/assets/attend-theme-editor-midnight.jpg)
 
 ## Core capabilities
 

@@ -19,7 +19,7 @@ for (const name of ["index.html", "zh/index.html"]) {
     assert(target === root || target.startsWith(root + path.sep), `${name}: path escapes output`);
     await fs.access(value.endsWith("/") ? path.join(target, "index.html") : target);
   }
-  assert.match(html, /<html lang="en">/);
+  assert.match(html, /<html lang="en"[\s>]/);
   assert.match(html, /<link rel="canonical"/);
   assert(!/[\u3400-\u9fff]/u.test(html), `${name}: website must be English only`);
   if (name === "zh/index.html") {
@@ -35,3 +35,13 @@ for (const name of ["index.html", "zh/index.html"]) {
   else assert(!html.includes("ko-fi.com/"), "Unconfigured donation links must not be published");
   console.log(`${name}: links, anchors, assets, metadata OK`);
 }
+
+const demo = await fs.readFile(path.join(root, "demo/index.html"), "utf8");
+assert.match(demo, /data-attend-demo="true"/);
+assert.match(demo, /connect-src 'none'/);
+for (const nativeControl of ["workStatsBtn", "forkTreeBtn", "commentDrawer", "h-sig"]) {
+  assert(demo.includes(`id="${nativeControl}"`), `Missing native control: ${nativeControl}`);
+}
+assert.match(demo, /demo_execution_disabled/);
+assert.match(demo, /window\.EventSource = DemoEventSource/);
+console.log("demo/index.html: native renderer, key views and disabled execution OK");

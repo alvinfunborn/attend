@@ -1,24 +1,25 @@
 export const content = {
   en: {
     lang: "en",
-    title: "Attend — Find the task. Keep your place.",
+    title: "Attend — A local command center for AI coding sessions",
     description:
-      "A local console for AI coding sessions. Find work with tags and Focus views, name the current handoff with custom labels, and continue across six coding CLIs.",
-    nav: ["How it works", "Workflows", "Compatibility", "Get started"],
+      "Organize parallel AI coding sessions across six CLIs. Inspect handoff analysis, fork trees, comments, queues, and Work patterns in the actual Attend interface.",
+    nav: ["Live demo", "Sessions & analysis", "Work patterns", "Get started"],
     eyebrow: "YOUR WORK, WITH A PLACE TO RETURN TO",
     heading: "Find the task.<br>Keep your place.",
     intro:
-      "Some work belongs together, even when its conversations live in different projects and different AI tools. Give it tags. Give its current state a name. Come back knowing where to begin.",
+      "A local command center for parallel AI coding work. Find sessions across projects and CLIs, see what needs your attention, follow the branches of a discussion, and understand how your work is moving.",
     start: "Start locally",
     github: "View on GitHub",
     meta: "Open source · Local state · Your existing CLIs",
-    heroNote: "Tags remember what belongs together. Labels remember where you left it.",
+    heroNote:
+      "Current Attend interface. Explore sessions, analysis, relationships, and work patterns.",
     tools: "ONE LOCAL CONSOLE. SIX CODING CLIs.",
-    demoEyebrow: "01 / FIND YOUR WORK",
-    demoTitle: "Organize by what the work means.",
+    demoEyebrow: "01 / THE REAL WORKSPACE",
+    demoTitle: "Your sessions, with their full working context.",
     demoBody:
-      "A project folder tells you where code lives. A tag tells you why a conversation matters. Bring release work, investigations, or an idea back into view—even across providers.",
-    demoNote: "Interactive illustration · Sample tasks, no real conversations",
+      "This demo runs Attend’s own interface and styles with synthetic data. Explore the session list, tags and Focus views; inspect analysis, comments, fork relationships, queues, and Work patterns. The same controls live in the local app.",
+    demoNote: "Actual Attend UI · Synthetic data · No CLI execution or model calls",
     filter: "Filter by tag",
     search: "Search sample tasks",
     any: "Any tag",
@@ -77,10 +78,10 @@ export const content = {
     screenBody:
       "Scan task cards, open a conversation, and continue in the same browser tab. Titles, first and latest prompts, attention signals, tags, and current state help you choose what to open.",
     screenCaption:
-      "Actual Attend interface with synthetic demo data: 240 sessions across 12 projects. Sample content, not customer usage.",
+      "Current Attend source UI, with 12 synthetic sessions across six providers. Sample activity and analysis, not real user data or performance claims.",
     screenAlt:
       "Attend console showing a tag sidebar, multi-project session cards and a conversation with queued work",
-    workflowEyebrow: "03 / KEEP THE THREAD",
+    workflowEyebrow: "05 / KEEP THE THREAD",
     workflowTitle: "A place for the things that happen between prompts.",
     workflows: [
       [
@@ -137,7 +138,7 @@ export const content = {
         "Choose system, light, dark, or custom themes. Edit theme JSON with live preview, import/export palettes, and search available colors. Customize panel layout and responsive settings. Save reusable provider/model/effort presets. Directory scopes retain their preferences across restarts and port changes. Review recent local work statistics.",
       ],
     ],
-    compatibilityEyebrow: "04 / KEEP YOUR TOOLS",
+    compatibilityEyebrow: "06 / KEEP YOUR TOOLS",
     compatibilityTitle: "One way to organize. Honest differences underneath.",
     compatibilityBody:
       "All six integrations support browsing, search, in-browser conversations, and analysis. Execution uses the installed CLI and its account. Some capabilities depend on the provider and version.",
@@ -153,7 +154,7 @@ export const content = {
       "Attend binds to 127.0.0.1 by default. Its tags, labels, notes, queues, and preferences live in your local Attend database; original transcripts remain managed by their CLIs. Organizing your work does not require an Attend cloud account.",
       "Running coding sessions uses the selected provider. Background analysis can also make model calls and consume your provider allowance or incur charges. Economical mode may fall back to the work-session model; choose Off in Settings to stop new background AI analysis. Local storage does not mean all inference is offline.",
     ],
-    installEyebrow: "05 / START WHERE YOU WORK",
+    installEyebrow: "07 / START WHERE YOU WORK",
     installTitle: "One command. Your own workspace.",
     installBody:
       "Requires Node.js 22.13+ and a supported CLI installed and authenticated. Attend detects your available CLIs and opens the local console.",
@@ -171,7 +172,7 @@ export const content = {
     faq: [
       [
         "Can I use Attend here in the browser?",
-        "This website explains Attend and includes a small sample interaction. The full console runs on your own machine, where it can access your installed CLIs and local session history. GitHub Pages cannot run that local server.",
+        "The embedded demo uses the real Attend interface with a synthetic workspace and an in-memory backend. You can explore organization, analysis, relationships and statistics. Sending prompts and starting CLI work are disabled. The full app runs locally with your installed CLIs and session history.",
       ],
       [
         "Will all my old conversations get AI analysis?",
@@ -191,5 +192,189 @@ export const content = {
     support: "Support Attend on Ko-fi",
     footer: "Built for many threads of work. MIT licensed.",
     privacy: "No analytics or tracking scripts on this site.",
+    tour: [
+      ["overview", "Workspace"],
+      ["analysis", "Session analysis"],
+      ["structure", "Fork tree"],
+      ["comments", "Comments"],
+      ["queue", "Queued work"],
+      ["statistics", "Work patterns"],
+    ],
+    tourHint:
+      "Try a tag, open a task, edit its label, or choose a view above. Edits are temporary. This static workspace uses fixture metadata search; the installed app indexes real transcripts. Sending and CLI execution are disabled.",
+    anatomyTitle: "A session card carries more than a title.",
+    anatomyBody:
+      "Choose what deserves attention before rereading the conversation. Human organization, live execution signals, and model-assisted handoff analysis sit together—but mean different things.",
+    anatomy: [
+      [
+        "Identity & intent",
+        "Custom title or evolving brief, project, provider, first prompt, and latest prompt. See what started the conversation and where it has moved.",
+      ],
+      [
+        "Attention & execution",
+        "Generating, a new reply, seen but still pending, or handled. Turn duration, last output and quiet time distinguish active work from a turn that needs a closer look.",
+      ],
+      [
+        "Priority & handoff",
+        "A priority with its reason; a preset or custom-colored label naming what is needed now. Your manual label wins over delayed analysis for that turn.",
+      ],
+      [
+        "Re-entry cost",
+        "ETA estimates how long you need to understand and respond—not how long the model will take to finish. Useful when there is only a small gap between other work.",
+      ],
+      [
+        "Usage & configuration",
+        "Cumulative token usage and available input/output/cache detail, prompt count, provider, model, effort, and speed. Unknown provider data stays unknown.",
+      ],
+      [
+        "Context & next actions",
+        "Tags, notes, todos, Pins, comment threads, queued messages, schedules and fork relationships are accessible around the same session.",
+      ],
+    ],
+    analysisEyebrow: "02 / UNDERSTAND THE HANDOFF",
+    analysisTitle: "When the agent stops, what does it need from you?",
+    analysisBody:
+      "A finished turn might be ready to continue, waiting for a choice, missing input, blocked elsewhere, or ready for review. Attend separates that handoff state from importance, unread status, and runtime activity.",
+    handoff: [
+      ["continue_ready", "Continue ready", "A concrete next action can proceed."],
+      ["needs_decision", "Needs decision", "Choose a direction or tradeoff."],
+      ["needs_input", "Needs input", "Provide a specific missing detail."],
+      ["blocked", "Blocked", "An external dependency must change."],
+      ["needs_review", "Needs review", "Check the result against your criteria."],
+      ["followup_suggested", "Follow-up suggested", "There is a useful optional next step."],
+      ["done", "Done", "The current task has a completed handoff."],
+    ],
+    suggestions: [
+      [
+        "nextStep / Tab completion",
+        "A draft of the most likely next message",
+        "Predict the next move using the latest turn and your notes, todos, and shortcuts. Accept, edit, or ignore it.",
+      ],
+      [
+        "probe / scrutiny",
+        "A question worth asking before continuing",
+        "Question a specific claim, assumption, command, or evidence gap in the latest answer. It is a separate lane, not a generic “are you sure?” prompt.",
+      ],
+      [
+        "Local review signals",
+        "Notice when rereading is not advancing the work",
+        "Sustained reviews or revisits without another message can surface a descriptive observation and a smaller suggested next step. Checking a generating turn is treated differently. This is not a psychological diagnosis.",
+      ],
+      [
+        "Manual control",
+        "Keep the final judgment yours",
+        "Set priority, re-entry time and the current label yourself. Hand-written state takes precedence over delayed analysis for that turn; priority and turn-scoped handoff state have different lifetimes.",
+      ],
+    ],
+    analysisNote:
+      "Suggestions fill the composer; they never send themselves. Custom labels describe the current turn and reset when the next turn begins. Historical sessions may use local heuristics instead of a paired analyzer.",
+    structureEyebrow: "03 / FOLLOW THE STRUCTURE",
+    structureTitle: "One task can develop into many conversations.",
+    structureBody:
+      "Sessions are not just a flat history. Keep the main line running, investigate a passage in a comment, branch to test another direction, and bring selected context back deliberately.",
+    relations: [
+      [
+        "Session → fork",
+        "Keep the parent; explore another direction",
+        "Fork from a draft, queued message, or past point in the discussion. Keep the provider or seed a new session in another. The fork tree preserves parent/child relationships.",
+      ],
+      [
+        "Message or passage → comment",
+        "Ask at the point that raised the question",
+        "A comment has its own conversation and attention state. It can investigate or act in the shared workspace without automatically adding its discussion to the main transcript.",
+      ],
+      [
+        "Comment → task",
+        "Let a side discussion become real work",
+        "Promote a finished side discussion into an ordinary session, retaining its relationship and relevant context instead of copying everything into a new blank chat.",
+      ],
+      [
+        "Pin → next turn",
+        "Carry a chosen conclusion back",
+        "Pin a message or passage and reference it with @. A queued message keeps a snapshot of that context; a sidebar discussion only joins the main thread when you explicitly include it.",
+      ],
+    ],
+    metricsEyebrow: "04 / SEE THE WORK PATTERN",
+    metricsTitle: "Not just how much you used. How the work moved.",
+    metricsBody:
+      "Open Work patterns from the throughput counters. Inspect session breadth, continuity, collaboration flow and resource pressure over selectable time ranges—from the last hour to 15 days.",
+    metrics: [
+      [
+        "Throughput",
+        "Sessions touched, pushes per elapsed hour, completed turns per elapsed hour, and tracked model busy time.",
+      ],
+      [
+        "Live pressure",
+        "Generating sessions, queued work, overlap during busy time, peak concurrency, median turn duration and queue wait.",
+      ],
+      [
+        "Collaboration flow",
+        "Semantic coverage, straight-through and rework rates, completed handoffs, plus work-intent and steering distributions.",
+      ],
+      [
+        "Hourly breadth",
+        "An hourly timeline of Narrow (1–2), Mixed (3–5), and Wide (6+) sessions per prompted hour.",
+      ],
+      [
+        "Breadth comparison",
+        "Prompted hours, sessions and completed turns per hour, median turn, switch rate, and resolved/advanced outcomes within 72 hours.",
+      ],
+      [
+        "Coverage & limits",
+        "Recorded-history start times, sessions with and without state analysis, sample counts, and the evidence behind a comparison.",
+      ],
+    ],
+    metricsNote:
+      "All demo figures are synthetic. Real statistics describe recorded Attend activity; coverage and minimum sample requirements are shown in the product. They are observations, not a productivity score or a claim that more parallelism is better.",
+    gallery: [
+      [
+        "attend-console-demo.jpg",
+        "Dark / workspace",
+        "The full session workspace",
+        "Tags, Focus, first/latest prompts, state and priority, token usage, Pins, related chat tabs, queued and scheduled work.",
+      ],
+      [
+        "attend-label-light.jpg",
+        "Light / labels",
+        "Your own handoff labels",
+        "The native state editor with custom text, presets, color swatches, and an arbitrary color picker.",
+      ],
+      [
+        "attend-comments-midnight.jpg",
+        "Midnight / comments",
+        "A question beside its source",
+        "An anchored comment drawer beside the parent conversation; independent discussion with a promotion path.",
+      ],
+      [
+        "attend-fork-tree-dark.jpg",
+        "Dark / fork tree",
+        "Follow the branching work",
+        "Native parent/child session cards retain their analysis and working context inside the zoomable fork tree.",
+      ],
+      [
+        "attend-work-patterns-light.jpg",
+        "Light / Work patterns",
+        "Understand how the work moved",
+        "Throughput, resource overlap, queue wait, collaboration flow, breadth timeline, mode comparisons, and coverage.",
+      ],
+      [
+        "attend-notes-light.jpg",
+        "Light / notes",
+        "Keep your own context nearby",
+        "Notes and todos beside the composer, alongside Pin context, model controls, suggestions, and scheduled follow-ups.",
+      ],
+      [
+        "attend-settings-midnight.jpg",
+        "Midnight / settings",
+        "Make the workspace yours",
+        "System, Light, Dark and a custom Midnight theme, panel columns, and background-analysis visibility.",
+      ],
+      [
+        "attend-theme-editor-midnight.jpg",
+        "Midnight / theme JSON",
+        "Customize the real theme system",
+        "Edit a custom theme with live preview, searchable color IDs, import/export, and an explicit Save & use action.",
+      ],
+    ],
   },
 };

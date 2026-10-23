@@ -25,6 +25,14 @@
 | 每次重设工作环境 | 模型/effort/speed 预设、shortcuts、目录范围主题/布局、JSON 自定义主题 | `src/core/session-run-config.ts`、`src/core/themes.ts`、`src/core/theme-colors.ts`、UI settings |
 | 想回看多任务的实际节奏 | 工作回合、切换、并行等本地统计；不是所有外部历史的完整生产力评分 | `src/core/work-events.ts`、`src/core/work-stats.ts`、`src/core/collaboration.ts` |
 
+## 真实演示与截图更新
+
+官网已移除独立绘制的简化卡片示例。`website/demo.ts` 直接调用当前 `renderConsole`，使用虚构会话、评论、Pin、队列、定时数据与合成事件事实；工作模式投影调用生产 `buildWorkStats`。Dark、Light、Midnight 三种主题均由实际主题引擎渲染。
+
+`docs/assets/attend-*.jpg` 八张图片覆盖深色工作台、浅色 label 编辑器、Midnight 评论、深色分支树、浅色统计、浅色笔记、Midnight 设置与 JSON 编辑器。截图已替换早期 240 会话静态图；当前截图是 12 个示例会话，不代表真实用户规模、模型质量或性能承诺。
+
+主站配色变量直接从产品主题注册表生成，默认 Dark，可切换 Light；Logo 与 favicon 使用产品原有紫底白色 A 路径。原生演示的浏览/整理操作保存在独立内存；不读用户设置、真实记录，不执行 CLI 或模型。静态搜索仅匹配样本字段，不冒充完整 transcript 索引。
+
 ## 准确性边界
 
 - Label 是当前交接状态，不是永久分类；tag 是长期组织。Label 最长 80 字，手工设置覆盖本轮迟到分析，新用户/队列回合释放。

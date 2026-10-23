@@ -14,9 +14,41 @@ Attend 最初来自一个很简单的需求：**给任务加 tag**。
 Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向和继续推进对话放在同一个本地界面里。Server 默认只绑定 `127.0.0.1`。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend 大规模多项目 demo vault：tag、session 卡片、chat 与 queued scheduled work">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="当前 Attend 深色工作台：会话分析、tag、分支 tabs、Pin、队列与定时消息">
 </p>
-<p align="center"><sub>纯合成 demo vault：12 个项目、240 个 session、约 4,800 轮生成对话。</sub></p>
+<p align="center"><sub>当前源码真实界面，使用 12 个虚构会话和合成活动数据。深色、浅色和自定义 Midnight 主题；不是实际用户数据或性能承诺。</sub></p>
+
+## 实际界面与主题
+
+[打开真实界面交互演示](https://alvinfunborn.github.io/attend/demo/)。截图直接由 `renderConsole` 渲染当前版本，覆盖 session 结构、分析、上下文和工作模式。
+
+**浅色 · 自定义交接状态**
+
+![ 浅色 · 自定义交接状态](docs/assets/attend-label-light.jpg)
+
+**Midnight · 锚定评论与 Pin**
+
+![ Midnight · 锚定评论与 Pin](docs/assets/attend-comments-midnight.jpg)
+
+**深色 · session 分支树**
+
+![ 深色 · session 分支树](docs/assets/attend-fork-tree-dark.jpg)
+
+**浅色 · Work patterns 与协作分析**
+
+![ 浅色 · Work patterns 与协作分析](docs/assets/attend-work-patterns-light.jpg)
+
+**浅色 · 笔记、todo、队列与定时**
+
+![ 浅色 · 笔记、todo、队列与定时](docs/assets/attend-notes-light.jpg)
+
+**Midnight · 主题、面板与分析设置**
+
+![ Midnight · 主题、面板与分析设置](docs/assets/attend-settings-midnight.jpg)
+
+**Midnight · 主题 JSON 实时预览**
+
+![ Midnight · 主题 JSON 实时预览](docs/assets/attend-theme-editor-midnight.jpg)
 
 ## 主要能力
 

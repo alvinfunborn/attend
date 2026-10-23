@@ -1,8 +1,9 @@
 # Attend website
 
-Dependency-free English GitHub Pages site at `/attend/`. The former `/attend/zh/` URL redirects to the English homepage.
+Static English GitHub Pages site at `/attend/`. The former `/attend/zh/` URL redirects to the English homepage.
 
 ```sh
+npm ci --ignore-scripts
 node website/build.mjs
 node website/check.mjs
 node website/preview.mjs
@@ -16,7 +17,10 @@ Preview uses `http://127.0.0.1:5187/attend/`, including the repository subpath s
 - `build.mjs`: static HTML, metadata, sitemap and asset assembly.
 - `styles.css`, `site.js`: presentation and the sample interaction.
 - `config.mjs`: production URL, repository link, optional verified Ko-fi URL.
-- Product screenshot: existing `docs/assets/attend-console-demo.jpg`; synthetic data only.
+- Product screenshots: `docs/assets/attend-*.jpg`, captured from current source with synthetic data.
+- `demo.ts`: invokes the native `renderConsole` and `buildWorkStats`, producing Dark, Light and Midnight demo routes plus native palette CSS.
+- `demo-runtime.js`: in-memory fixture backend; no CLI/model execution or external network.
+- `showcase.mjs`: session anatomy, handoff states, relationships, statistics and screenshot gallery.
 - `SCENARIOS.md`: rationale, code evidence and behavior boundaries.
 
 ## Ko-fi
@@ -25,4 +29,4 @@ The creator does not have a Ko-fi page yet. No broken or guessed donation URL is
 
 ## Checks
 
-`check.mjs` verifies the English page and the legacy redirect, unique IDs, local links and anchors, images/styles/scripts, metadata, and absence of unconfigured donation URLs. Browser verification also covers the actual tag any/all filtering, sample label editing, search and reset, workflow tabs and keyboard navigation, copy commands, and desktop/mobile overflow. The sample demo is intentionally illustrative; it is not the live Attend console and never reads real sessions.
+`check.mjs` verifies the English page and the legacy redirect, unique IDs, local links and anchors, images/styles/scripts, metadata, and absence of unconfigured donation URLs. Browser verification also covers the actual tag any/all filtering, native label editing, search and reset, workflow tabs and keyboard navigation, copy commands, and desktop/mobile overflow. The demo uses the actual console renderer and styles, backed by synthetic fixtures. It never discovers real sessions, reads user settings, calls providers, or executes a CLI. Unknown endpoints fail explicitly. Search in this static sample is limited to fixture metadata; the installed app has the real transcript index.

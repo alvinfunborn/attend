@@ -5,7 +5,13 @@ on:
     branches: [main]
     paths:
       - 'website/**'
-      - 'docs/assets/attend-console-demo.jpg'
+      - 'src/ui/console.ts'
+      - 'src/core/themes.ts'
+      - 'src/core/theme-colors.ts'
+      - 'src/core/work-stats.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'docs/assets/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -24,6 +30,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
+      - name: Install renderer build dependencies
+        run: npm ci --ignore-scripts
       - name: Build English static site
         run: node website/build.mjs
       - name: Check generated pages
