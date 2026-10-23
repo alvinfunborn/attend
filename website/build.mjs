@@ -1,52 +1,96 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import config from './config.mjs';
-import { content } from './content.mjs';
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import config from "./config.mjs";
+import { content } from "./content.mjs";
 
-const root = fileURLToPath(new URL('../', import.meta.url));
-const out = path.join(root, '_site');
-const escape = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const link = (href, text, cls = '') => `<a class="${cls}" href="${escape(href)}">${text}</a>`;
-const mark = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 25 14 6h4l9 19h-5L16 12 10 25Z" fill="currentColor"/><circle cx="16" cy="24" r="2.5" fill="currentColor"/></svg>';
+const root = fileURLToPath(new URL("../", import.meta.url));
+const out = path.join(root, "_site");
+const escape = (s) =>
+  String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+  );
+const link = (href, text, cls = "") => `<a class="${cls}" href="${escape(href)}">${text}</a>`;
+const mark =
+  '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 25 14 6h4l9 19h-5L16 12 10 25Z" fill="currentColor"/><circle cx="16" cy="24" r="2.5" fill="currentColor"/></svg>';
 const arrow = '<span aria-hidden="true">↗</span>';
 
 function render(c, language) {
-  const base = language === 'zh' ? '../' : './';
-  const canonical = config.url + (language === 'zh' ? 'zh/' : '');
-  const demo = JSON.stringify({ titles: c.taskTitles, labels: c.labels, projects: c.project, count: c.count, empty: c.empty, copied: c.copied, copyFail: c.copyFail }).replace(/</g, '\\u003c');
-  const groups = c.features.map(([title, body], i) => `<details><summary><span class="detail-no">0${i + 1}</span>${escape(title)}<span class="plus" aria-hidden="true">+</span></summary><p>${escape(body)}</p></details>`).join('');
-  const providers = ['Claude Code', 'Codex CLI', 'Cursor CLI', 'Antigravity CLI', 'GitHub Copilot CLI', 'OpenCode'];
-  const rows = providers.map((name, i) => `<tr><th scope="row">${name}</th><td>${i < 2 ? c.native : c.seeded}</td><td>${[0,1,5].includes(i) ? c.native : c.unsupported}</td><td>${[0,1,5].includes(i) ? c.native : c.nextTurn}</td><td>${i < 2 ? c.native : c.unsupported}</td></tr>`).join('');
+  const base = language === "zh" ? "../" : "./";
+  const canonical = config.url + (language === "zh" ? "zh/" : "");
+  const demo = JSON.stringify({
+    titles: c.taskTitles,
+    labels: c.labels,
+    projects: c.project,
+    count: c.count,
+    empty: c.empty,
+    copied: c.copied,
+    copyFail: c.copyFail,
+  }).replace(/</g, "\\u003c");
+  const groups = c.features
+    .map(
+      ([title, body], i) =>
+        `<details><summary><span class="detail-no">0${i + 1}</span>${escape(title)}<span class="plus" aria-hidden="true">+</span></summary><p>${escape(body)}</p></details>`,
+    )
+    .join("");
+  const providers = [
+    "Claude Code",
+    "Codex CLI",
+    "Cursor CLI",
+    "Antigravity CLI",
+    "GitHub Copilot CLI",
+    "OpenCode",
+  ];
+  const rows = providers
+    .map(
+      (name, i) =>
+        `<tr><th scope="row">${name}</th><td>${i < 2 ? c.native : c.seeded}</td><td>${[0, 1, 5].includes(i) ? c.native : c.unsupported}</td><td>${[0, 1, 5].includes(i) ? c.native : c.nextTurn}</td><td>${i < 2 ? c.native : c.unsupported}</td></tr>`,
+    )
+    .join("");
   return `<!doctype html>
 <html lang="${c.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f5f3ec"><title>${escape(c.title)}</title><meta name="description" content="${escape(c.description)}"><link rel="canonical" href="${canonical}"><link rel="alternate" hreflang="en" href="${config.url}"><link rel="alternate" hreflang="zh-CN" href="${config.url}zh/"><link rel="alternate" hreflang="x-default" href="${config.url}"><meta property="og:type" content="website"><meta property="og:title" content="${escape(c.title)}"><meta property="og:description" content="${escape(c.description)}"><meta property="og:url" content="${canonical}"><meta property="og:image" content="${config.url}assets/console.jpg"><meta name="twitter:card" content="summary_large_image"><link rel="icon" href="${base}favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="${base}styles.css"><script src="${base}site.js" defer></script></head>
-<body><a class="skip" href="#main">${language === 'zh' ? '跳到正文' : 'Skip to content'}</a>
-<header class="header wrap"><a class="brand" href="${base}" aria-label="Attend home">${mark}<span>attend<span class="brand-dot">.</span></span></a><nav aria-label="${language === 'zh' ? '主导航' : 'Main navigation'}">${c.nav.map((n,i)=>link(['#organize','#workflows','#compatibility','#install'][i],escape(n))).join('')}</nav><div class="nav-end">${link(c.otherPath,c.other,'language')}${link(config.repository,'GitHub '+arrow,'nav-github')}</div></header>
+<body><a class="skip" href="#main">${language === "zh" ? "跳到正文" : "Skip to content"}</a>
+<header class="header wrap"><a class="brand" href="${base}" aria-label="Attend home">${mark}<span>attend<span class="brand-dot">.</span></span></a><nav aria-label="${language === "zh" ? "主导航" : "Main navigation"}">${c.nav.map((n, i) => link(["#organize", "#workflows", "#compatibility", "#install"][i], escape(n))).join("")}</nav><div class="nav-end">${link(c.otherPath, c.other, "language")}${link(config.repository, "GitHub " + arrow, "nav-github")}</div></header>
 <main id="main">
-<section class="hero wrap"><div class="hero-copy"><p class="eyebrow"><span class="live-dot"></span>${c.eyebrow}</p><h1>${c.heading}</h1><p class="intro">${c.intro}</p><div class="actions">${link('#install',c.start+' <span aria-hidden="true">↓</span>','button primary')}${link(config.repository,c.github+' '+arrow,'button secondary')}</div><p class="meta">${c.meta}</p></div><div class="hero-art" aria-label="${escape(c.heroNote)}"><div class="orbit-label tag-a"># release</div><div class="orbit-label tag-b"># backend</div><div class="orbit-label tag-c"># research</div><div class="paper-card paper-back"><span class="mono">codex · desktop-app</span><span class="paper-title">${escape(c.taskTitles[0])}</span><div class="paper-tags"><span>release</span><span>backend</span></div></div><div class="paper-card paper-front"><span class="card-top"><span class="tiny-dot"></span><span class="mono">claude · mobile-app</span><span aria-hidden="true">↗</span></span><span class="paper-title">${escape(c.taskTitles[3])}</span><span class="art-label">${escape(c.labelSample)} <span aria-hidden="true">✎</span></span><div class="paper-tags"><span>mobile</span><span>release</span></div></div><p class="art-caption">${c.heroNote}</p></div></section>
-<div class="providers wrap"><p class="eyebrow">${c.tools}</p><div>${providers.map((p,i)=>`<span><b aria-hidden="true">${['✳','◈','↗','△','⌘','◇'][i]}</b>${p}</span>`).join('')}</div></div>
+<section class="hero wrap"><div class="hero-copy"><p class="eyebrow"><span class="live-dot"></span>${c.eyebrow}</p><h1>${c.heading}</h1><p class="intro">${c.intro}</p><div class="actions">${link("#install", c.start + ' <span aria-hidden="true">↓</span>', "button primary")}${link(config.repository, c.github + " " + arrow, "button secondary")}</div><p class="meta">${c.meta}</p></div><div class="hero-art" aria-label="${escape(c.heroNote)}"><div class="orbit-label tag-a"># release</div><div class="orbit-label tag-b"># backend</div><div class="orbit-label tag-c"># research</div><div class="paper-card paper-back"><span class="mono">codex · desktop-app</span><span class="paper-title">${escape(c.taskTitles[0])}</span><div class="paper-tags"><span>release</span><span>backend</span></div></div><div class="paper-card paper-front"><span class="card-top"><span class="tiny-dot"></span><span class="mono">claude · mobile-app</span><span aria-hidden="true">↗</span></span><span class="paper-title">${escape(c.taskTitles[3])}</span><span class="art-label">${escape(c.labelSample)} <span aria-hidden="true">✎</span></span><div class="paper-tags"><span>mobile</span><span>release</span></div></div><p class="art-caption">${c.heroNote}</p></div></section>
+<div class="providers wrap"><p class="eyebrow">${c.tools}</p><div>${providers.map((p, i) => `<span><b aria-hidden="true">${["✳", "◈", "↗", "△", "⌘", "◇"][i]}</b>${p}</span>`).join("")}</div></div>
 <section class="section wrap" id="organize"><div class="section-head"><p class="eyebrow">${c.demoEyebrow}</p><h2>${c.demoTitle}</h2><p>${c.demoBody}</p></div>
-<div class="demo-shell"><div class="demo-bar"><span class="brand-mini">${mark} attend <span class="demo-slash">/</span> <span id="view-name">All</span></span><span class="demo-badge">${c.demoNote}</span></div><div class="demo-controls"><div class="filter-row"><span class="filter-caption">${c.filter}</span><div class="tag-filters">${c.tags.map(t=>`<button class="tag-filter" data-tag="${t}" aria-pressed="false">${t}<span aria-hidden="true"> +</span></button>`).join('')}</div><div class="match-group" aria-label="${c.filter}"><button class="match active" data-match="any" aria-pressed="true">${c.any}</button><button class="match" data-match="all" aria-pressed="false">${c.all}</button></div></div><div class="search-row"><label class="search-label"><span aria-hidden="true">⌕</span><input id="demo-search" type="search" placeholder="${c.search}" aria-label="${c.search}"></label><button class="text-button" id="demo-reset">${c.reset} ↺</button></div></div><div id="task-grid" class="task-grid"></div><div class="demo-foot"><span id="demo-count" role="status" aria-live="polite"></span><span>${c.labelHint}</span></div></div>
+<div class="demo-shell"><div class="demo-bar"><span class="brand-mini">${mark} attend <span class="demo-slash">/</span> <span id="view-name">All</span></span><span class="demo-badge">${c.demoNote}</span></div><div class="demo-controls"><div class="filter-row"><span class="filter-caption">${c.filter}</span><div class="tag-filters">${c.tags.map((t) => `<button class="tag-filter" data-tag="${t}" aria-pressed="false">${t}<span aria-hidden="true"> +</span></button>`).join("")}</div><div class="match-group" aria-label="${c.filter}"><button class="match active" data-match="any" aria-pressed="true">${c.any}</button><button class="match" data-match="all" aria-pressed="false">${c.all}</button></div></div><div class="search-row"><label class="search-label"><span aria-hidden="true">⌕</span><input id="demo-search" type="search" placeholder="${c.search}" aria-label="${c.search}"></label><button class="text-button" id="demo-reset">${c.reset} ↺</button></div></div><div id="task-grid" class="task-grid"></div><div class="demo-foot"><span id="demo-count" role="status" aria-live="polite"></span><span>${c.labelHint}</span></div></div>
 <div class="focus-note"><span class="focus-symbol" aria-hidden="true">⌖</span><div><h3>${c.focusTitle}</h3><p>${c.focusBody}</p></div><span class="focus-chip">${c.focusExample}</span></div></section>
-<section class="label-section" id="labels"><div class="wrap label-layout"><div><p class="eyebrow">${c.labelEyebrow}</p><h2>${c.labelTitle}</h2><p class="section-body">${c.labelBody}</p><ul class="check-list">${c.labelPoints.map(p=>`<li>${p}</li>`).join('')}</ul></div><div class="label-art"><span class="mono label-art-index">STATE / YOUR WORDS</span><button id="featured-label" class="featured-label" aria-label="${c.labelEdit}">${escape(c.labelSample)} <span aria-hidden="true">✎</span></button><div class="swatch-art" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><p>${c.labelCaption}</p></div></div></section>
+<section class="label-section" id="labels"><div class="wrap label-layout"><div><p class="eyebrow">${c.labelEyebrow}</p><h2>${c.labelTitle}</h2><p class="section-body">${c.labelBody}</p><ul class="check-list">${c.labelPoints.map((p) => `<li>${p}</li>`).join("")}</ul></div><div class="label-art"><span class="mono label-art-index">STATE / YOUR WORDS</span><button id="featured-label" class="featured-label" aria-label="${c.labelEdit}">${escape(c.labelSample)} <span aria-hidden="true">✎</span></button><div class="swatch-art" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><p>${c.labelCaption}</p></div></div></section>
 <section class="section screenshot-section wrap"><div class="section-head"><p class="eyebrow">${c.screenEyebrow}</p><h2>${c.screenTitle}</h2><p>${c.screenBody}</p></div><figure><a href="${base}assets/console.jpg" target="_blank" rel="noopener" class="console-frame"><span class="window-bar"><i></i><i></i><i></i><span>127.0.0.1:5050</span><b aria-hidden="true">↗</b></span><img src="${base}assets/console.jpg" width="2400" height="1363" loading="lazy" alt="${c.screenAlt}"></a><figcaption>${c.screenCaption}</figcaption></figure></section>
-<section class="section workflow-section wrap" id="workflows"><div class="section-head"><p class="eyebrow">${c.workflowEyebrow}</p><h2>${c.workflowTitle}</h2></div><div class="workflow-layout"><div class="workflow-tabs" role="tablist" aria-label="${c.nav[1]}" aria-orientation="vertical">${c.workflows.map((w,i)=>`<button id="workflow-tab-${i}" role="tab" aria-selected="${i===0}" aria-controls="workflow-panel-${i}" tabindex="${i===0?0:-1}" data-workflow="${i}"><span class="mono">0${i+1}</span>${w[0]}<span aria-hidden="true">↗</span></button>`).join('')}</div><div class="workflow-panels">${c.workflows.map((w,i)=>`<div id="workflow-panel-${i}" role="tabpanel" aria-labelledby="workflow-tab-${i}" tabindex="0" ${i?'hidden':''}><span class="workflow-number" aria-hidden="true">0${i+1}</span><h3>${w[1]}</h3><p>${w[2]}</p><div class="workflow-path">${w[3].map((s,k)=>`<span>${s}</span>${k<3?'<i aria-hidden="true">→</i>':''}`).join('')}</div></div>`).join('')}</div></div></section>
+<section class="section workflow-section wrap" id="workflows"><div class="section-head"><p class="eyebrow">${c.workflowEyebrow}</p><h2>${c.workflowTitle}</h2></div><div class="workflow-layout"><div class="workflow-tabs" role="tablist" aria-label="${c.nav[1]}" aria-orientation="vertical">${c.workflows.map((w, i) => `<button id="workflow-tab-${i}" role="tab" aria-selected="${i === 0}" aria-controls="workflow-panel-${i}" tabindex="${i === 0 ? 0 : -1}" data-workflow="${i}"><span class="mono">0${i + 1}</span>${w[0]}<span aria-hidden="true">↗</span></button>`).join("")}</div><div class="workflow-panels">${c.workflows.map((w, i) => `<div id="workflow-panel-${i}" role="tabpanel" aria-labelledby="workflow-tab-${i}" tabindex="0" ${i ? "hidden" : ""}><span class="workflow-number" aria-hidden="true">0${i + 1}</span><h3>${w[1]}</h3><p>${w[2]}</p><div class="workflow-path">${w[3].map((s, k) => `<span>${s}</span>${k < 3 ? '<i aria-hidden="true">→</i>' : ""}`).join("")}</div></div>`).join("")}</div></div></section>
 <section class="section reference-section wrap"><div class="reference-heading"><h2>${c.referenceTitle}</h2><p>${c.referenceBody}</p></div><div class="reference-list">${groups}</div></section>
-<section class="section compatibility-section wrap" id="compatibility"><div class="section-head"><p class="eyebrow">${c.compatibilityEyebrow}</p><h2>${c.compatibilityTitle}</h2><p>${c.compatibilityBody}</p></div><div class="table-scroll" tabindex="0" role="region" aria-label="${c.nav[2]}"><table><thead><tr>${c.columns.map(x=>`<th scope="col">${x}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div><p class="fine-print">${c.compatibilityNote}</p><div class="local-note"><span aria-hidden="true">⌂</span><div><h3>${c.localTitle}</h3>${c.localParagraphs.map(p=>`<p>${p}</p>`).join('')}</div></div></section>
-<section class="install-section" id="install"><div class="wrap install-layout"><div><p class="eyebrow">${c.installEyebrow}</p><h2>${c.installTitle}</h2><p>${c.installBody}</p><div class="install-links">${link(config.repository+'#quick-start',c.docs+' '+arrow)}${link(config.repository+'/blob/main/CHANGELOG.md',c.changelog+' '+arrow)}</div></div><div class="install-card"><div class="command-head"><span>${c.scoped}</span><button class="copy-button" data-copy="npx --package=@sinphife/attend attend &quot;$PWD&quot;">${c.copy}</button></div><pre><code>npx --package=@sinphife/attend attend "$PWD"</code></pre><div class="command-head"><span>${c.global}</span><button class="copy-button" data-copy="npm install --global @sinphife/attend&#10;attend">${c.copy}</button></div><pre><code>npm install --global @sinphife/attend<br>attend</code></pre><p class="terminal-result"><span aria-hidden="true">↳</span> http://localhost:5050</p><p id="copy-status" role="status" aria-live="polite"></p></div></div><ul class="wrap install-notes">${c.installNotes.map(n=>`<li>${n}</li>`).join('')}</ul></section>
-<section class="section faq-section wrap"><h2>${language==='zh'?'开始前，你可能想知道':'Before you begin'}</h2><div>${c.faq.map(([q,a])=>`<details><summary>${q}<span class="plus" aria-hidden="true">+</span></summary><p>${a}</p></details>`).join('')}</div></section>
-<section class="closing wrap"><p class="eyebrow">ATTEND / LOCAL-FIRST / OPEN SOURCE</p><h2>${c.closing}</h2><p>${c.closingBody}</p><div class="actions">${link('#install',c.start+' ↓','button primary')}${config.kofi?link(config.kofi,c.support+' '+arrow,'button secondary'):link(config.repository,c.github+' '+arrow,'button secondary')}</div></section>
-</main><footer class="footer wrap"><a class="brand" href="${base}">${mark}<span>attend.</span></a><div><p>${c.footer}</p><p>${c.privacy}</p></div><div>${link(config.repository,'GitHub ↗')}${link(config.repository+'/blob/main/LICENSE','MIT ↗')}${link(c.otherPath,c.other)}</div></footer>
+<section class="section compatibility-section wrap" id="compatibility"><div class="section-head"><p class="eyebrow">${c.compatibilityEyebrow}</p><h2>${c.compatibilityTitle}</h2><p>${c.compatibilityBody}</p></div><div class="table-scroll" tabindex="0" role="region" aria-label="${c.nav[2]}"><table><thead><tr>${c.columns.map((x) => `<th scope="col">${x}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div><p class="fine-print">${c.compatibilityNote}</p><div class="local-note"><span aria-hidden="true">⌂</span><div><h3>${c.localTitle}</h3>${c.localParagraphs.map((p) => `<p>${p}</p>`).join("")}</div></div></section>
+<section class="install-section" id="install"><div class="wrap install-layout"><div><p class="eyebrow">${c.installEyebrow}</p><h2>${c.installTitle}</h2><p>${c.installBody}</p><div class="install-links">${link(config.repository + "#quick-start", c.docs + " " + arrow)}${link(config.repository + "/blob/main/CHANGELOG.md", c.changelog + " " + arrow)}</div></div><div class="install-card"><div class="command-head"><span>${c.scoped}</span><button class="copy-button" data-copy="npx --package=@sinphife/attend attend &quot;$PWD&quot;">${c.copy}</button></div><pre><code>npx --package=@sinphife/attend attend "$PWD"</code></pre><div class="command-head"><span>${c.global}</span><button class="copy-button" data-copy="npm install --global @sinphife/attend&#10;attend">${c.copy}</button></div><pre><code>npm install --global @sinphife/attend<br>attend</code></pre><p class="terminal-result"><span aria-hidden="true">↳</span> http://localhost:5050</p><p id="copy-status" role="status" aria-live="polite"></p></div></div><ul class="wrap install-notes">${c.installNotes.map((n) => `<li>${n}</li>`).join("")}</ul></section>
+<section class="section faq-section wrap"><h2>${language === "zh" ? "开始前，你可能想知道" : "Before you begin"}</h2><div>${c.faq.map(([q, a]) => `<details><summary>${q}<span class="plus" aria-hidden="true">+</span></summary><p>${a}</p></details>`).join("")}</div></section>
+<section class="closing wrap"><p class="eyebrow">ATTEND / LOCAL-FIRST / OPEN SOURCE</p><h2>${c.closing}</h2><p>${c.closingBody}</p><div class="actions">${link("#install", c.start + " ↓", "button primary")}${config.kofi ? link(config.kofi, c.support + " " + arrow, "button secondary") : link(config.repository, c.github + " " + arrow, "button secondary")}</div></section>
+</main><footer class="footer wrap"><a class="brand" href="${base}">${mark}<span>attend.</span></a><div><p>${c.footer}</p><p>${c.privacy}</p></div><div>${link(config.repository, "GitHub ↗")}${link(config.repository + "/blob/main/LICENSE", "MIT ↗")}${link(c.otherPath, c.other)}</div></footer>
 <dialog id="label-dialog"><form id="label-form"><div class="dialog-heading"><h3>${c.labelEdit}</h3><button type="button" id="close-dialog" aria-label="${c.cancel}">×</button></div><label for="label-text">${c.labelInput}</label><input id="label-text" maxlength="80" required><label class="color-label" for="label-color">${c.colorInput}<input id="label-color" type="color" value="#0f766e"></label><div class="dialog-actions"><button type="button" id="cancel-label" class="button secondary">${c.cancel}</button><button type="submit" class="button primary">${c.save}</button></div></form></dialog>
 <script type="application/json" id="demo-data">${demo}</script></body></html>`;
 }
 
-await fs.mkdir(path.join(out, 'zh'), { recursive: true });
-await fs.mkdir(path.join(out, 'assets'), { recursive: true });
-for (const [lang, c] of Object.entries(content)) await fs.writeFile(path.join(out, lang === 'en' ? 'index.html' : 'zh/index.html'), render(c, lang));
-for (const file of ['styles.css', 'site.js', 'favicon.svg']) await fs.copyFile(path.join(root, 'website', file), path.join(out, file));
-await fs.copyFile(path.join(root, 'docs/assets/attend-console-demo.jpg'), path.join(out, 'assets/console.jpg'));
-await fs.writeFile(path.join(out, '.nojekyll'), '');
-await fs.writeFile(path.join(out, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${config.url}sitemap.xml\n`);
-await fs.writeFile(path.join(out, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${config.url}</loc></url><url><loc>${config.url}zh/</loc></url></urlset>`);
+await fs.mkdir(path.join(out, "zh"), { recursive: true });
+await fs.mkdir(path.join(out, "assets"), { recursive: true });
+for (const [lang, c] of Object.entries(content))
+  await fs.writeFile(
+    path.join(out, lang === "en" ? "index.html" : "zh/index.html"),
+    render(c, lang),
+  );
+for (const file of ["styles.css", "site.js", "favicon.svg"])
+  await fs.copyFile(path.join(root, "website", file), path.join(out, file));
+await fs.copyFile(
+  path.join(root, "docs/assets/attend-console-demo.jpg"),
+  path.join(out, "assets/console.jpg"),
+);
+await fs.writeFile(path.join(out, ".nojekyll"), "");
+await fs.writeFile(
+  path.join(out, "robots.txt"),
+  `User-agent: *\nAllow: /\nSitemap: ${config.url}sitemap.xml\n`,
+);
+await fs.writeFile(
+  path.join(out, "sitemap.xml"),
+  `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${config.url}</loc></url><url><loc>${config.url}zh/</loc></url></urlset>`,
+);
 console.log(`Built English and Chinese GitHub Pages site: ${out}`);
