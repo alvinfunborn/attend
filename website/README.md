@@ -1,6 +1,6 @@
 # Attend website
 
-Dependency-free bilingual GitHub Pages site. English is at `/attend/`; Chinese is at `/attend/zh/`.
+Dependency-free English GitHub Pages site at `/attend/`. The former `/attend/zh/` URL redirects to the English homepage.
 
 ```sh
 node website/build.mjs
@@ -12,7 +12,7 @@ Preview uses `http://127.0.0.1:5187/attend/`, including the repository subpath s
 
 ## Editing
 
-- `content.mjs`: English and Chinese copy. Keep both translations aligned.
+- `content.mjs`: English website copy.
 - `build.mjs`: static HTML, metadata, sitemap and asset assembly.
 - `styles.css`, `site.js`: presentation and the sample interaction.
 - `config.mjs`: production URL, repository link, optional verified Ko-fi URL.
@@ -25,4 +25,4 @@ The creator does not have a Ko-fi page yet. No broken or guessed donation URL is
 
 ## Checks
 
-`check.mjs` verifies both generated language pages, unique IDs, local links and anchors, images/styles/scripts, metadata, and absence of unconfigured donation URLs. Browser verification also covers the actual tag any/all filtering, sample label editing, search and reset, workflow tabs and keyboard navigation, copy commands, and desktop/mobile overflow. The sample demo is intentionally illustrative; it is not the live Attend console and never reads real sessions.
+`check.mjs` verifies the English page and the legacy redirect, unique IDs, local links and anchors, images/styles/scripts, metadata, and absence of unconfigured donation URLs. Browser verification also covers the actual tag any/all filtering, sample label editing, search and reset, workflow tabs and keyboard navigation, copy commands, and desktop/mobile overflow. The sample demo is intentionally illustrative; it is not the live Attend console and never reads real sessions.

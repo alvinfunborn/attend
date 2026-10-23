@@ -118,10 +118,6 @@ button:disabled {
   gap: 25px;
   font-size: 13px;
 }
-.language {
-  padding-right: 22px;
-  border-right: 1px solid var(--line);
-}
 .nav-github span {
   margin-left: 5px;
 }
@@ -1163,37 +1159,6 @@ dialog label {
 [hidden] {
   display: none !important;
 }
-html[lang="zh-CN"] h1 {
-  font-family: var(--sans);
-  font-weight: 550;
-  letter-spacing: -2.5px;
-  line-height: 1.2;
-  font-size: clamp(48px, 5.6vw, 76px);
-}
-html[lang="zh-CN"] h2 {
-  font-family: var(--sans);
-  font-weight: 500;
-  font-size: clamp(29px, 3vw, 40px);
-  letter-spacing: -0.8px;
-  line-height: 1.4;
-}
-html[lang="zh-CN"] .eyebrow {
-  letter-spacing: 1px;
-}
-html[lang="zh-CN"] .workflow-panels h3 {
-  font-family: var(--sans);
-  font-size: 25px;
-  font-weight: 500;
-}
-html[lang="zh-CN"] .intro {
-  line-height: 2;
-}
-html[lang="zh-CN"] .paper-title {
-  font-size: 21px;
-}
-html[lang="zh-CN"] .featured-label {
-  font-size: 27px;
-}
 @media (min-width: 1600px) {
   .hero {
     min-height: 690px;
@@ -1265,9 +1230,6 @@ html[lang="zh-CN"] .featured-label {
   }
   .nav-end {
     gap: 15px;
-  }
-  .language {
-    padding-right: 15px;
   }
   .brand {
     font-size: 25px;
@@ -1590,16 +1552,7 @@ html[lang="zh-CN"] .featured-label {
     flex: 1;
     min-width: 190px;
   }
-  html[lang="zh-CN"] h1 {
-    font-size: 53px;
   }
-  html[lang="zh-CN"] h2 {
-    font-size: 29px;
-  }
-  html[lang="zh-CN"] .featured-label {
-    font-size: 25px;
-  }
-}
 @media (max-width: 390px) {
   .hero h1 {
     font-size: 54px;
@@ -1624,10 +1577,7 @@ html[lang="zh-CN"] .featured-label {
   .nav-github {
     display: none;
   }
-  html[lang="zh-CN"] h1 {
-    font-size: 47px;
   }
-}
 @media (max-width: 760px) {
   .hero {
     grid-template-columns: minmax(0, 1fr);

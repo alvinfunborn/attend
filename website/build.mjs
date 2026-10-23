@@ -16,9 +16,9 @@ const mark =
   '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 25 14 6h4l9 19h-5L16 12 10 25Z" fill="currentColor"/><circle cx="16" cy="24" r="2.5" fill="currentColor"/></svg>';
 const arrow = '<span aria-hidden="true">↗</span>';
 
-function render(c, language) {
-  const base = language === "zh" ? "../" : "./";
-  const canonical = config.url + (language === "zh" ? "zh/" : "");
+function render(c) {
+  const base = "./";
+  const canonical = config.url;
   const demo = JSON.stringify({
     titles: c.taskTitles,
     labels: c.labels,
@@ -49,9 +49,9 @@ function render(c, language) {
     )
     .join("");
   return `<!doctype html>
-<html lang="${c.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f5f3ec"><title>${escape(c.title)}</title><meta name="description" content="${escape(c.description)}"><link rel="canonical" href="${canonical}"><link rel="alternate" hreflang="en" href="${config.url}"><link rel="alternate" hreflang="zh-CN" href="${config.url}zh/"><link rel="alternate" hreflang="x-default" href="${config.url}"><meta property="og:type" content="website"><meta property="og:title" content="${escape(c.title)}"><meta property="og:description" content="${escape(c.description)}"><meta property="og:url" content="${canonical}"><meta property="og:image" content="${config.url}assets/console.jpg"><meta name="twitter:card" content="summary_large_image"><link rel="icon" href="${base}favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="${base}styles.css"><script src="${base}site.js" defer></script></head>
-<body><a class="skip" href="#main">${language === "zh" ? "跳到正文" : "Skip to content"}</a>
-<header class="header wrap"><a class="brand" href="${base}" aria-label="Attend home">${mark}<span>attend<span class="brand-dot">.</span></span></a><nav aria-label="${language === "zh" ? "主导航" : "Main navigation"}">${c.nav.map((n, i) => link(["#organize", "#workflows", "#compatibility", "#install"][i], escape(n))).join("")}</nav><div class="nav-end">${link(c.otherPath, c.other, "language")}${link(config.repository, "GitHub " + arrow, "nav-github")}</div></header>
+<html lang="${c.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f5f3ec"><title>${escape(c.title)}</title><meta name="description" content="${escape(c.description)}"><link rel="canonical" href="${canonical}"><meta property="og:type" content="website"><meta property="og:title" content="${escape(c.title)}"><meta property="og:description" content="${escape(c.description)}"><meta property="og:url" content="${canonical}"><meta property="og:image" content="${config.url}assets/console.jpg"><meta name="twitter:card" content="summary_large_image"><link rel="icon" href="${base}favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="${base}styles.css"><script src="${base}site.js" defer></script></head>
+<body><a class="skip" href="#main">Skip to content</a>
+<header class="header wrap"><a class="brand" href="${base}" aria-label="Attend home">${mark}<span>attend<span class="brand-dot">.</span></span></a><nav aria-label="Main navigation">${c.nav.map((n, i) => link(["#organize", "#workflows", "#compatibility", "#install"][i], escape(n))).join("")}</nav><div class="nav-end">${link(config.repository, "GitHub " + arrow, "nav-github")}</div></header>
 <main id="main">
 <section class="hero wrap"><div class="hero-copy"><p class="eyebrow"><span class="live-dot"></span>${c.eyebrow}</p><h1>${c.heading}</h1><p class="intro">${c.intro}</p><div class="actions">${link("#install", c.start + ' <span aria-hidden="true">↓</span>', "button primary")}${link(config.repository, c.github + " " + arrow, "button secondary")}</div><p class="meta">${c.meta}</p></div><div class="hero-art" aria-label="${escape(c.heroNote)}"><div class="orbit-label tag-a"># release</div><div class="orbit-label tag-b"># backend</div><div class="orbit-label tag-c"># research</div><div class="paper-card paper-back"><span class="mono">codex · desktop-app</span><span class="paper-title">${escape(c.taskTitles[0])}</span><div class="paper-tags"><span>release</span><span>backend</span></div></div><div class="paper-card paper-front"><span class="card-top"><span class="tiny-dot"></span><span class="mono">claude · mobile-app</span><span aria-hidden="true">↗</span></span><span class="paper-title">${escape(c.taskTitles[3])}</span><span class="art-label">${escape(c.labelSample)} <span aria-hidden="true">✎</span></span><div class="paper-tags"><span>mobile</span><span>release</span></div></div><p class="art-caption">${c.heroNote}</p></div></section>
 <div class="providers wrap"><p class="eyebrow">${c.tools}</p><div>${providers.map((p, i) => `<span><b aria-hidden="true">${["✳", "◈", "↗", "△", "⌘", "◇"][i]}</b>${p}</span>`).join("")}</div></div>
@@ -64,20 +64,21 @@ function render(c, language) {
 <section class="section reference-section wrap"><div class="reference-heading"><h2>${c.referenceTitle}</h2><p>${c.referenceBody}</p></div><div class="reference-list">${groups}</div></section>
 <section class="section compatibility-section wrap" id="compatibility"><div class="section-head"><p class="eyebrow">${c.compatibilityEyebrow}</p><h2>${c.compatibilityTitle}</h2><p>${c.compatibilityBody}</p></div><div class="table-scroll" tabindex="0" role="region" aria-label="${c.nav[2]}"><table><thead><tr>${c.columns.map((x) => `<th scope="col">${x}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div><p class="fine-print">${c.compatibilityNote}</p><div class="local-note"><span aria-hidden="true">⌂</span><div><h3>${c.localTitle}</h3>${c.localParagraphs.map((p) => `<p>${p}</p>`).join("")}</div></div></section>
 <section class="install-section" id="install"><div class="wrap install-layout"><div><p class="eyebrow">${c.installEyebrow}</p><h2>${c.installTitle}</h2><p>${c.installBody}</p><div class="install-links">${link(config.repository + "#quick-start", c.docs + " " + arrow)}${link(config.repository + "/blob/main/CHANGELOG.md", c.changelog + " " + arrow)}</div></div><div class="install-card"><div class="command-head"><span>${c.scoped}</span><button class="copy-button" data-copy="npx --package=@sinphife/attend attend &quot;$PWD&quot;">${c.copy}</button></div><pre><code>npx --package=@sinphife/attend attend "$PWD"</code></pre><div class="command-head"><span>${c.global}</span><button class="copy-button" data-copy="npm install --global @sinphife/attend&#10;attend">${c.copy}</button></div><pre><code>npm install --global @sinphife/attend<br>attend</code></pre><p class="terminal-result"><span aria-hidden="true">↳</span> http://localhost:5050</p><p id="copy-status" role="status" aria-live="polite"></p></div></div><ul class="wrap install-notes">${c.installNotes.map((n) => `<li>${n}</li>`).join("")}</ul></section>
-<section class="section faq-section wrap"><h2>${language === "zh" ? "开始前，你可能想知道" : "Before you begin"}</h2><div>${c.faq.map(([q, a]) => `<details><summary>${q}<span class="plus" aria-hidden="true">+</span></summary><p>${a}</p></details>`).join("")}</div></section>
+<section class="section faq-section wrap"><h2>Before you begin</h2><div>${c.faq.map(([q, a]) => `<details><summary>${q}<span class="plus" aria-hidden="true">+</span></summary><p>${a}</p></details>`).join("")}</div></section>
 <section class="closing wrap"><p class="eyebrow">ATTEND / LOCAL-FIRST / OPEN SOURCE</p><h2>${c.closing}</h2><p>${c.closingBody}</p><div class="actions">${link("#install", c.start + " ↓", "button primary")}${config.kofi ? link(config.kofi, c.support + " " + arrow, "button secondary") : link(config.repository, c.github + " " + arrow, "button secondary")}</div></section>
-</main><footer class="footer wrap"><a class="brand" href="${base}">${mark}<span>attend.</span></a><div><p>${c.footer}</p><p>${c.privacy}</p></div><div>${link(config.repository, "GitHub ↗")}${link(config.repository + "/blob/main/LICENSE", "MIT ↗")}${link(c.otherPath, c.other)}</div></footer>
+</main><footer class="footer wrap"><a class="brand" href="${base}">${mark}<span>attend.</span></a><div><p>${c.footer}</p><p>${c.privacy}</p></div><div>${link(config.repository, "GitHub ↗")}${link(config.repository + "/blob/main/LICENSE", "MIT ↗")}</div></footer>
 <dialog id="label-dialog"><form id="label-form"><div class="dialog-heading"><h3>${c.labelEdit}</h3><button type="button" id="close-dialog" aria-label="${c.cancel}">×</button></div><label for="label-text">${c.labelInput}</label><input id="label-text" maxlength="80" required><label class="color-label" for="label-color">${c.colorInput}<input id="label-color" type="color" value="#0f766e"></label><div class="dialog-actions"><button type="button" id="cancel-label" class="button secondary">${c.cancel}</button><button type="submit" class="button primary">${c.save}</button></div></form></dialog>
 <script type="application/json" id="demo-data">${demo}</script></body></html>`;
 }
 
 await fs.mkdir(path.join(out, "zh"), { recursive: true });
 await fs.mkdir(path.join(out, "assets"), { recursive: true });
-for (const [lang, c] of Object.entries(content))
-  await fs.writeFile(
-    path.join(out, lang === "en" ? "index.html" : "zh/index.html"),
-    render(c, lang),
-  );
+await fs.writeFile(path.join(out, "index.html"), render(content.en));
+// Preserve existing bookmarks while keeping one English canonical site.
+await fs.writeFile(
+  path.join(out, "zh/index.html"),
+  `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Attend</title><meta http-equiv="refresh" content="0; url=../"><link rel="canonical" href="${config.url}"><meta name="robots" content="noindex"></head><body><p><a href="../">Continue to Attend</a></p></body></html>`,
+);
 for (const file of ["styles.css", "site.js", "favicon.svg"])
   await fs.copyFile(path.join(root, "website", file), path.join(out, file));
 await fs.copyFile(
@@ -91,6 +92,6 @@ await fs.writeFile(
 );
 await fs.writeFile(
   path.join(out, "sitemap.xml"),
-  `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${config.url}</loc></url><url><loc>${config.url}zh/</loc></url></urlset>`,
+  `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${config.url}</loc></url></urlset>`,
 );
-console.log(`Built English and Chinese GitHub Pages site: ${out}`);
+console.log(`Built English GitHub Pages site: ${out}`);

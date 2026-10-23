@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
-      - name: Build bilingual static site
+      - name: Build English static site
         run: node website/build.mjs
       - name: Check generated pages
         run: node website/check.mjs

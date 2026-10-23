@@ -19,8 +19,15 @@ for (const name of ["index.html", "zh/index.html"]) {
     assert(target === root || target.startsWith(root + path.sep), `${name}: path escapes output`);
     await fs.access(value.endsWith("/") ? path.join(target, "index.html") : target);
   }
-  assert.match(html, /<html lang="(?:en|zh-CN)">/);
+  assert.match(html, /<html lang="en">/);
   assert.match(html, /<link rel="canonical"/);
+  assert(!/[\u3400-\u9fff]/u.test(html), `${name}: website must be English only`);
+  if (name === "zh/index.html") {
+    assert.match(html, /http-equiv="refresh" content="0; url=\.\.\/"/);
+    assert.match(html, /name="robots" content="noindex"/);
+    console.log(`${name}: legacy redirect to English homepage OK`);
+    continue;
+  }
   assert.match(html, /<meta property="og:image"/);
   assert.match(html, /type="application\/json" id="demo-data"/);
   assert(!html.includes("undefined"), "Unresolved page content");
