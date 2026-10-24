@@ -5,7 +5,7 @@ Codex/ChatGPT, Cursor CLI, Antigravity CLI, GitHub Copilot CLI, and OpenCode.
 
 [中文 README](README.zh-CN.md)
 
-[Website & interactive tour](https://alvinfunborn.github.io/attend/)
+[Website & interactive tour](https://alvinfunborn.github.io/attend/) · [More projects by alvinfunborn](https://alvinfunborn.github.io/)
 
 Attend began with a simple need: **add tags to tasks**.
 

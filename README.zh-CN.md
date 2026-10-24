@@ -1,6 +1,6 @@
 # attend
 
-[Website & interactive tour](https://alvinfunborn.github.io/attend/)
+[Website & interactive tour](https://alvinfunborn.github.io/attend/) · [作者与更多项目](https://alvinfunborn.github.io/)
 
 一个用于管理 AI coding 任务注意力的本地网页控制台。目前已接入 Claude Code、Codex/ChatGPT、
 Cursor CLI、Antigravity CLI、GitHub Copilot CLI 和 OpenCode。
