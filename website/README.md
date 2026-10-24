@@ -17,6 +17,7 @@ Preview uses `http://127.0.0.1:5187/attend/`, including the repository subpath s
 - `build.mjs`: static HTML, metadata, sitemap and asset assembly.
 - `styles.css`, `site.js`: presentation and the sample interaction.
 - `config.mjs`: production URL, repository link, optional verified Ko-fi URL.
+- Ultrawide showcase: 3440 × 1440, six native session columns (four in the Midnight screenshot) and 60 synthetic sessions. The embedded demo offers Fit screen / Ultrawide width controls; the actual Settings column selector and panel divider remain available.
 - Product screenshots: `docs/assets/attend-*.jpg`, captured from current source with synthetic data.
 - `demo.ts`: invokes the native `renderConsole` and `buildWorkStats`, producing Dark, Light and Midnight demo routes plus native palette CSS.
 - `demo-runtime.js`: in-memory fixture backend; no CLI/model execution or external network.

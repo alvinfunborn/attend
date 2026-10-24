@@ -58,6 +58,24 @@
   );
 
   const consoleFrame = document.getElementById("native-console");
+  document.querySelectorAll("[data-demo-width]").forEach((button) =>
+    button.addEventListener("click", () => {
+      const width = button.dataset.demoWidth;
+      document.querySelector(".native-demo").dataset.workspaceWidth = width;
+      document.querySelectorAll("[data-demo-width]").forEach((item) =>
+        item.setAttribute("aria-pressed", String(item === button)),
+      );
+      // Reinitialize only the isolated sample so its native layout seeds itself
+      // against the chosen width. No real session or user preference is changed.
+      consoleFrame.src = consoleFrame.getAttribute("src").split("?")[0];
+      document.querySelectorAll("[data-tour]").forEach((item) =>
+        item.setAttribute("aria-pressed", String(item.dataset.tour === "overview")),
+      );
+      document.getElementById("tour-status").textContent = width === "fit"
+        ? "The native panel adapts to this screen. Resize its divider or use Settings → Middle panel columns."
+        : "3440px workspace: scroll horizontally to explore the full native layout, or open the workspace in a full browser tab.";
+    }),
+  );
   function showTour(view) {
     consoleFrame.contentWindow.postMessage({ type: "attend-demo-tour", view }, location.origin);
     document

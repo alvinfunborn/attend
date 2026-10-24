@@ -14,13 +14,23 @@ When AI coding work spreads across many sessions, finding a session by project o
 Attend keeps those signals next to the actual conversations, so organizing work and advancing it happen in the same local interface. The server binds to `127.0.0.1` by default.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Current Attend dark workspace with session analysis, tags, fork tabs, Pins, queues and scheduled messages">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend at 3440 × 1440: six native session columns, task analysis, tags, fork tabs, Pins, queues and scheduled messages">
 </p>
-<p align="center"><sub>Current source UI with 12 synthetic sessions and simulated activity. Dark, Light, and a custom Midnight theme; not real user data or performance claims.</sub></p>
+<p align="center"><sub>Current source UI with 60 synthetic sessions and simulated activity. Six-column Dark / Light and four-column custom Midnight ultrawide layouts; not real user data or performance claims.</sub></p>
 
 ## Actual interface & themes
 
 [Explore the actual interface](https://alvinfunborn.github.io/attend/demo/). These screenshots use the current `renderConsole` source, showing session structure, analysis, context tools and work patterns.
+
+**Light · ultrawide multi-column workspace**
+
+![Light ultrawide Attend workspace with six session columns](docs/assets/attend-ultrawide-light.jpg)
+
+**Midnight · four-column ultrawide workspace**
+
+![Midnight ultrawide Attend workspace with four session columns](docs/assets/attend-ultrawide-midnight.jpg)
+
+The middle panel adapts to its width. Drag its divider or choose Auto, 1–6 columns, or a custom count in Settings. The [website demo](https://alvinfunborn.github.io/attend/#organize) also offers a 3440px workspace mode with horizontal scrolling on narrower screens.
 
 **Light · custom handoff labels**
 

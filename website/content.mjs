@@ -13,12 +13,12 @@ export const content = {
     github: "View on GitHub",
     meta: "Open source · Local state · Your existing CLIs",
     heroNote:
-      "Current Attend interface. Explore sessions, analysis, relationships, and work patterns.",
+      "3440 × 1440 native workspace. Multiple session columns, rich analysis cards, and the conversation in view.",
     tools: "ONE LOCAL CONSOLE. SIX CODING CLIs.",
     demoEyebrow: "01 / THE REAL WORKSPACE",
     demoTitle: "Your sessions, with their full working context.",
     demoBody:
-      "This demo runs Attend’s own interface and styles with synthetic data. Explore the session list, tags and Focus views; inspect analysis, comments, fork relationships, queues, and Work patterns. The same controls live in the local app.",
+      "This demo runs Attend’s own interface and styles with 60 synthetic sessions. Its middle panel uses the native multi-column grid; expand the workspace to 3440px, drag the divider, or choose a column count in Settings. Explore the session list, tags and Focus views; inspect analysis, comments, fork relationships, queues, and Work patterns. The same controls live in the local app.",
     demoNote: "Actual Attend UI · Synthetic data · No CLI execution or model calls",
     filter: "Filter by tag",
     search: "Search sample tasks",
@@ -78,7 +78,7 @@ export const content = {
     screenBody:
       "Scan task cards, open a conversation, and continue in the same browser tab. Titles, first and latest prompts, attention signals, tags, and current state help you choose what to open.",
     screenCaption:
-      "Current Attend source UI, with 12 synthetic sessions across six providers. Sample activity and analysis, not real user data or performance claims.",
+      "Current Attend source UI with synthetic sessions across six providers. Ultrawide views use 60 sample tasks; detail views focus on individual features. Not real user data or performance claims.",
     screenAlt:
       "Attend console showing a tag sidebar, multi-project session cards and a conversation with queued work",
     workflowEyebrow: "05 / KEEP THE THREAD",
@@ -329,9 +329,21 @@ export const content = {
     gallery: [
       [
         "attend-console-demo.jpg",
-        "Dark / workspace",
-        "The full session workspace",
-        "Tags, Focus, first/latest prompts, state and priority, token usage, Pins, related chat tabs, queued and scheduled work.",
+        "Dark / ultrawide",
+        "A full-width command center for parallel work",
+        "3440 × 1440: a multi-column session panel with tags, priorities, handoff states, token usage, Pins, queues, and a conversation alongside.",
+      ],
+      [
+        "attend-ultrawide-light.jpg",
+        "Light / multi-column",
+        "More room for the work in progress",
+        "The same native multi-column workspace in Light, with many distinct tasks and handoff states visible together.",
+      ],
+      [
+        "attend-ultrawide-midnight.jpg",
+        "Midnight / multi-column",
+        "Parallel work in a custom theme",
+        "3440 × 1440 with four columns chosen in native Settings, the Midnight theme, session-card analysis and the active conversation.",
       ],
       [
         "attend-label-light.jpg",

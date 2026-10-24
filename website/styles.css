@@ -1393,3 +1393,28 @@ td {
 .gallery-frame strong {
   color: var(--ink);
 }
+
+/* Show the workspace at the scale it was designed for. The native console
+   retains its own columns, resizers and responsive behavior. */
+.hero { grid-template-columns: minmax(0, 1fr); gap: 34px; min-height: 0; padding-top: 56px; }
+.hero-copy { display: grid; grid-template-columns: 1fr 1fr; column-gap: 70px; align-items: start; }
+.hero-copy > .eyebrow { grid-column: 1 / -1; }
+.hero-copy > h1 { grid-column: 1; grid-row: 2 / 5; margin-bottom: 0; }
+.hero-copy > .intro, .hero-copy > .actions, .hero-copy > .meta { grid-column: 2; }
+.hero-product { width: min(2560px, calc(100vw - 48px)); position: relative; left: 50%; transform: translateX(-50%); }
+.hero-product img { min-height: 0; object-fit: contain; }
+.native-demo { width: min(3000px, calc(100vw - 48px)); position: relative; left: 50%; transform: translateX(-50%); }
+.native-demo-viewport { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-color: var(--accent) var(--surface); }
+.workspace-width { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 17px; background: var(--surface); }
+.workspace-width > span:first-child { font: 9px var(--mono); color: var(--ink-3); margin-right: 5px; }
+.workspace-width button { border: 1px solid var(--line-2); background: var(--surface); border-radius: 5px; padding: 8px 12px; font-size: 11px; }
+.workspace-width button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.workspace-width-note { font-size: 10px; color: var(--ink-3); margin-left: auto; }
+.native-demo[data-workspace-width="3440"] #native-console { width: 3440px; max-width: none; height: 1160px; }
+@media (max-width: 760px) {
+  .hero-copy { display: block; }
+  .hero-copy > h1 { margin-bottom: 24px; }
+  .hero-product, .native-demo { width: calc(100vw - 24px); }
+  .workspace-width-note { width: 100%; margin-left: 0; }
+  .workspace-width { padding: 10px; }
+}

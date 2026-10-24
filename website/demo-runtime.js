@@ -11,6 +11,12 @@
 
   var data = window.ATTEND_DEMO_FIXTURES;
   var view = data.view;
+  // Seed the product's own layout settings, not a separate demo grid. Resizers
+  // and Settings > Middle panel columns remain the native controls thereafter.
+  view.vaultState.layout.sidebarWidth = 260;
+  view.vaultState.layout.sessionPanelWidth = Math.round(Math.max(660, (window.innerWidth - 260) * 0.66));
+  view.vaultState.layout.sessionPanelColumns = "auto";
+  if (window.__VAULT_STATE__) window.__VAULT_STATE__.layout = Object.assign({}, view.vaultState.layout);
   var sources = new Set();
   var clone = function (v) {
     return JSON.parse(JSON.stringify(v));
@@ -228,6 +234,7 @@
             } else if (at >= 0) list[at] = body[key][fid];
             else list.push(body[key][fid]);
           });
+        else if (key === "layout") view.vaultState.layout = Object.assign({}, view.vaultState.layout, body[key]);
         else view.vaultState[key] = body[key];
       });
       return json({ ok: true });

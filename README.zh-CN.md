@@ -14,13 +14,23 @@ Attend 最初来自一个很简单的需求：**给任务加 tag**。
 Attend 围绕这些问题逐步发展，把组织任务、判断注意力去向和继续推进对话放在同一个本地界面里。Server 默认只绑定 `127.0.0.1`。
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="当前 Attend 深色工作台：会话分析、tag、分支 tabs、Pin、队列与定时消息">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="3440 × 1440 Attend 六列工作台：会话分析、tag、分支 tabs、Pin、队列与定时消息">
 </p>
-<p align="center"><sub>当前源码真实界面，使用 12 个虚构会话和合成活动数据。深色、浅色和自定义 Midnight 主题；不是实际用户数据或性能承诺。</sub></p>
+<p align="center"><sub>当前源码真实界面，使用 60 个虚构会话和合成活动数据。深色、浅色和自定义 Midnight 主题；不是实际用户数据或性能承诺。</sub></p>
 
 ## 实际界面与主题
 
 [打开真实界面交互演示](https://alvinfunborn.github.io/attend/demo/)。截图直接由 `renderConsole` 渲染当前版本，覆盖 session 结构、分析、上下文和工作模式。
+
+**浅色 · 带鱼屏六列工作台**
+
+![浅色六列 Attend 工作台](docs/assets/attend-ultrawide-light.jpg)
+
+**Midnight · 带鱼屏四列工作台**
+
+![Midnight 四列 Attend 工作台](docs/assets/attend-ultrawide-midnight.jpg)
+
+中间面板会随宽度自动排成多列，也可拖动分隔线，或在 Settings 中选择 Auto、1–6 列及自定义列数。[官网 Demo](https://alvinfunborn.github.io/attend/#organize) 新增 3440px 宽屏模式，窄屏可横向浏览。
 
 **浅色 · 自定义交接状态**
 
