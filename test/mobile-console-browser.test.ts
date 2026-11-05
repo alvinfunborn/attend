@@ -178,8 +178,8 @@ describe("mobile console initialization and layout", () => {
           }),
         )
         .toEqual([
-          { url: "/chat/live-stream", closed: true },
-          { url: "/chat/live-stream?lastEventId=42", closed: false },
+          { url: "/chat/live-stream?view=reading", closed: true },
+          { url: "/chat/live-stream?view=reading&lastEventId=42", closed: false },
         ]);
       expect(historyReads).toBe(1);
       await announce(page, { active: [], queues: {} });

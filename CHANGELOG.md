@@ -2,6 +2,22 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.11 — 2026-11-05
+
+### Changed
+
+- Chat and comment reading views show conversation text and interactive questions,
+  while ordinary tool calls retain lightweight activity and completion metadata.
+- Browser history and live streams omit ordinary tool inputs and outputs, reducing
+  retained memory and remote transfer volume without changing quiet timing.
+
+### Fixed
+
+- Bound transcript virtualization within long agent turns, derived model caches,
+  parked transcript payloads, and slow-client live-stream write queues.
+- Preserve streaming text after virtualization, question answers, Fork context,
+  and navigation from historical tool Pins to surrounding conversation text.
+
 ## 1.3.10 — 2026-10-23
 
 ### Added

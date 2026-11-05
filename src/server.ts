@@ -52,6 +52,7 @@ import {
   classifyOpencodeError,
 } from "./chat/process/errors.js";
 import { ChatQueueStore, type QueuedChatTurn } from "./chat/queue.js";
+import { ReadingViewEvents, readingViewMessages } from "./chat/reading-view.js";
 import { ChatDriverRegistry } from "./chat/registry.js";
 import type { SessionSearch } from "./chat/search-service.js";
 import { WorkerSessionSearch } from "./chat/search-worker-client.js";
@@ -70,6 +71,7 @@ import { EngagementStore } from "./core/engagement.js";
 import { type LaunchAction, type LaunchVendor, launchSession, revealPath } from "./core/launch.js";
 import type { ModelDefaults, ModelOption } from "./core/model-options.js";
 import { RuntimePerformanceMonitor } from "./core/performance.js";
+import { BoundedSseWriter } from "./core/sse-writer.js";
 import {
   avoidanceEvidence,
   avoidanceEvidenceData,
@@ -2788,6 +2790,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         status: "completed" | "failed";
         result: Record<string, unknown>;
       };
+  const readingViewEvents = new ReadingViewEvents();
   const liveSubscribers = new Set<(message: LiveBusMessage, eventId?: number) => void>();
   const liveEventBuffer: Array<{ id: number; message: LiveBusMessage; bytes: number }> = [];
   let liveEventBufferBytes = 0;
@@ -3221,6 +3224,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         ok: event.kind === "result" ? event.ok : event.kind === "tool_use",
       });
     }
+    // Classify question results even when no reading client is currently connected.
+    readingViewEvents.project(`${vendor}\u0000${sessionId}`, event);
     const message: LiveBusMessage = {
       kind: "session_event",
       sessionId,
@@ -4067,18 +4072,47 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         // to an old process and must not suppress this process's buffered events.
         const reconnecting = requestedLastEventId > 0 && requestedLastEventId <= liveEventId;
         let lastSentId = reconnecting ? requestedLastEventId : 0;
-        let sendChain = Promise.resolve();
+        const writer = new BoundedSseWriter(
+          (frame) => stream.writeSSE(frame),
+          () => stream.abort(),
+        );
         const send = (message: LiveBusMessage, eventId?: number) => {
           if (closed) return;
           if (eventId && eventId <= lastSentId) return;
           if (eventId) lastSentId = eventId;
-          const data = e2ee.enabled ? e2ee.encryptJson(message) : JSON.stringify(message);
+          const payload =
+            c.req.query("view") === "reading" &&
+            "kind" in message &&
+            message.kind === "session_event"
+              ? {
+                  ...message,
+                  event: readingViewEvents.project(
+                    `${message.vendor}\u0000${message.sessionId}`,
+                    message.event,
+                  ),
+                }
+              : message;
+          const data = e2ee.enabled ? e2ee.encryptJson(payload) : JSON.stringify(payload);
           const id = String(eventId ?? liveEventId);
           // One global bus must also be one ordered byte stream. Explicitly queue
           // writes so an assistant_text immediately followed by result/error can
           // never race at the HTTP stream boundary.
-          sendChain = sendChain.then(() => stream.writeSSE({ data, id })).catch(() => {});
+          writer.send({ data, id });
         };
+        const timer = setInterval(() => {
+          send(cachedLiveSnapshot);
+          scheduleLiveProjection();
+        }, LIVE_SNAPSHOT_INTERVAL_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        // Install cleanup before the handshake: even that first payload can
+        // exceed the budget, and abort must release this subscriber immediately.
+        stream.onAbort(() => {
+          closed = true;
+          writer.close();
+          clearInterval(timer);
+          liveSubscribers.delete(send);
+          resolve();
+        });
         liveSubscribers.add(send);
         if (reconnecting) {
           for (const buffered of liveEventBuffer) send(buffered.message, buffered.id);
@@ -4096,17 +4130,6 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         void refreshCommentProjection()
           .then(() => send(commentIndexMessage()))
           .catch(() => {});
-        const timer = setInterval(() => {
-          send(cachedLiveSnapshot);
-          scheduleLiveProjection();
-        }, LIVE_SNAPSHOT_INTERVAL_MS);
-        (timer as unknown as { unref?: () => void }).unref?.();
-        stream.onAbort(() => {
-          closed = true;
-          clearInterval(timer);
-          liveSubscribers.delete(send);
-          resolve();
-        });
       });
     }),
   );
@@ -4182,7 +4205,9 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (loaded.historyVersion !== commentHistoryVersion(thread, file)) {
       loaded = await loadHistory();
     }
-    const { messages, historyVersion } = loaded;
+    const { historyVersion } = loaded;
+    const messages =
+      c.req.query("view") === "reading" ? readingViewMessages(loaded.messages) : loaded.messages;
     const response = {
       ok: true,
       thread,
@@ -4653,9 +4678,13 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       .read(file, vendor || "claude", CHAT_HISTORY_LIMIT)
       .catch(() => null);
     if (!snapshot) return c.json({ ok: false, error: "transcript not found" }, 404);
+    const messages =
+      c.req.query("view") === "reading"
+        ? readingViewMessages(snapshot.messages)
+        : snapshot.messages;
     const around = c.req.query("around")?.trim() ?? "";
     if (around) {
-      const window = targetedHistoryWindow(snapshot.messages, around, c.req.query("radius"));
+      const window = targetedHistoryWindow(messages, around, c.req.query("radius"));
       if (!window) {
         return c.json({ ok: false, error: "history target not found" }, 404);
       }
@@ -4665,7 +4694,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         page: {
           before: window.start,
           hasMore: window.start > 0,
-          total: snapshot.messages.length,
+          total: messages.length,
           version: snapshot.version,
           sourceTruncated: snapshot.truncatedBefore,
         },
@@ -4675,8 +4704,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
           start: window.start,
           end: window.end,
           hasEarlier: window.start > 0,
-          hasLater: window.end < snapshot.messages.length,
-          total: snapshot.messages.length,
+          hasLater: window.end < messages.length,
+          total: messages.length,
           version: snapshot.version,
         },
       });
@@ -4690,11 +4719,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (c.req.query("full") === "1") {
       return c.json({
         ok: true,
-        messages: snapshot.messages,
+        messages: messages,
         page: {
           before: 0,
           hasMore: false,
-          total: snapshot.messages.length,
+          total: messages.length,
           version: snapshot.version,
           sourceTruncated: snapshot.truncatedBefore,
         },
@@ -4702,7 +4731,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     }
     if (c.req.query("paged") !== "1") {
       return c.json(
-        snapshot.messages.map(
+        messages.map(
           ({
             historyId: _historyId,
             historyOrdinal: _historyOrdinal,
@@ -4726,8 +4755,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
 
     const rawBefore = Number(c.req.query("before"));
     const before = Number.isFinite(rawBefore)
-      ? Math.max(0, Math.min(snapshot.messages.length, Math.floor(rawBefore)))
-      : snapshot.messages.length;
+      ? Math.max(0, Math.min(messages.length, Math.floor(rawBefore)))
+      : messages.length;
     const rawLimit = Number(c.req.query("limit"));
     const pageSize = Number.isFinite(rawLimit)
       ? Math.max(1, Math.min(CHAT_HISTORY_PAGE_MAX, Math.floor(rawLimit)))
@@ -4735,11 +4764,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     const start = Math.max(0, before - pageSize);
     return c.json({
       ok: true,
-      messages: snapshot.messages.slice(start, before),
+      messages: messages.slice(start, before),
       page: {
         before: start,
         hasMore: start > 0,
-        total: snapshot.messages.length,
+        total: messages.length,
         version: snapshot.version,
         sourceTruncated: snapshot.truncatedBefore,
       },

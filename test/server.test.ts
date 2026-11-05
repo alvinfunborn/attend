@@ -20,6 +20,7 @@ import { ChatEngine, type QueryFn } from "../src/chat/engine.js";
 import type { UiEvent } from "../src/chat/events.js";
 import { TranscriptHistoryCache } from "../src/chat/history-cache.js";
 import { searchSessions } from "../src/chat/search.js";
+import type { TranscriptMsg } from "../src/chat/transcript.js";
 import { resolveConfig } from "../src/config.js";
 import { buildAlignmentModel } from "../src/core/alignment.js";
 import { AnalysisCache } from "../src/core/daemon/cache.js";
@@ -3182,6 +3183,201 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       transcriptIndex,
     };
   }
+
+  it("serves lightweight reading history for chat and comments with stable Pin IDs and intact full history", async () => {
+    const { app, config } = appWithCodexSpy();
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    type HistoryResponse = { messages: TranscriptMsg[]; page: Record<string, unknown> };
+    const command = "command-data".repeat(10_000);
+    const output = "tool-output".repeat(50_000);
+    const question = { questions: [{ title: "Choose", options: ["A", "B"] }] };
+    const writeTranscript = (id: string) => {
+      const rows = [
+        { type: "session_meta", payload: { id, cwd: os.tmpdir() } },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "task" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Working" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec",
+            call_id: "exec-1",
+            arguments: JSON.stringify({ command }),
+          },
+        },
+        {
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "exec-1", output },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "functions.request_user_input_async",
+            call_id: "question-1",
+            arguments: JSON.stringify(question),
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "question-1",
+            output: '{"accepted":true}',
+          },
+        },
+      ];
+      fs.writeFileSync(
+        path.join(config.codexSessions, `rollout-${id}.jsonl`),
+        rows
+          .map((row) => JSON.stringify({ timestamp: new Date().toISOString(), ...row }))
+          .join("\n"),
+      );
+    };
+    try {
+      writeTranscript("reading-parent");
+      writeTranscript("cx-1");
+      await app.request("/");
+      const created = await app.request("/comments/send", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId: "reading-comment",
+          parentSessionId: "reading-parent",
+          anchorKey: "assistant:1",
+          anchorText: "Working",
+          question: "side question",
+        }),
+      });
+      expect(created.status).toBe(200);
+      for (const url of [
+        "/chat/messages?session=reading-parent&vendor=codex",
+        "/comments/messages?id=reading-comment",
+      ]) {
+        const full = (await (
+          await app.request(`${url}&paged=1&limit=60`)
+        ).json()) as HistoryResponse;
+        const tool = full.messages.flatMap((m) => m.tools).find((t) => t.id === "exec-1");
+        if (!tool) throw new Error("missing tool history");
+        expect(tool.input).toEqual({ command });
+        expect(tool.result).toBe(output);
+        for (const suffix of [
+          "&paged=1&limit=60",
+          "&full=1",
+          "",
+          `&around=${tool.historyId}&radius=20`,
+        ]) {
+          const response = await app.request(`${url}${suffix}&view=reading`);
+          expect(response.status).toBe(200);
+          const body = (await response.json()) as HistoryResponse | TranscriptMsg[];
+          const messages = Array.isArray(body) ? body : body.messages;
+          const tools = messages.flatMap((m) => m.tools);
+          expect(tools).toContainEqual(
+            expect.objectContaining({ id: "exec-1", input: null, result: "" }),
+          );
+          expect(tools).toContainEqual(
+            expect.objectContaining({
+              id: "question-1",
+              input: question,
+              result: '{"accepted":true}',
+            }),
+          );
+          if (suffix.includes("paged") && !Array.isArray(body)) {
+            expect(body.page).toEqual(full.page);
+            expect(tools[0]?.historyId).toBe(tool.historyId);
+            expect(messages.map((m) => m.historyId)).toEqual(full.messages.map((m) => m.historyId));
+          }
+          expect(JSON.stringify(messages).length).toBeLessThan(
+            JSON.stringify(full.messages).length / 100,
+          );
+        }
+        // Reading projection must not mutate the shared server history cache.
+        expect(
+          ((await (await app.request(`${url}&paged=1&limit=60`)).json()) as HistoryResponse)
+            .messages,
+        ).toEqual(full.messages);
+      }
+    } finally {
+      fs.rmSync(config.codexSessions, { recursive: true, force: true });
+    }
+  });
+
+  it("projects reading live events before transport and preserves question answers and reconnect replay", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "reading-live", startedAt: Date.now() }];
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    try {
+      for (const url of ["/chat/live-stream", "/chat/live-stream?view=reading"]) {
+        const response = await app.request(url);
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("missing stream");
+        readers.push(reader);
+        await readSseUntil(reader, (text) => text.includes('"kind":"session_index"'));
+      }
+      const payload = "hidden-tool-payload".repeat(20_000);
+      const question = { questions: [{ title: "Choose", options: ["A", "B"] }] };
+      codex.emitEvent("reading-live", { kind: "assistant_text", text: "start" });
+      const events: UiEvent[] = [
+        { kind: "tool_use", id: "exec", name: "exec", input: { command: payload } },
+        { kind: "tool_result", id: "exec", text: payload, isError: true },
+        {
+          kind: "tool_use",
+          id: "question",
+          name: "functions.request_user_input_async",
+          input: question,
+        },
+        { kind: "tool_result", id: "question", text: '{"accepted":true}', isError: false },
+        { kind: "tool_result", id: "question", text: '{"answer":"A"}', isError: false },
+        { kind: "assistant_text", text: "reading-test-end" },
+      ];
+      for (const event of events) codex.emitEvent("reading-live", event);
+      const streams = await Promise.all(
+        readers.map((reader) => readSseUntil(reader, (text) => text.includes("reading-test-end"))),
+      );
+      const sessionEvents = (text: string) =>
+        sseJsonMessages(text).filter((m) => m.kind === "session_event") as Array<{
+          emittedAt: number;
+          event: UiEvent;
+        }>;
+      const full = sessionEvents(streams[0] ?? "");
+      const reading = sessionEvents(streams[1] ?? "");
+      expect(reading.map((m) => m.emittedAt)).toEqual(full.map((m) => m.emittedAt));
+      expect(full.slice(1).map((m) => m.event)).toEqual(events);
+      const expected = [
+        { ...events[0], input: null },
+        { ...events[1], text: "" },
+        ...events.slice(2),
+      ];
+      expect(reading.slice(1).map((m) => m.event)).toEqual(expected);
+      expect(JSON.stringify(reading).length).toBeLessThan(JSON.stringify(full).length / 100);
+      const response = await app.request("/chat/live-stream?view=reading&lastEventId=1");
+      const replay = response.body?.getReader();
+      if (!replay) throw new Error("missing replay stream");
+      readers.push(replay);
+      const replayText = await readSseUntil(replay, (text) => text.includes("reading-test-end"));
+      expect(sessionEvents(replayText).map((m) => m.event)).toEqual(expected);
+      const snapshot = (await (await app.request("/chat/live")).json()) as {
+        lastAssistantAt: Record<string, number>;
+      };
+      expect(snapshot.lastAssistantAt["reading-live"]).toBe(reading.at(-1)?.emittedAt);
+    } finally {
+      await Promise.all(readers.map((reader) => reader.cancel()));
+    }
+  });
 
   it("creates a visible scheduled session card record and dispatches it once", async () => {
     const { app, codex } = appWithCodexSpy();

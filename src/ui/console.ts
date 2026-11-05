@@ -3557,11 +3557,13 @@ window.__CHANGELOG__ = ${changelogJson};
   function transcriptCacheCost(messages){
     return (messages||[]).reduce(function(total,message){
       var chars=String(message&&message.text||'').length;
+      (message&&message.attachments||[]).forEach(function(att){ chars+=String(att&&att.data||'').length+String(att&&att.text||'').length; });
+      (message&&message.references||[]).forEach(function(ref){ chars+=String(ref&&ref.text||'').length; });
       var memory=message&&message.memoryCitations;
       (memory&&memory.entries||[]).forEach(function(entry){ chars+=String(entry&&entry.path||'').length+String(entry&&entry.note||'').length+32; });
       (memory&&memory.rolloutIds||[]).forEach(function(id){ chars+=String(id||'').length; });
       (message&&message.tools||[]).forEach(function(tool){
-        chars+=String(tool&&tool.result||'').length;
+        chars+=String(tool&&tool.result||'').length+String(tool&&tool.name||'').length+String(tool&&tool.id||'').length+String(tool&&tool.historyId||'').length+96;
         try{ chars+=String(JSON.stringify(tool&&tool.input)||'').length; }catch(_err){ chars+=1024; }
       });
       return total+chars*2+256;
@@ -3663,12 +3665,16 @@ window.__CHANGELOG__ = ${changelogJson};
   var TRANSCRIPT_VIRTUAL_THRESHOLD = 120;
   var TRANSCRIPT_VIRTUAL_OVERSCAN_PX = 1400;
   var TRANSCRIPT_VIRTUAL_MIN_TURNS = 10;
+  // A single agent turn can contain thousands of tool calls. Bound the unit
+  // of virtualization as well as the number of units in the viewport.
+  var TRANSCRIPT_VIRTUAL_MAX_TURN_BLOCKS = 12;
   var transcriptVirtualState = null;
   var transcriptVirtualRaf = 0;
   var transcriptVirtualMeasureRaf = 0;
   var transcriptVirtualResizeObserver = null;
   var transcriptTurnHeightCaches = {};
   var transcriptVirtualModelCaches = {};
+  var TRANSCRIPT_MODEL_CACHE_MAX_BYTES = 16 * 1024 * 1024;
   // A tab switch should exchange viewport ownership, not rebuild an unchanged
   // transcript. Keep a small, weighted LRU of connected-but-hidden panes. Each
   // pane owns the DOM window and the virtual layout state that produced it; the
@@ -6685,6 +6691,14 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!entries.length) return null;
     return {entries:entries,rolloutIds:(Array.isArray(value.rolloutIds)?value.rolloutIds:[]).map(function(id){ return String(id||''); }).filter(Boolean)};
   }
+  function readingViewTool(tc){
+    if(isQuestionTool(tc.name,tc.input)) return Object.assign({},tc);
+    return {
+      id:tc.id,name:tc.name,input:null,
+      result:typeof tc.result==='string'?'':undefined,isError:tc.isError,
+      historyId:tc.historyId,historyOrdinal:tc.historyOrdinal,historyIndex:tc.historyIndex
+    };
+  }
   function cloneTranscriptMsgs(msgs){
     return Array.isArray(msgs) ? msgs.map(function(m){
       var ts=transcriptTs(m);
@@ -6694,7 +6708,7 @@ window.__CHANGELOG__ = ${changelogJson};
         attachments: cloneAttachments(m && m.attachments),
         references: clonePinReferences(m && m.references),
         memoryCitations: cloneMemoryCitations(m && m.memoryCitations)||undefined,
-        tools: Array.isArray(m && m.tools) ? m.tools.map(function(t){ return Object.assign({}, t); }) : [],
+        tools: Array.isArray(m && m.tools) ? m.tools.map(readingViewTool) : [],
         historyId: String(m&&m.historyId||'')||undefined,
         historyOrdinal: Number.isFinite(Number(m&&m.historyOrdinal)) ? Number(m.historyOrdinal) : undefined,
         historyIndex: Number.isFinite(Number(m&&m.historyIndex)) ? Number(m.historyIndex) : undefined,
@@ -6750,6 +6764,11 @@ window.__CHANGELOG__ = ${changelogJson};
     // one — an empty array most of all. Answering with it forked branches that
     // silently carried none of the conversation, with no error to notice.
     if(transcriptHasEarlierHistory(cur)) return null;
+    // Ordinary tool calls are deliberately absent from the reading view. The
+    // canonical cache still carries them, including empty/error completions,
+    // so a Fork must use that history rather than copying only visible text.
+    var history=cur&&cachedTranscriptFor(cur);
+    if(history&&history.some(function(message){ return (message.tools||[]).some(function(tool){ return !isQuestionTool(tool.name,tool.input); }); })) return null;
     var out=[], node=msgs.firstChild;
     while(node && node!==msgEl){
       if(node.nodeType===1 && node.classList){
@@ -6930,30 +6949,26 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!tc) return;
     var msg=ensureAssistantTranscriptMsg(s);
     if(!msg) return;
-    msg.tools.push({
-      id: tc.id ?? null,
-      name: tc.name,
-      input: tc.input,
-      result: tc.result,
-      isError: tc.isError === true
-    });
+    msg.tools.push(readingViewTool(tc));
     bumpTranscriptVersion(s);
   }
   function cacheTranscriptToolResult(s, id, text, isError){
     var state=ensureTranscriptState(s);
-    if(!state) return;
+    if(!state) return false;
     for(var i=state.length-1;i>=0;i--){
       var tools=state[i] && state[i].tools;
       if(!tools || !tools.length) continue;
       for(var j=tools.length-1;j>=0;j--){
         if((tools[j].id||null)===(id||null)){
+          text = isQuestionTool(tools[j].name,tools[j].input) ? text : '';
           tools[j].result = text;
           tools[j].isError = !!isError;
           patchTranscriptVirtualToolResult(s,id,text,isError);
-          return;
+          return true;
         }
       }
     }
+    return false;
   }
   function cachedTranscriptFor(s){
     if(!s) return null;
@@ -7125,18 +7140,27 @@ window.__CHANGELOG__ = ${changelogJson};
       };
     });
     var turns=[],current=null,msgIndex=0,toolIndex=0,blockCount=0,blockOrder=0,keyToTurn={},keyOrder={},historyIdToKey={},keyToHistoryId={},firstUserKey='',lastUserKey='';
+    var readableKey='',unanchoredToolIds=[];
     function finishTurn(){
       if(!current||!current.entries.length) return;
       current.estimate=Math.max(52,current.entries.reduce(function(total,entry){ return total+transcriptVirtualEntryEstimate(entry); },0));
       turns.push(current); current=null;
     }
     function addEntry(entry){
+      if(entry.kind==='msg'){
+        readableKey=entry.key;
+        unanchoredToolIds.forEach(function(id){ historyIdToKey[id]=readableKey; });
+        unanchoredToolIds=[];
+      }
       if(entry.kind==='msg'&&entry.role==='user'){
         finishTurn();
         current={key:entry.key,entries:[]};
         if(!firstUserKey) firstUserKey=entry.key;
         lastUserKey=entry.key;
-      } else if(!current) current={key:'intro:'+turns.length,entries:[]};
+      } else {
+        if(current&&current.entries.length>=TRANSCRIPT_VIRTUAL_MAX_TURN_BLOCKS) finishTurn();
+        if(!current) current={key:'chunk:'+entry.key,entries:[]};
+      }
       current.entries.push(entry); blockCount++;
     }
     function addPendingAt(index){
@@ -7161,6 +7185,15 @@ window.__CHANGELOG__ = ${changelogJson};
         var historyToolOrdinal=Number(tool&&tool.historyOrdinal);
         var ordinal=Number.isFinite(historyToolOrdinal)?historyToolOrdinal:toolIndex;
         toolIndex=Math.max(toolIndex,ordinal+1);
+        if(!isQuestionTool(tool.name,tool.input)){
+          // Old tool Pins still lead to their surrounding text, without
+          // resurrecting execution blocks in the reading view.
+          if(tool.historyId){
+            if(readableKey) historyIdToKey[tool.historyId]=readableKey;
+            else unanchoredToolIds.push(tool.historyId);
+          }
+          return;
+        }
         var key=transcriptVirtualToolKey(tool,ordinal);
         addEntry({kind:'tool',key:key,ordinal:ordinal,tool:tool,historyId:tool&&tool.historyId,historyIndex:tool&&tool.historyIndex});
       });
@@ -7180,9 +7213,22 @@ window.__CHANGELOG__ = ${changelogJson};
     var pending=sessionId&&localPendingMsgs[sessionId];
     if(!s||pending&&pending.length) return buildTranscriptVirtualModel(msgs,sessionId);
     var key=transcriptVirtualKey(sessionId),stamp=transcriptPaneStamp(s),cached=key&&transcriptVirtualModelCaches[key];
-    if(cached&&cached.stamp===stamp) return cached.model;
+    if(cached&&cached.stamp===stamp){
+      objectCacheSet(transcriptVirtualModelCaches,key,cached,80);
+      return cached.model;
+    }
     var model=buildTranscriptVirtualModel(msgs,sessionId);
-    if(key) objectCacheSet(transcriptVirtualModelCaches,key,{stamp:stamp,model:model},80);
+    if(key){
+      // Derived models retain message/tool payloads even after the primary
+      // transcript LRU evicts them. Give these references their own byte budget.
+      objectCacheSet(transcriptVirtualModelCaches,key,{stamp:stamp,model:model,cost:transcriptCacheCost(msgs)+model.blockCount*384},80);
+      var keys=Object.keys(transcriptVirtualModelCaches);
+      var bytes=keys.reduce(function(total,k){ return total+transcriptVirtualModelCaches[k].cost; },0);
+      while(bytes>TRANSCRIPT_MODEL_CACHE_MAX_BYTES&&keys.length){
+        var oldest=keys.shift(); bytes-=transcriptVirtualModelCaches[oldest].cost;
+        delete transcriptVirtualModelCaches[oldest];
+      }
+    }
     return model;
   }
   function transcriptTurnHeightCache(key){
@@ -7400,6 +7446,7 @@ window.__CHANGELOG__ = ${changelogJson};
     else if(options.keepScroll) host.scrollTop=previousTop;
     else host.scrollTop=host.scrollHeight;
     scheduleTranscriptVirtualMeasure(state,pinBottom);
+    restoreVirtualStreamingTargets(state);
   }
   function transcriptSelectionIsActive(host){
     if(host.querySelector('.msg.editing, .inline-edit')) return true;
@@ -7559,7 +7606,7 @@ window.__CHANGELOG__ = ${changelogJson};
       msgOrdinal:msgOrdinal,
       toolOrdinal:toolOrdinal,
       width:host.clientWidth,
-      cost:transcriptPaneCost(host)
+      cost:transcriptPaneCost(host)+(transcriptVirtualState?transcriptCacheCost(transcriptStateRef(s)||[]):0)
     };
     suspendTranscriptVirtualRuntime();
     host.style.visibility='';
@@ -7996,7 +8043,8 @@ window.__CHANGELOG__ = ${changelogJson};
     for(var i=0;nodes&&i<nodes.length;i++){
       if(nodes[i].getAttribute('data-history-id')===historyId) return String(nodes[i].getAttribute('data-msg-key')||'');
     }
-    return String(transcriptVirtualState&&transcriptVirtualState.historyIdToKey&&transcriptVirtualState.historyIdToKey[historyId]||'');
+    var model=transcriptVirtualState||(cur&&transcriptVirtualModelFor(transcriptStateRef(cur)||[],cur.sessionId));
+    return String(model&&model.historyIdToKey&&model.historyIdToKey[historyId]||'');
   }
   function pinMatchesRenderedBlock(pin,target){
     if(!pin||!target) return false;
@@ -8572,6 +8620,11 @@ window.__CHANGELOG__ = ${changelogJson};
     for(var i=0;nodes&&i<nodes.length;i++){
       if(nodes[i].getAttribute('data-history-id')===historyId) return String(nodes[i].getAttribute('data-msg-key')||'');
     }
+    // A targeted history fetch retains the canonical records in the cache.
+    // Reuse the reading-view mapping for old Pins on hidden comment tools.
+    var messages=commentMessageCache[commentDrawerState.threadId]||[];
+    var key=buildTranscriptVirtualModel(messages).historyIdToKey[historyId]||'';
+    if(key.indexOf('user:')===0||key.indexOf('assistant:')===0) return 'comment:'+msgIndexFromKey(key);
     return '';
   }
   function scrollToCommentMsgKey(key,pin){
@@ -8877,6 +8930,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function appendCommentTool(tc){
     var host=byId('commentMsgs'); if(!host||!tc) return null;
     var block=addTool(tc,{target:host,registry:commentToolEls,readonly:true});
+    if(!block) return null;
     keepCommentGeneratingLast();
     if(commentStick) host.scrollTop=host.scrollHeight;
     syncScrollBottomButton(host,byId('commentScrollBottom'));
@@ -9012,13 +9066,15 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function commentHistoryContentSize(messages){
     return (messages||[]).reduce(function(total,message){
-      var tools=message&&message.tools||[],toolSize=0;
-      try{ toolSize=JSON.stringify(tools).length; }catch(_err){ toolSize=tools.length; }
+      // The open-drawer cache contains the reading view. Hidden execution
+      // payloads in an older disk snapshot must not outweigh newer live text.
+      var tools=(message&&message.tools||[]).filter(function(tool){ return isQuestionTool(tool.name,tool.input); }),toolSize=0;
+      if(tools.length){ try{ toolSize=JSON.stringify(tools).length; }catch(_err){ toolSize=tools.length; } }
       return total+String(message&&message.text||'').length+toolSize;
     },0);
   }
   function commentHistoryUrl(threadId,before){
-    var url='/comments/messages?id='+encodeURIComponent(threadId)+'&paged=1&limit=60';
+    var url='/comments/messages?id='+encodeURIComponent(threadId)+'&paged=1&limit=60&view=reading';
     if(before!=null) url+='&before='+encodeURIComponent(before);
     return url;
   }
@@ -9142,7 +9198,10 @@ window.__CHANGELOG__ = ${changelogJson};
       if(res&&res.thread) thread=rememberCommentThread(res.thread)||thread;
       var fresh=res&&res.messages||[],cached=commentMessageCache[threadId]||[];
       var keepCached=thread.status==='generating'&&commentHistoryContentSize(cached)>commentHistoryContentSize(fresh);
-      seedCommentGenerationTiming(thread,keepCached?cached:fresh);
+      // Even when the live text is ahead, disk-only tool activity still counts
+      // toward quiet. Seed timing before the reading view discards those tools.
+      seedCommentGenerationTiming(thread,fresh);
+      if(keepCached) seedCommentGenerationTiming(thread,cached);
       if(!keepCached) commentHistoryPages[threadId]=Object.assign({},res&&res.page||{before:0,hasMore:false,total:fresh.length,version:responseVersion},{loading:false});
       renderCommentMessages(keepCached?cached:fresh);
       if(responseVersion){
@@ -18503,6 +18562,10 @@ window.__CHANGELOG__ = ${changelogJson};
   // tc = { id?, name, input, result?, isError? }
   function addTool(tc,opts){
     opts=opts||{};
+    // Keep the transcript focused on text and questions requiring an answer.
+    // Filter before formatting inputs, diffs or results, not with hidden DOM.
+    // Explicit references to older tool comments can still render their anchor.
+    if(!opts.reference&&!isQuestionTool(tc.name,tc.input)){ toolOrdinal++; return null; }
     var registry=opts.registry||toolEls;
     if(!opts.reference&&tc.id&&registry[tc.id]) return registry[tc.id];
     if(!opts.reference) clearPh();
@@ -18573,7 +18636,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var id=providerSessionId(s),query=id
       ? 'session='+encodeURIComponent(id)
       : 'file='+encodeURIComponent(s&&s.file||'');
-    var url='/chat/messages?'+query+'&vendor='+encodeURIComponent(s&&s.vendor||'')+'&paged=1&limit=60';
+    var url='/chat/messages?'+query+'&vendor='+encodeURIComponent(s&&s.vendor||'')+'&paged=1&limit=60&view=reading';
     if(before!=null) url+='&before='+encodeURIComponent(before);
     return url;
   }
@@ -19214,7 +19277,7 @@ window.__CHANGELOG__ = ${changelogJson};
       return;
     }
     closeLiveStateStream();
-    var source=new EventSource('/chat/live-stream'+(liveLastEventId?'?lastEventId='+encodeURIComponent(liveLastEventId):''));
+    var source=new EventSource('/chat/live-stream?view=reading'+(liveLastEventId?'&lastEventId='+encodeURIComponent(liveLastEventId):''));
     liveStateSource=source;
     liveLastMessageAt=Date.now();
     var opened=false,needsReconcile=!!recovering;
@@ -19613,13 +19676,13 @@ window.__CHANGELOG__ = ${changelogJson};
       assistantEl=null; // catch-up persists across tools (tools dedup by id below)
       cacheTranscriptToolUse(cur, {id:ev.id,name:ev.name,input:ev.input});
       var d=ev.id&&toolEls[ev.id] ? toolEls[ev.id] : addTool({id:ev.id,name:ev.name,input:ev.input});
-      if(ev.id) toolEls[ev.id]=d;
+      if(ev.id&&d) toolEls[ev.id]=d;
       if(isQuestionTool(ev.name, ev.input) && !isAsyncQuestionTool(ev.name) && turnActive) endTurn();
     }
     else if(ev.kind==='tool_result'){ finalizeStreamingMessage(assistantEl); assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
-      cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
+      var cachedToolResult=cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
       if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; updateToolBlockResult(t,ev.text,ev.isError); if(hasQuestionAnswerResult(ev.text, ev.isError,t._attendTool&&t._attendTool.name)) lockQuestionTool(t); }
-      else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
+      else if(!cachedToolResult) { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
       keepGenLast(); scroll(); scheduleLatestPin(); }
     else if(ev.kind==='goal'){ applyGoalState(cur,ev.goal||null); }
     else if(ev.kind==='result'){
@@ -19645,6 +19708,19 @@ window.__CHANGELOG__ = ${changelogJson};
       if(ev.turnActive && !turnActive) beginTurn(ev.startedAt);
       else if(!ev.turnActive) recoverCurrentTurnFromSync(ev);
     }
+    if(ev.kind==='tool_result'||ev.kind==='tool_use'||ev.kind==='result'||ev.kind==='user_turn_started'||ev.kind==='queued_turn_started') compactLiveTranscript();
+  }
+  function compactLiveTranscript(){
+    var host=byId('msgs');
+    // Compact at structural boundaries, when no text bubble is being streamed.
+    // Preserve an active selection and the reader's anchor instead of jumping.
+    if(!cur||!host||assistantEl||transcriptSelectionIsActive(host)||chatAnchorJump) return;
+    var tail=transcriptLiveTail(host);
+    if(tail ? tail.childElementCount<32 : host.childElementCount<=TRANSCRIPT_VIRTUAL_THRESHOLD) return;
+    var history=transcriptStateRef(cur);
+    if(!history) return;
+    var mode=stick?undefined:{top:host.scrollTop,anchor:transcriptViewportAnchor()};
+    renderPersistedAndPending(history,cur.sessionId,mode);
   }
   function send(){
     if(!cur) return;

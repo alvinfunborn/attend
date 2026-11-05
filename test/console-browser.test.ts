@@ -4835,110 +4835,123 @@ describe("console browser behavior", () => {
     { source: "cached", kind: "tool" },
     { source: "targeted", kind: "message" },
     { source: "targeted", kind: "tool" },
-  ])("locates a $source $kind Pin outside the virtualized DOM", async ({ source, kind }) => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
-    const historyRequests: string[] = [];
-    const history = Array.from({ length: 300 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
-      text: `Historical message ${index}. ${"detail ".repeat(24)}`,
-      historyId: `m_${index}`,
-      historyOrdinal: index,
-      historyIndex: index,
-      tools:
-        index % 2 === 0
-          ? []
-          : [
+  ])(
+    "locates a $source $kind Pin at readable text outside the loaded view",
+    async ({ source, kind }) => {
+      const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+      const historyRequests: string[] = [];
+      const history = Array.from({ length: 300 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text: `Historical message ${index}. ${"detail ".repeat(24)}`,
+        historyId: `m_${index}`,
+        historyOrdinal: index,
+        historyIndex: index,
+        tools:
+          index % 2 === 0
+            ? []
+            : [
+                {
+                  id: `tool_${index}`,
+                  name: "exec_command",
+                  input: { cmd: `echo ${index}` },
+                  result: `result ${index}`,
+                  historyId: `t_${index}`,
+                  historyOrdinal: Math.floor(index / 2),
+                  historyIndex: index,
+                },
+              ],
+      }));
+      const historyId = kind === "tool" ? "t_41" : "m_41";
+      const pinView: ConsoleView = {
+        ...raceView,
+        vaultState: {
+          pins: {
+            "attend.pins.v1:s1": [
               {
-                id: `tool_${index}`,
-                name: "exec_command",
-                input: { cmd: `echo ${index}` },
-                result: `result ${index}`,
-                historyId: `t_${index}`,
-                historyOrdinal: Math.floor(index / 2),
-                historyIndex: index,
+                // A saved ordinal can differ from the current history snapshot.
+                key: kind === "tool" ? "tool:old" : "assistant:1",
+                role: kind === "tool" ? "tool" : "claude",
+                text: kind === "tool" ? "Tool: exec_command" : "Historical message 41.",
+                historyId,
+                pinnedAt: 1,
               },
             ],
-    }));
-    const historyId = kind === "tool" ? "t_41" : "m_41";
-    const pinView: ConsoleView = {
-      ...raceView,
-      vaultState: {
-        pins: {
-          "attend.pins.v1:s1": [
-            {
-              // A saved ordinal can differ from the current history snapshot.
-              key: kind === "tool" ? "tool:old" : "assistant:1",
-              role: kind === "tool" ? "tool" : "claude",
-              text: kind === "tool" ? "Tool: exec_command" : "Historical message 41.",
-              historyId,
-              pinnedAt: 1,
-            },
-          ],
-        },
-      },
-    };
-    await page.addInitScript(() => {
-      class StubEventSource {
-        static readonly CLOSED = 2;
-        close() {}
-      }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
-    });
-    await page.route("**/*", async (route) => {
-      const url = new URL(route.request().url());
-      if (url.pathname === "/") {
-        await route.fulfill({ contentType: "text/html", body: renderConsole(pinView) });
-      } else if (url.pathname === "/chat/messages") {
-        historyRequests.push(url.search);
-        const around = url.searchParams.get("around");
-        const start = around ? 21 : source === "cached" ? 0 : 240;
-        const end = around ? 62 : history.length;
-        await route.fulfill({
-          json: {
-            ok: true,
-            messages: history.slice(start, end),
-            page: {
-              before: start,
-              hasMore: start > 0,
-              total: history.length,
-              version: "history-v1",
-              sourceTruncated: false,
-            },
           },
-        });
+        },
+      };
+      await page.addInitScript(() => {
+        class StubEventSource {
+          static readonly CLOSED = 2;
+          close() {}
+        }
+        Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      });
+      await page.route("**/*", async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/") {
+          await route.fulfill({ contentType: "text/html", body: renderConsole(pinView) });
+        } else if (url.pathname === "/chat/messages") {
+          historyRequests.push(url.search);
+          const around = url.searchParams.get("around");
+          const start = around ? 21 : source === "cached" ? 0 : 240;
+          const end = around ? 62 : history.length;
+          await route.fulfill({
+            json: {
+              ok: true,
+              messages: history.slice(start, end),
+              page: {
+                before: start,
+                hasMore: start > 0,
+                total: history.length,
+                version: "history-v1",
+                sourceTruncated: false,
+              },
+            },
+          });
+        } else {
+          await route.fulfill({ json: { ok: true, items: [] } });
+        }
+      });
+
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+      await page.locator('#list .item[data-session-id="s1"]').click();
+      await expect
+        .poll(() => page.locator("#msgs").textContent())
+        .toContain("Historical message 299.");
+      // Old tool Pins now navigate to their surrounding assistant text.
+      const target = page.locator('#msgs [data-history-id="m_41"]');
+      expect(await target.count()).toBe(0);
+
+      await page.locator("#pinTray .pinitem").click();
+      await expect.poll(() => target.count()).toBe(1);
+      await expect
+        .poll(() =>
+          target.evaluate((node) => {
+            const host = node.closest("#msgs");
+            if (!host) return false;
+            const rect = node.getBoundingClientRect();
+            const frame = host.getBoundingClientRect();
+            return rect.top >= frame.top && rect.top < frame.bottom;
+          }),
+        )
+        .toBe(true);
+      if (source === "cached") {
+        expect(await page.locator("#msgs").getAttribute("class")).toContain(
+          "transcript-virtualized",
+        );
+        expect(await page.locator("#msgs .msg").count()).toBeLessThan(100);
       } else {
-        await route.fulfill({ json: { ok: true, items: [] } });
+        // The targeted window has 101 text blocks, below the virtualization
+        // threshold once the tool executions are omitted.
+        expect(await page.locator("#msgs .msg").count()).toBe(101);
       }
-    });
-
-    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
-    await page.locator('#list .item[data-session-id="s1"]').click();
-    await expect
-      .poll(() => page.locator("#msgs").textContent())
-      .toContain("Historical message 299.");
-    const target = page.locator(`#msgs [data-history-id="${historyId}"]`);
-    expect(await target.count()).toBe(0);
-
-    await page.locator("#pinTray .pinitem").click();
-    await expect.poll(() => target.count()).toBe(1);
-    await expect
-      .poll(() =>
-        target.evaluate((node) => {
-          const host = node.closest("#msgs");
-          if (!host) return false;
-          const rect = node.getBoundingClientRect();
-          const frame = host.getBoundingClientRect();
-          return rect.top >= frame.top && rect.top < frame.bottom;
-        }),
-      )
-      .toBe(true);
-    expect(await page.locator("#msgs").getAttribute("class")).toContain("transcript-virtualized");
-    expect(await page.locator("#msgs .msg, #msgs .toolc").count()).toBeLessThan(100);
-    expect(await page.locator("#toastHost .toast.warn").count()).toBe(0);
-    expect(historyRequests).toHaveLength(source === "cached" ? 1 : 2);
-    if (source === "targeted") expect(historyRequests[1]).toContain(`around=${historyId}`);
-    await page.close();
-  });
+      expect(await page.locator("#msgs .toolc").count()).toBe(0);
+      expect(await page.locator("#toastHost .toast.warn").count()).toBe(0);
+      expect(historyRequests).toHaveLength(source === "cached" ? 1 : 2);
+      if (source === "targeted") expect(historyRequests[1]).toContain(`around=${historyId}`);
+      await page.close();
+    },
+  );
 
   it("restores existing fork relations as a chat tab group", async () => {
     const page = await browser.newPage({
@@ -8952,30 +8965,9 @@ describe("console browser behavior", () => {
     await laterUser.locator(".inline-edit-save").click();
 
     await expect.poll(() => forkBody).not.toBeNull();
-    await expect.poll(() => page.locator("#msgs .toolc").count()).toBe(4);
-    expect(
-      await page
-        .locator('#msgs .toolc[data-tool-id="exec-output"]')
-        .getAttribute("data-tool-pending"),
-    ).toBeNull();
-    expect(
-      await page
-        .locator('#msgs .toolc[data-tool-id="exec-empty"]')
-        .getAttribute("data-tool-pending"),
-    ).toBeNull();
-    expect(
-      await page
-        .locator('#msgs .toolc[data-tool-id="exec-error"]')
-        .getAttribute("data-tool-pending"),
-    ).toBeNull();
-    expect(
-      await page.locator('#msgs .toolc[data-tool-id="exec-error"]').getAttribute("data-tool-error"),
-    ).toBe("true");
-    expect(
-      await page
-        .locator('#msgs .toolc[data-tool-id="exec-pending"]')
-        .getAttribute("data-tool-pending"),
-    ).toBe("true");
+    // Tools are absent from both the original and fork reading views, while
+    // their completion/error state is still sent in the complete fork context.
+    expect(await page.locator("#msgs .toolc").count()).toBe(0);
 
     const capturedForkBody = forkBody as ForkBody | null;
     const contextTools =
@@ -8984,23 +8976,23 @@ describe("console browser behavior", () => {
       {
         id: "exec-output",
         name: "exec",
-        input: "run output command",
-        result: "done",
+        input: null,
+        result: "",
       },
       {
         id: "exec-empty",
         name: "exec",
-        input: "run silent command",
+        input: null,
         result: "",
       },
       {
         id: "exec-error",
         name: "exec",
-        input: "run failing command",
-        result: "failed",
+        input: null,
+        result: "",
         isError: true,
       },
-      { id: "exec-pending", name: "exec", input: "still running" },
+      { id: "exec-pending", name: "exec", input: null },
     ]);
 
     releaseFork();
@@ -10166,170 +10158,184 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("loads one targeted window when a CommentPanel Pin is outside the recent page", async () => {
-    const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
-    page.setDefaultTimeout(3_000);
-    const historyRequests: string[] = [];
-    const commentPinView: ConsoleView = {
-      ...commentView,
-      vaultState: {
-        ...commentView.vaultState,
-        pins: {
-          ...commentView.vaultState?.pins,
-          "attend.pins.v1:comment:comment-1": [
-            {
-              key: "comment:1",
-              role: "claude",
-              text: "Pinned old comment reply",
-              pinnedAt: 1,
-              historyId: "m_comment_pin_target",
-            },
-          ],
+  it.each(["message", "tool"])(
+    "loads a targeted window for a CommentPanel %s Pin outside the recent page",
+    async (kind) => {
+      const historyId = kind === "tool" ? "t_comment_pin_target" : "m_comment_pin_target";
+      const page = await browser.newPage({ viewport: { width: 1200, height: 820 } });
+      page.setDefaultTimeout(3_000);
+      const historyRequests: string[] = [];
+      const commentPinView: ConsoleView = {
+        ...commentView,
+        vaultState: {
+          ...commentView.vaultState,
+          pins: {
+            ...commentView.vaultState?.pins,
+            "attend.pins.v1:comment:comment-1": [
+              {
+                key: kind === "tool" ? "tool:old" : "comment:1",
+                role: "claude",
+                text: "Pinned old comment reply",
+                pinnedAt: 1,
+                historyId,
+              },
+            ],
+          },
         },
-      },
-    };
-    await page.addInitScript(() => {
-      class StubEventSource {
-        static readonly CLOSED = 2;
-        close() {}
-      }
-      Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
-    });
-    await page.route("**/*", async (route) => {
-      const url = new URL(route.request().url());
-      if (url.pathname === "/") {
-        await route.fulfill({
-          contentType: "text/html",
-          body: renderConsole(commentPinView),
-        });
-      } else if (url.pathname === "/comments/messages") {
-        historyRequests.push(url.search);
-        if (url.searchParams.get("around") === "m_comment_pin_target") {
+      };
+      await page.addInitScript(() => {
+        class StubEventSource {
+          static readonly CLOSED = 2;
+          close() {}
+        }
+        Object.defineProperty(globalThis, "EventSource", { value: StubEventSource });
+      });
+      await page.route("**/*", async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/") {
           await route.fulfill({
-            json: {
-              ok: true,
-              epoch: "comment-pin-epoch",
-              generatedAt: 100,
-              historyVersion: "comment-history-v1",
-              thread: commentPinView.vaultState?.commentThreads?.["comment-1"],
-              messages: [
-                {
-                  role: "user",
-                  text: "nearby old comment",
-                  tools: [],
-                  historyId: "m_comment_pin_before",
-                  historyOrdinal: 0,
-                  historyIndex: 0,
+            contentType: "text/html",
+            body: renderConsole(commentPinView),
+          });
+        } else if (url.pathname === "/comments/messages") {
+          historyRequests.push(url.search);
+          if (url.searchParams.get("around") === historyId) {
+            await route.fulfill({
+              json: {
+                ok: true,
+                epoch: "comment-pin-epoch",
+                generatedAt: 100,
+                historyVersion: "comment-history-v1",
+                thread: commentPinView.vaultState?.commentThreads?.["comment-1"],
+                messages: [
+                  {
+                    role: "user",
+                    text: "nearby old comment",
+                    tools: [],
+                    historyId: "m_comment_pin_before",
+                    historyOrdinal: 0,
+                    historyIndex: 0,
+                  },
+                  {
+                    role: "assistant",
+                    text: "Pinned old comment reply",
+                    tools: [
+                      {
+                        id: "old-comment-tool",
+                        name: "exec",
+                        input: "work",
+                        result: "done",
+                        historyId: "t_comment_pin_target",
+                      },
+                    ],
+                    historyId: "m_comment_pin_target",
+                    historyOrdinal: 1,
+                    historyIndex: 1,
+                  },
+                  {
+                    role: "user",
+                    text: "nearby old follow-up",
+                    tools: [],
+                    historyId: "m_comment_pin_after",
+                    historyOrdinal: 2,
+                    historyIndex: 2,
+                  },
+                ],
+                page: {
+                  before: 0,
+                  hasMore: false,
+                  total: 6,
+                  version: "comment-history-v1",
                 },
-                {
-                  role: "assistant",
-                  text: "Pinned old comment reply",
-                  tools: [],
+                window: {
                   historyId: "m_comment_pin_target",
-                  historyOrdinal: 1,
-                  historyIndex: 1,
+                  center: 1,
+                  start: 0,
+                  end: 3,
+                  hasEarlier: false,
+                  hasLater: true,
+                  total: 6,
+                  version: "comment-history-v1",
                 },
-                {
-                  role: "user",
-                  text: "nearby old follow-up",
-                  tools: [],
-                  historyId: "m_comment_pin_after",
-                  historyOrdinal: 2,
-                  historyIndex: 2,
+              },
+            });
+          } else {
+            await route.fulfill({
+              json: {
+                ok: true,
+                epoch: "comment-pin-epoch",
+                generatedAt: 100,
+                historyVersion: "comment-history-v1",
+                thread: commentPinView.vaultState?.commentThreads?.["comment-1"],
+                messages: [
+                  {
+                    role: "user",
+                    text: "recent comment",
+                    tools: [],
+                    historyId: "m_comment_recent",
+                    historyOrdinal: 4,
+                    historyIndex: 4,
+                  },
+                  {
+                    role: "assistant",
+                    text: "recent reply",
+                    tools: [],
+                    historyId: "m_comment_recent_reply",
+                    historyOrdinal: 5,
+                    historyIndex: 5,
+                  },
+                ],
+                page: {
+                  before: 4,
+                  hasMore: true,
+                  total: 6,
+                  version: "comment-history-v1",
                 },
-              ],
-              page: {
-                before: 0,
-                hasMore: false,
-                total: 6,
-                version: "comment-history-v1",
               },
-              window: {
-                historyId: "m_comment_pin_target",
-                center: 1,
-                start: 0,
-                end: 3,
-                hasEarlier: false,
-                hasLater: true,
-                total: 6,
-                version: "comment-history-v1",
+            });
+          }
+        } else if (url.pathname === "/chat/messages") {
+          await route.fulfill({
+            json: [
+              {
+                role: "assistant",
+                text: "An answer with an unread comment",
+                tools: [],
               },
-            },
+            ],
           });
         } else {
-          await route.fulfill({
-            json: {
-              ok: true,
-              epoch: "comment-pin-epoch",
-              generatedAt: 100,
-              historyVersion: "comment-history-v1",
-              thread: commentPinView.vaultState?.commentThreads?.["comment-1"],
-              messages: [
-                {
-                  role: "user",
-                  text: "recent comment",
-                  tools: [],
-                  historyId: "m_comment_recent",
-                  historyOrdinal: 4,
-                  historyIndex: 4,
-                },
-                {
-                  role: "assistant",
-                  text: "recent reply",
-                  tools: [],
-                  historyId: "m_comment_recent_reply",
-                  historyOrdinal: 5,
-                  historyIndex: 5,
-                },
-              ],
-              page: {
-                before: 4,
-                hasMore: true,
-                total: 6,
-                version: "comment-history-v1",
-              },
-            },
-          });
+          await route.fulfill({ json: { ok: true } });
         }
-      } else if (url.pathname === "/chat/messages") {
-        await route.fulfill({
-          json: [
-            {
-              role: "assistant",
-              text: "An answer with an unread comment",
-              tools: [],
-            },
-          ],
-        });
-      } else {
-        await route.fulfill({ json: { ok: true } });
-      }
-    });
+      });
 
-    await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
-    await page
-      .locator("#list .item", { hasText: "Avoidance session" })
-      .locator(".it-comment")
-      .click();
-    await expect.poll(() => page.locator("#commentMsgs").textContent()).toContain("recent reply");
-    expect(historyRequests).toHaveLength(1);
-
-    await page.locator("#commentPinTray .pinitem").click();
-    await expect.poll(() => historyRequests.length).toBe(2);
-    expect(historyRequests[1]).toContain("around=m_comment_pin_target");
-    expect(historyRequests[1]).toContain("radius=20");
-    expect(historyRequests[1]).not.toContain("before=");
-    await expect
-      .poll(() => page.locator("#commentMsgs").textContent())
-      .toContain("Pinned old comment reply");
-    expect(await page.locator("#commentMsgs").textContent()).toContain("recent reply");
-    expect(
+      await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
       await page
-        .locator('#commentMsgs [data-history-id="m_comment_pin_target"]')
-        .getAttribute("data-msg-key"),
-    ).toBe("comment:1");
-    await page.close();
-  });
+        .locator("#list .item", { hasText: "Avoidance session" })
+        .locator(".it-comment")
+        .click();
+      await expect.poll(() => page.locator("#commentMsgs").textContent()).toContain("recent reply");
+      expect(historyRequests).toHaveLength(1);
+
+      await page.locator("#commentPinTray .pinitem").click();
+      await expect.poll(() => historyRequests.length).toBe(2);
+      expect(historyRequests[1]).toContain(`around=${historyId}`);
+      expect(historyRequests[1]).toContain("radius=20");
+      expect(historyRequests[1]).not.toContain("before=");
+      await expect
+        .poll(() => page.locator("#commentMsgs").textContent())
+        .toContain("Pinned old comment reply");
+      expect(await page.locator("#commentMsgs").textContent()).toContain("recent reply");
+      expect(
+        await page
+          .locator('#commentMsgs [data-history-id="m_comment_pin_target"]')
+          .getAttribute("data-msg-key"),
+      ).toBe("comment:1");
+      expect(await page.locator("#commentMsgs .toolc").count()).toBe(0);
+      await expect.poll(() => page.locator("#toastHost .toast.warn").count()).toBe(0);
+      await page.close();
+    },
+  );
 
   it("sends only context before an assistant comment anchor", async () => {
     const testCase = {
@@ -10515,9 +10521,12 @@ describe("console browser behavior", () => {
     await page.close();
   });
 
-  it("renders persisted and live tool blocks in the comment panel", async () => {
+  it("omits persisted and live tools in the comment panel while tracking their activity", async () => {
     const page = await browser.newPage();
     page.setDefaultTimeout(2_000);
+    await page.clock.install();
+    let thread = commentView.vaultState?.commentThreads?.["comment-1"];
+    let historyCalls = 0;
     await page.addInitScript(() => {
       const browserGlobal = globalThis as unknown as Record<string, unknown>;
       class StubEventSource {
@@ -10540,9 +10549,10 @@ describe("console browser behavior", () => {
           body: renderConsole(commentView),
         });
       } else if (url.pathname === "/comments/messages") {
+        historyCalls++;
         await route.fulfill({
           json: {
-            thread: commentView.vaultState?.commentThreads?.["comment-1"],
+            thread,
             messages: [
               { role: "user", text: "inspect it", tools: [] },
               {
@@ -10557,6 +10567,13 @@ describe("console browser behavior", () => {
                   },
                 ],
               },
+              ...Array.from({ length: 40 }, (_, i) => ({
+                role: "assistant",
+                text: "",
+                tools: [
+                  { id: `hidden-${i}`, name: "exec", input: "work", result: "output".repeat(100) },
+                ],
+              })),
             ],
           },
         });
@@ -10580,11 +10597,10 @@ describe("console browser behavior", () => {
       .locator(".it-comment")
       .click();
 
-    const historyTool = page.locator('#commentMsgs .toolc[data-tool-id="comment-history-tool"]');
-    await expect.poll(() => historyTool.count()).toBe(1);
-    expect(await historyTool.locator("summary").textContent()).toContain("exec_command");
-    expect(await historyTool.locator(".tool-out").textContent()).toContain("/tmp/project");
-    expect(await historyTool.getAttribute("data-tool-pending")).toBeNull();
+    await expect
+      .poll(() => page.locator("#commentMsgs > .msg.assistant").textContent())
+      .toBe("I checked it.");
+    expect(await page.locator("#commentMsgs .toolc").count()).toBe(0);
 
     const emit = (event: Record<string, unknown>) =>
       page.evaluate((nextEvent) => {
@@ -10600,16 +10616,26 @@ describe("console browser behavior", () => {
           }),
         });
       }, event);
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+    if (!thread) throw new Error("Missing comment fixture");
+    thread = { ...thread, status: "generating" };
     await emit({ kind: "user_turn_started", text: "inspect it live" });
+    await page.clock.runFor(12_000);
+    await expect
+      .poll(() => page.locator("#commentGenerating .bubble").textContent())
+      .toMatch(/waiting 0:1[12]/);
     await emit({
       kind: "tool_use",
       id: "comment-live-tool",
       name: "exec_command",
       input: { cmd: "npm test" },
     });
-    const liveTool = page.locator('#commentMsgs .toolc[data-tool-id="comment-live-tool"]');
-    await expect.poll(() => liveTool.count()).toBe(1);
-    expect(await liveTool.getAttribute("data-tool-pending")).toBe("true");
+    expect(await page.locator("#commentMsgs .toolc").count()).toBe(0);
+    await page.clock.runFor(1_000);
+    await expect
+      .poll(() => page.locator("#commentGenerating .bubble").textContent())
+      .toMatch(/quiet 0:0[01]/);
+    await page.clock.runFor(12_000);
 
     await emit({
       kind: "tool_result",
@@ -10617,23 +10643,29 @@ describe("console browser behavior", () => {
       text: "tests passed",
       isError: false,
     });
-    await expect.poll(() => liveTool.getAttribute("data-tool-pending")).toBeNull();
-    expect(await liveTool.locator(".tool-out").textContent()).toBe("tests passed");
+    await page.clock.runFor(1_000);
+    await expect
+      .poll(() => page.locator("#commentGenerating .bubble").textContent())
+      .toMatch(/quiet 0:0[01]/);
+    expect(await page.locator("#commentMsgs .toolc").count()).toBe(0);
+    expect(await page.locator("#commentMsgs").textContent()).not.toContain("tests passed");
 
     await emit({ kind: "assistant_text", text: "Done after the tool." });
+    await page.clock.runFor(32);
     await expect
       .poll(() => page.locator("#commentMsgs > .msg.assistant:not(.thinking)").last().textContent())
       .toContain("Done after the tool.");
-    expect(
-      await liveTool.evaluate((block) => block.parentElement?.nextElementSibling?.textContent),
-    ).toContain("Done after the tool.");
+    expect(await page.locator("#commentMsgs .toolrow").count()).toBe(0);
     await page.locator("#commentClose").click();
     await page
       .locator("#list .item", { hasText: "Avoidance session" })
       .locator(".it-comment")
       .click();
-    await expect.poll(() => liveTool.count()).toBe(1);
-    expect(await liveTool.locator(".tool-out").textContent()).toBe("tests passed");
+    await expect.poll(() => historyCalls).toBe(2);
+    await expect
+      .poll(() => page.locator("#commentMsgs > .msg.assistant:not(.thinking)").last().textContent())
+      .toContain("Done after the tool.");
+    expect(await page.locator("#commentMsgs .toolc").count()).toBe(0);
     await page.close();
   });
 

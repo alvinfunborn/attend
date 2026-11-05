@@ -276,7 +276,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function loadEarlierCommentHistory(thread)");
     expect(html).toContain("function loadPinnedCommentWindow(thread,pin)");
     expect(html).toContain("function commentHistoryLoader(threadId)");
-    expect(html).toContain("'&paged=1&limit=60'");
+    expect(html).toContain("'&paged=1&limit=60&view=reading'");
     expect(html).toContain("commentHistoryLoadedVersions[threadId]=responseVersion;");
     expect(html).toContain("commentHistoryLoadedVersions[thread.id]===knownVersion");
     expect(html).toContain("responseEpoch!==COMMENT_INDEX_EPOCH");
@@ -792,7 +792,7 @@ describe("renderConsole", () => {
 
   it("routes every session through one ordered global SSE event bus", () => {
     const html = renderConsole(view);
-    expect(html).toContain("var source=new EventSource('/chat/live-stream'+");
+    expect(html).toContain("var source=new EventSource('/chat/live-stream?view=reading'+");
     expect(html).toContain("function onBusSessionEvent(message)");
     expect(html).toContain("function applySessionIndex(message)");
     expect(html).toContain("message.kind==='session_index'");
@@ -917,7 +917,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function transcriptPinHistoryUrl(s,historyId)");
     expect(html).toContain("function transcriptHistoryLoader(sessionId)");
     expect(html).toContain("'session='+encodeURIComponent(id)");
-    expect(html).toContain("'&paged=1&limit=60'");
+    expect(html).toContain("'&paged=1&limit=60&view=reading'");
     expect(html).toContain("if(!opts.force && hasTranscriptBaseline(s))");
     expect(html).toContain("if(hasTranscriptBaseline(s)){");
     expect(html).toContain("var selectionGeneration=++transcriptSelectionGeneration;");
