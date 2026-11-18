@@ -75,7 +75,8 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Test
-        run: npm test
+        # Browser scenarios need extra time on shared GitHub runners.
+        run: npm test -- --testTimeout=15000
 
       - name: Smoke-test packed CLI
         run: npm run smoke:package
