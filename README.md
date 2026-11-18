@@ -5,6 +5,8 @@ Codex/ChatGPT, Cursor CLI, Antigravity CLI, GitHub Copilot CLI, and OpenCode.
 
 [中文 README](README.zh-CN.md)
 
+[Website & interactive tour](https://alvinfunborn.github.io/attend/) · [More projects by alvinfunborn](https://alvinfunborn.github.io/)
+
 Attend began with a simple need: **add tags to tasks**.
 
 When AI coding work spreads across many sessions, finding a session by project or recency is not enough. Tags provide the first useful layer: group related tasks, build focused views, and return to the right work without reconstructing the whole workspace. From that starting point, Attend grew into a set of attention-management tools for answering the next questions: Which task is still running? Which one replied? What needs a decision? What can wait? Which side discussion deserves to become its own task?
@@ -12,9 +14,51 @@ When AI coding work spreads across many sessions, finding a session by project o
 Attend keeps those signals next to the actual conversations, so organizing work and advancing it happen in the same local interface. The server binds to `127.0.0.1` by default.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend managing a large multi-project demo vault with tags, session cards, chat, and queued scheduled work">
+  <img src="https://raw.githubusercontent.com/alvinfunborn/attend/main/docs/assets/attend-console-demo.jpg" alt="Attend at 3440 × 1440: six native session columns, task analysis, tags, fork tabs, Pins, queues and scheduled messages">
 </p>
-<p align="center"><sub>Synthetic demo vault: 240 sessions across 12 projects, with about 4,800 generated conversation turns.</sub></p>
+<p align="center"><sub>Current source UI with 60 synthetic sessions and simulated activity. Six-column Dark / Light and four-column custom Midnight ultrawide layouts; not real user data or performance claims.</sub></p>
+
+## Actual interface & themes
+
+[Explore the actual interface](https://alvinfunborn.github.io/attend/demo/). These screenshots use the current `renderConsole` source, showing session structure, analysis, context tools and work patterns.
+
+**Light · ultrawide multi-column workspace**
+
+![Light ultrawide Attend workspace with six session columns](docs/assets/attend-ultrawide-light.jpg)
+
+**Midnight · four-column ultrawide workspace**
+
+![Midnight ultrawide Attend workspace with four session columns](docs/assets/attend-ultrawide-midnight.jpg)
+
+The middle panel adapts to its width. Drag its divider or choose Auto, 1–6 columns, or a custom count in Settings. The [website demo](https://alvinfunborn.github.io/attend/#organize) also offers a 3440px workspace mode with horizontal scrolling on narrower screens.
+
+**Light · custom handoff labels**
+
+![ Light · custom handoff labels](docs/assets/attend-label-light.jpg)
+
+**Midnight · anchored comments and Pins**
+
+![ Midnight · anchored comments and Pins](docs/assets/attend-comments-midnight.jpg)
+
+**Dark · session fork tree**
+
+![ Dark · session fork tree](docs/assets/attend-fork-tree-dark.jpg)
+
+**Light · Work patterns and collaboration analysis**
+
+![ Light · Work patterns and collaboration analysis](docs/assets/attend-work-patterns-light.jpg)
+
+**Light · notes, todos, queue and schedule**
+
+![ Light · notes, todos, queue and schedule](docs/assets/attend-notes-light.jpg)
+
+**Midnight · themes, panel layout and analysis settings**
+
+![ Midnight · themes, panel layout and analysis settings](docs/assets/attend-settings-midnight.jpg)
+
+**Midnight · live theme JSON editor**
+
+![ Midnight · live theme JSON editor](docs/assets/attend-theme-editor-midnight.jpg)
 
 ## Core capabilities
 
