@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ClaudeAnalyzer } from "../src/chat/analyzer/claude.js";
 import { CodexAnalyzer } from "../src/chat/analyzer/codex.js";
 import type { AnalyzerVerdict, SessionAnalyzer } from "../src/chat/analyzer/index.js";
@@ -240,6 +240,53 @@ describe("DaemonOrchestrator", () => {
     expect(orch.analysis("task-1")).toMatchObject({ nextStep: null, probe: null });
   });
 
+  it("notifies metadata consumers once per accepted verdict, including coalesced reruns", async () => {
+    const uniq = Math.random().toString(36).slice(2);
+    const reg = path.join(os.tmpdir(), `attend-daemons-listeners-${uniq}.json`);
+    const cache = path.join(os.tmpdir(), `attend-analysis-listeners-${uniq}.json`);
+    cleanup.push(reg, cache);
+    const releases: Array<(verdict: AnalyzerVerdict) => void> = [];
+    const orch = new DaemonOrchestrator(new DaemonRegistry(reg), new AnalysisCache(cache), [
+      {
+        vendor: "fake",
+        spawn: async () => "daemon",
+        analyze: () => new Promise((resolve) => releases.push(resolve)),
+      },
+    ]);
+    const accepted = vi.fn();
+    const unsubscribe = orch.onAnalysis(accepted);
+    await orch.ensureDaemon("task", "fake", os.tmpdir());
+    const pending = orch.analyzeTask("task", os.tmpdir());
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    await expect(orch.analyzeTask("task", os.tmpdir())).resolves.toBeNull();
+    expect(accepted).not.toHaveBeenCalled();
+    const verdict: AnalyzerVerdict = {
+      analysis: {
+        brief: "first",
+        state: "done",
+        priority: 1,
+        etaMin: 0,
+        reason: "",
+        tags: ["SDK"],
+      },
+      observedTurns: [],
+      labels: [],
+    };
+    releases[0]?.(verdict);
+    await pending;
+    expect(accepted).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]?.({ ...verdict, analysis: { ...verdict.analysis, brief: "second" } });
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(2));
+    expect(accepted.mock.calls[1]?.[1].brief).toBe("second");
+    unsubscribe();
+    const last = orch.analyzeTask("task", os.tmpdir());
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
+    releases[2]?.(verdict);
+    await last;
+    expect(accepted).toHaveBeenCalledTimes(2);
+  });
+
   it("drops an in-flight verdict that finishes after a newer user turn starts", async () => {
     const uniq = Math.random().toString(36).slice(2);
     const reg = path.join(os.tmpdir(), `attend-daemons-stale-${uniq}.json`);
@@ -265,6 +312,8 @@ describe("DaemonOrchestrator", () => {
       probe: "question old work",
     });
     const orch = new DaemonOrchestrator(new DaemonRegistry(reg), analysisCache, [analyzer]);
+    const accepted: string[] = [];
+    orch.onAnalysis((_id, analysis) => accepted.push(analysis.brief));
     await orch.ensureDaemon("task-slow", "slow", os.tmpdir());
     const pending = orch.analyzeTask("task-slow", os.tmpdir());
     await Promise.resolve();
@@ -285,6 +334,7 @@ describe("DaemonOrchestrator", () => {
     });
 
     await expect(pending).resolves.toBeNull();
+    expect(accepted).toEqual([]);
     expect(orch.analysis("task-slow")).toMatchObject({
       brief: "old",
       nextStep: null,

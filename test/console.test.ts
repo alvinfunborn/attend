@@ -276,7 +276,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function loadEarlierCommentHistory(thread)");
     expect(html).toContain("function loadPinnedCommentWindow(thread,pin)");
     expect(html).toContain("function commentHistoryLoader(threadId)");
-    expect(html).toContain("'&paged=1&limit=60'");
+    expect(html).toContain("'&paged=1&limit=60&view=reading'");
     expect(html).toContain("commentHistoryLoadedVersions[threadId]=responseVersion;");
     expect(html).toContain("commentHistoryLoadedVersions[thread.id]===knownVersion");
     expect(html).toContain("responseEpoch!==COMMENT_INDEX_EPOCH");
@@ -447,7 +447,7 @@ describe("renderConsole", () => {
     const sidebar = html.slice(html.indexOf("function renderSidebar(force){"));
     expect(sidebar.indexOf("renderSessionSignals(meta,s);")).toBeLessThan(
       sidebar.indexOf(
-        "sessionPromptLine('it-firstline','First',s.title,null,promptAgeLabel(s,'first'))",
+        "sessionPromptLine('it-firstline it-firstmsg','First',s.title,null,promptAgeLabel(s,'first'))",
       ),
     );
   });
@@ -792,7 +792,7 @@ describe("renderConsole", () => {
 
   it("routes every session through one ordered global SSE event bus", () => {
     const html = renderConsole(view);
-    expect(html).toContain("var source=new EventSource('/chat/live-stream'+");
+    expect(html).toContain("var source=new EventSource('/chat/live-stream?view=reading'+");
     expect(html).toContain("function onBusSessionEvent(message)");
     expect(html).toContain("function applySessionIndex(message)");
     expect(html).toContain("message.kind==='session_index'");
@@ -917,7 +917,7 @@ describe("renderConsole", () => {
     expect(html).toContain("function transcriptPinHistoryUrl(s,historyId)");
     expect(html).toContain("function transcriptHistoryLoader(sessionId)");
     expect(html).toContain("'session='+encodeURIComponent(id)");
-    expect(html).toContain("'&paged=1&limit=60'");
+    expect(html).toContain("'&paged=1&limit=60&view=reading'");
     expect(html).toContain("if(!opts.force && hasTranscriptBaseline(s))");
     expect(html).toContain("if(hasTranscriptBaseline(s)){");
     expect(html).toContain("var selectionGeneration=++transcriptSelectionGeneration;");
@@ -1215,7 +1215,7 @@ describe("renderConsole", () => {
   it("links each model picker to that model's last-used effort and speed", () => {
     const html = renderConsole(view);
     expect(html).toContain("var parsed=VAULT_STATE && VAULT_STATE.modelPrefs;");
-    expect(html).toContain("saveVaultUiState({modelPrefs:newPrefs});");
+    expect(html).toContain("saveVaultUiState({modelPrefs:prefs});");
     expect(html).toContain("function rememberedModelEffort(vendor, model)");
     expect(html).toContain("function rememberedModelSpeed(vendor, model)");
     expect(html).toContain("function linkedModelConfigurationFor(vendor,model)");
@@ -1307,9 +1307,8 @@ describe("renderConsole", () => {
     expect(html).toContain("ev.kind==='queued_turn_started' || ev.kind==='queued_turn_steered'");
     expect(html).toContain("function queuedImmediateActionCopy(s,turn,edited)");
     expect(html).toContain("if(vendor==='claude')");
-    expect(html).toContain("label:'append'");
+    expect(html).toContain("label:'send now'");
     expect(html).toContain("if(vendor==='codex')");
-    expect(html).toContain("label:'guide'");
     expect(html).toContain("turnActive?immediate.label:'send'");
     expect(html).toContain("var queueSteerable = false;");
     expect(html).toContain("Array.isArray(ev.references)?ev.references:[]");
@@ -1765,7 +1764,7 @@ describe("renderConsole", () => {
   it("scrolls the full tags module when it exceeds the sidebar height", () => {
     const html = renderConsole(view);
     expect(html).toContain(
-      ".tagbar.overflowing { overflow-y: auto; overscroll-behavior: contain; }",
+      ".tagbar.overflowing { overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }",
     );
     expect(html).toContain('class="session-list-region"><div id="list"></div>');
     expect(html).not.toContain("max-height: 35dvh");
@@ -1886,12 +1885,9 @@ describe("renderConsole", () => {
       ".latestpin-k { flex-shrink: 0; color: var(--ink-3); border: 0; background: transparent; padding: 0;",
     );
     expect(html).toContain(
-      ".topstack { display: none; margin: 0.65rem 1.1rem 0.5rem; padding: 0.35rem; border: 0;",
+      ".topstack { display: none; margin: 0.65rem 1.1rem 0.5rem; padding: 0.35rem; border: 1px solid var(--chat-pinned-border);",
     );
-    expect(html).toContain(
-      "border-bottom: 1px solid color-mix(in srgb, var(--line) 62%, transparent);",
-    );
-    expect(html).toContain("background: color-mix(in srgb, var(--surface-2) 88%, var(--surface));");
+    expect(html).toContain("background: var(--latest-gradient);");
     expect(html).toContain(
       'html[data-theme="dark"] .topstack { box-shadow: 0 8px 20px -16px var(--theme-chat-header-shadow); }',
     );
@@ -2076,7 +2072,9 @@ describe("renderConsole", () => {
     expect(html).toContain(
       ".commentfoot { position: relative; flex: 0 0 auto; z-index: 20; margin-right: var(--comment-scrollbar-width);",
     );
-    expect(html).toContain("padding: 0 0.9rem 0.75rem; border-top: 0; background: var(--surface);");
+    expect(html).toContain(
+      "padding: 0 0.9rem 0.75rem; border-top: 0; background: var(--comment-background);",
+    );
     expect(html).toContain(
       ".commentmsgs { --msg-float-actions-space: 5rem; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0.8rem 0.9rem;",
     );
@@ -2213,7 +2211,7 @@ describe("renderConsole", () => {
     expect(html).toContain("font-style: normal;");
     expect(html).not.toContain("--latest-label:");
     expect(html).toContain(
-      "sessionPromptLine('it-firstline','First',s.title,null,promptAgeLabel(s,'first'))",
+      "sessionPromptLine('it-firstline it-firstmsg','First',s.title,null,promptAgeLabel(s,'first'))",
     );
     expect(html).toContain("appendLatestPrompt(item, s, 'it-firstline')");
     expect(html).toContain(
@@ -2420,7 +2418,9 @@ describe("renderConsole", () => {
     expect(html).toContain('class="newtagpick" id="newTagPick"');
     expect(html).toContain('id="newTagAdd" class="newtagadd"');
     expect(html).toContain("var initialTags=newSessionTags.slice();");
-    expect(html).toContain("tags:initialTags,_pendingSessionTags:initialTags.slice(),generating:");
+    expect(html).toContain(
+      "tags:initialTags,_pendingSessionTags:initialTags.length?initialTags.slice():undefined,generating:",
+    );
     expect(html).toContain("flushPendingSessionTags(ns);");
     expect(html).toContain("message.className='nmsg'; message.removeAttribute('role');");
     expect(html).toContain(".newbox .nmsg:empty { display: none; }");

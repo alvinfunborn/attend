@@ -110,7 +110,9 @@ export function validThemeId(value: unknown): value is string {
 export function cleanCustomThemes(value: unknown): Record<string, ThemeDefinition> {
   const result: Record<string, ThemeDefinition> = {};
   if (!value || typeof value !== "object" || Array.isArray(value)) return result;
-  for (const [id, theme] of Object.entries(value).slice(0, 64)) {
+  // Legacy instance libraries may exceed the creation limit when merged. Keep
+  // all valid saved themes; the API enforces the limit for new additions.
+  for (const [id, theme] of Object.entries(value)) {
     if (
       !validThemeId(id) ||
       ["light", "dark", "system", "__proto__", "constructor", "prototype"].includes(id)

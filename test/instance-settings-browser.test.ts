@@ -88,22 +88,37 @@ it("restores instance settings in a fresh browser and ignores another instance's
         await page.locator("#sessionPanelToggle").click();
         await page.locator("#settingsToggle").click();
         await page.locator("#settingsDark").click();
+        await page.locator("#themeCopy").click();
+        await page.locator("#themeJson").fill(
+          JSON.stringify({
+            name: "Shared palette",
+            type: "dark",
+            colors: { accent: "#a78bfa" },
+          }),
+        );
+        await page.locator("#themeSave").click();
+        await expect.poll(() => Object.keys(first.ui.get().customThemes || {}).length).toBe(1);
+        await page.locator("#settingsChatSendMode").selectOption("append");
+        await expect.poll(() => first.ui.get().modelPrefs?.chatSendMode).toBe("append");
         await page.locator("#settingsColumns").selectOption("3");
         await page.locator("#settingsDaemon").uncheck();
         await expect.poll(() => first.daemon.get().mode).toBe("off");
         await expect
           .poll(() => first.ui.get())
           .toMatchObject({
-            theme: "dark",
             layout: { sessionPanelColumns: 3, sessionPanelOpen: true },
           });
       } else {
         expect(await page.locator("#sessionPanel").isVisible()).toBe(true);
         await page.locator("#settingsToggle").click();
       }
+      expect(await page.locator("#settingsChatSendMode").inputValue()).toBe("append");
       expect(await page.locator("#settingsColumns").inputValue()).toBe("3");
       expect(await page.locator("#settingsDaemon").isChecked()).toBe(false);
       expect(await page.locator("html").getAttribute("data-theme")).toBe("dark");
+      const selected = first.ui.get().theme;
+      expect(selected).toBeTruthy();
+      expect(await page.locator("html").getAttribute("data-theme-id")).toBe(selected);
       active = 1;
       await page.reload();
       expect(await page.locator("#sessionPanel").isHidden()).toBe(true);
@@ -111,6 +126,15 @@ it("restores instance settings in a fresh browser and ignores another instance's
       expect(await page.locator("#settingsColumns").inputValue()).toBe("2");
       expect(await page.locator("#settingsDaemon").isChecked()).toBe(true);
       expect(await page.locator("html").getAttribute("data-theme")).toBe("light");
+      const sharedTheme = page.getByRole("radio", { name: /^Shared palette/ });
+      expect(await sharedTheme.isVisible()).toBe(true);
+      if (!fresh) {
+        await sharedTheme.click();
+        await expect.poll(() => second.ui.get().theme).toBe(selected);
+        await page.locator("#settingsLight").click();
+        await expect.poll(() => second.ui.get().theme).toBe("light");
+        expect(first.ui.get().theme).toBe(selected);
+      }
       expect(
         await page.locator(".side").evaluate((node) => node.getBoundingClientRect().width),
       ).toBeLessThan(700);

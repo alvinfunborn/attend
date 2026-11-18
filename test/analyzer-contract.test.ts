@@ -48,6 +48,18 @@ describe("prompt uiContext injection", () => {
 });
 
 describe("RESPONSE_SHAPE", () => {
+  it("requests issue labels with continuity and uses manual examples only for style", () => {
+    expect(RESPONSE_SHAPE).toContain('"tags"');
+    const prompt = requestPrompt("Fix SDK permissions", [], "tag preferences");
+    expect(prompt).toContain("Normally return ONE tag");
+    expect(prompt).toContain("Identify the issue independently from the session content first");
+    expect(prompt).toContain("reuse its exact spelling");
+    expect(prompt).toContain("Existing labels are fallible");
+    expect(prompt).toContain("they are not candidate tags");
+    expect(prompt).toContain("at most 24 characters and 4 words");
+    expect(prompt).not.toContain("Reuse the supplied existing tags EXACTLY");
+    expect(prompt).not.toContain("at most ONE new tag");
+  });
   it("declares the nextStep field so the daemon emits it", () => {
     expect(RESPONSE_SHAPE).toContain('"nextStep"');
   });

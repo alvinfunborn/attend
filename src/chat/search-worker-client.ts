@@ -21,7 +21,14 @@ export class WorkerSessionSearch implements SessionSearch {
   private readonly pending = new Map<number, PendingSearch>();
   private closing = false;
 
-  constructor(private readonly databaseFile = ":memory:") {
+  private readonly databaseFile: string;
+
+  constructor(sessionIndexFile = ":memory:") {
+    // Large initial transcript scans hold a SQLite writer lock. Keep that lock
+    // off the live session-index DB while retaining one shared search DB across
+    // Attend instances configured with the same session-index path.
+    this.databaseFile =
+      sessionIndexFile === ":memory:" ? ":memory:" : `${sessionIndexFile}.search.sqlite3`;
     this.start();
   }
 

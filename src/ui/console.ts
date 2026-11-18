@@ -7,6 +7,7 @@ import { THEME_DEFAULT_CSS, createThemeEngine, themeEngine } from "../core/theme
 import type { Pattern, SessionTokenUsage } from "../core/types.js";
 import type { VaultUiState } from "../core/ui-state.js";
 import type { VendorAvailability } from "../core/vendor/detect.js";
+import { createTagColorEngine } from "./tag-colors.js";
 
 export interface SessionView {
   vendor: string;
@@ -196,8 +197,8 @@ const STYLE = `
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
   ${THEME_DEFAULT_CSS}
-  :root { --radius: 8px; --radius-sm: 6px; --radius-pill: 999px; --panel-gradient: linear-gradient(180deg, var(--panel-gradient-color-1) 0%, var(--surface) 100%); --newbox-gradient: linear-gradient(180deg, var(--newbox-gradient-color-1) 0%, var(--surface) 100%); --latest-gradient: linear-gradient(180deg, var(--latest-gradient-color-1) 0%, var(--surface) 100%); --shadow-sm: 0 1px 2px var(--shadow-sm-color-1); --shadow-md: 0 6px 18px var(--shadow-md-color-1), 0 2px 6px var(--shadow-md-color-2); --shadow-pop: 0 14px 34px var(--shadow-pop-color-1), 0 4px 12px var(--shadow-pop-color-2); }
-  html[data-theme="dark"] { --panel-gradient: linear-gradient(180deg, var(--panel-gradient-color-1) 0%, var(--panel-gradient-color-2) 100%); --newbox-gradient: linear-gradient(180deg, var(--newbox-gradient-color-1) 0%, var(--surface) 100%); --latest-gradient: linear-gradient(180deg, var(--latest-gradient-color-1) 0%, var(--latest-gradient-color-2) 100%); --shadow-sm: 0 1px 2px var(--shadow-sm-color-1); --shadow-md: 0 8px 22px var(--shadow-md-color-1), 0 2px 8px var(--shadow-md-color-2); --shadow-pop: 0 18px 40px var(--shadow-pop-color-1), 0 6px 16px var(--shadow-pop-color-2); }
+  :root { --radius: 8px; --radius-sm: 6px; --radius-pill: 999px; --panel-gradient: linear-gradient(180deg, var(--panel-gradient-color-1) 0%, var(--surface) 100%); --newbox-gradient: linear-gradient(180deg, var(--newbox-gradient-color-1) 0%, var(--new-session-background) 100%); --latest-gradient: linear-gradient(180deg, var(--latest-gradient-color-1) 0%, var(--latest-gradient-color-2) 100%); --shadow-sm: 0 1px 2px var(--shadow-sm-color-1); --shadow-md: 0 6px 18px var(--shadow-md-color-1), 0 2px 6px var(--shadow-md-color-2); --shadow-pop: 0 14px 34px var(--shadow-pop-color-1), 0 4px 12px var(--shadow-pop-color-2); }
+  html[data-theme="dark"] { --panel-gradient: linear-gradient(180deg, var(--panel-gradient-color-1) 0%, var(--panel-gradient-color-2) 100%); --newbox-gradient: linear-gradient(180deg, var(--newbox-gradient-color-1) 0%, var(--new-session-background) 100%); --latest-gradient: linear-gradient(180deg, var(--latest-gradient-color-1) 0%, var(--latest-gradient-color-2) 100%); --shadow-sm: 0 1px 2px var(--shadow-sm-color-1); --shadow-md: 0 8px 22px var(--shadow-md-color-1), 0 2px 8px var(--shadow-md-color-2); --shadow-pop: 0 18px 40px var(--shadow-pop-color-1), 0 6px 16px var(--shadow-pop-color-2); }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; overflow: hidden; }
   body { font-family: ui-sans-serif, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -297,7 +298,7 @@ const STYLE = `
   }
   .todohub-count { color: var(--todo-fg); font-size: 0.58rem; font-weight: 800; font-variant-numeric: tabular-nums; }
   .todohub-count[hidden] { display: none; }
-  .settings-panel { box-sizing: border-box; width: min(24rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow-y: auto; padding: 1rem; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--surface); color: var(--ink); box-shadow: var(--shadow-pop); }
+  .settings-panel { box-sizing: border-box; width: min(24rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow-y: auto; padding: 1rem; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--floating-panel-background); color: var(--ink); border-color: var(--floating-panel-border); box-shadow: 0 18px 44px -10px var(--floating-panel-shadow), 0 6px 16px -8px var(--floating-panel-shadow); }
   .settings-panel::backdrop { background: var(--theme-overlay-background); }
   .settings-panel.settings-workspace { width: min(60rem, calc(100vw - 3rem)); max-width: none; max-height: calc(100dvh - 3rem); padding: 0; overflow: hidden; border-radius: 14px; }
   .settings-workspace[open] { display: flex; flex-direction: column; }
@@ -403,7 +404,7 @@ const STYLE = `
   }
   .tagbar { flex: 0 1 auto; min-height: 0; padding: 0.7rem 0.95rem; border-bottom: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; gap: 0.5rem; }
   .tagbar > * { flex: 0 0 auto; }
-  .tagbar.overflowing { overflow-y: auto; overscroll-behavior: contain; }
+  .tagbar.overflowing { overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
   .tagbar .taghead { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
   .tagbar .tagttl { font-size: 0.66rem; font-weight: 700; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
   .taghead-label { display: contents; }
@@ -518,10 +519,10 @@ const STYLE = `
   }
   .newsession-anchor { position: relative; z-index: 70; flex-shrink: 0; }
   .side.newsession-panel-active { z-index: 70; }
-  .newbox { position: absolute; z-index: 70; top: calc(100% + 0.4rem); left: 1rem; right: 1rem; max-height: calc(100dvh - 8rem); overflow-y: auto; padding: 0.9rem; border: 1px solid var(--line-2); border-radius: var(--radius); display: none; flex-direction: column; gap: 0.6rem; background: var(--newbox-gradient); box-shadow: var(--shadow-pop); }
+  .newbox { position: absolute; z-index: 70; top: calc(100% + 0.4rem); left: 1rem; right: 1rem; max-height: calc(100dvh - 8rem); overflow-y: auto; padding: 0.9rem; border: 1px solid var(--new-session-border); border-radius: var(--radius); display: none; flex-direction: column; gap: 0.6rem; background: var(--newbox-gradient); box-shadow: 0 18px 44px -10px var(--new-session-shadow), 0 6px 16px -8px var(--new-session-shadow); }
   .newbox.panel-hosted { position: fixed; right: auto; max-width: 36rem; }
   .newbox.open { display: flex; animation: newboxIn 0.18s ease; }
-  .todohub-box { position: fixed; z-index: 70; top: 50%; left: 50%; right: auto; box-sizing: border-box; width: min(32rem, calc(100vw - 1rem)); min-width: min(17.5rem, calc(100vw - 1rem)); min-height: min(11.25rem, calc(100dvh - 1rem)); max-width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); overflow: hidden; padding: 0.75rem; border: 1px solid var(--line-2); border-radius: var(--radius); display: none; flex-direction: column; gap: 0.55rem; background: var(--newbox-gradient); box-shadow: var(--shadow-pop); transform: translate(-50%, -50%); }
+  .todohub-box { position: fixed; z-index: 70; top: 50%; left: 50%; right: auto; box-sizing: border-box; width: min(32rem, calc(100vw - 1rem)); min-width: min(17.5rem, calc(100vw - 1rem)); min-height: min(11.25rem, calc(100dvh - 1rem)); max-width: calc(100vw - 1rem); max-height: calc(100dvh - 1rem); overflow: hidden; padding: 0.75rem; border: 1px solid var(--list-panel-border); border-radius: var(--radius); display: none; flex-direction: column; gap: 0.55rem; background: var(--list-panel-background); box-shadow: 0 18px 44px -10px var(--list-panel-shadow), 0 6px 16px -8px var(--list-panel-shadow); transform: translate(-50%, -50%); }
   .todohub-box.drag-positioned { transform: none; }
   .todohub-box.open { display: flex; animation: todohubIn 0.18s ease; }
   .todohub-head { gap: 0.18rem; }
@@ -761,7 +762,13 @@ const STYLE = `
     .resizer, .session-panel-resizer { width: 14px; }
   }
   .session-panel-resizer:hover, .session-panel-resizer.dragging { background: var(--resizer-hover); }
-  .item { position: relative; padding: 0.6rem 0.95rem; border-bottom: 1px solid var(--row-line); cursor: pointer; border-left: 3px solid transparent; transition: background 0.12s, border-color 0.12s; }
+  .item { position: relative; padding: 0.6rem 0.95rem; border-bottom: 1px solid var(--row-line); cursor: pointer; border-left: 3px solid transparent; transition: background 0.12s, border-color 0.12s, opacity 0.14s ease, outline-color 0.14s ease; }
+  /* Relation preview follows the trigger's identity color without replacing status or selection styling. */
+  .item.tag-preview-match::after { content: ''; position: absolute; z-index: 3; inset: 3px; border: 2px solid var(--tag-preview-color); border-radius: max(2px, calc(var(--radius) - 3px)); pointer-events: none; }
+  .item.tag-preview-dim { opacity: 0.38; }
+  .item.tag-preview-dim.active, .item.tag-preview-dim.tag-preview-live { opacity: 0.68; }
+  .item.tag-preview-dim:hover, .item.tag-preview-dim:focus-within { opacity: 0.88; }
+  @media (prefers-reduced-motion: reduce) { .item { transition: none; } }
   .item:hover { background: var(--item-hover); }
   .item.active {
     background: linear-gradient(90deg, var(--item-selected-row-start), var(--item-selected-row-end));
@@ -778,10 +785,7 @@ const STYLE = `
   .session-panel .item.session-pinned.active { border-color: var(--line); background: linear-gradient(90deg, var(--item-selected-card-start), var(--item-selected-card-end) 52%); box-shadow: inset 0 1px 0 var(--pin-card-edge); }
   .session-pinned .it-pin.on { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
   .item.session-card-dragging { opacity: 0.32; filter: saturate(0.72); transform: scale(0.988); }
-  .session-tag-border { position: absolute; z-index: 1; left: 0; right: 0; bottom: 0; height: 1px; display: flex; overflow: hidden; pointer-events: none; }
-  /* Keep tag colors inside the content-visibility paint clip. */
-  .session-panel .session-tag-border { border-radius: 0 0 var(--radius) var(--radius); }
-  .session-tag-border > span { flex: 1; min-width: 0; }
+  .session-panel .item.session-card-dragging { transform: none; }
   .item.session-pin-drag-peer { opacity: 0.3; filter: saturate(0.72); }
   .item.session-pin-drag-layout-source { position: absolute !important; visibility: hidden !important; pointer-events: none !important; }
   .session-pin-drop-placeholder { min-width: 0; box-sizing: border-box; display: flex; align-items: center; justify-content: center; border: 1px dashed var(--accent); border-radius: var(--radius); background: var(--pin-drop-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); pointer-events: none; animation: sessionPinDropIn 0.14s cubic-bezier(0.2,0.8,0.2,1); }
@@ -843,6 +847,11 @@ const STYLE = `
   .forktree-mini path { fill: none; stroke: currentColor; stroke-width: 1.15; stroke-linecap: round; stroke-linejoin: round; opacity: 0.58; }
   .forktree-mini circle { fill: currentColor; opacity: 0.72; }
   .forktree-mini circle.current { fill: var(--ink); opacity: 1; stroke: var(--surface); stroke-width: 1.2; }
+  /* Muted text colors identify relations without competing with live status. */
+  .item { --session-relation-lightness: 40%; }
+  html[data-theme="dark"] .item { --session-relation-lightness: 64%; }
+  .item .it-title[data-session-relation-key] .session-title-main { color: hsl(var(--session-group-hue) 42% var(--session-relation-lightness)); }
+  .item .it-forktree[data-session-relation-key], .item .it-forktree[data-session-relation-key] .current { color: hsl(var(--session-fork-hue) 42% var(--session-relation-lightness)); fill: currentColor; }
   .it-status { flex-shrink: 0; width: 0.58rem; height: 0.58rem; border-radius: 50%; border: 1.5px solid transparent; background: var(--status-read); cursor: pointer; transition: transform 0.1s, background 0.15s, border-color 0.15s, box-shadow 0.15s; }
   .it-status:hover { transform: scale(1.45); }
   .it-status.generating { background: transparent; border-color: var(--status-generating-soft); border-top-color: var(--status-generating); border-right-color: var(--status-generating); box-shadow: 0 0 0 2px var(--status-generating-soft); animation: statusSpin 0.82s linear infinite; }
@@ -1057,10 +1066,10 @@ const STYLE = `
   .headtag-row .it-tag > button { border: 0; background: transparent; color: inherit; font-size: 0.78rem; padding: 0; line-height: 1; box-shadow: none; }
   .headtag-row .it-tag > button:hover { color: var(--header-tag-remove-hover-foreground); background: transparent; }
   .headtag-nav { cursor: pointer; border-radius: var(--radius-pill); outline: none; }
-  .headtag-row .it-tag:has(.headtag-nav):hover { background: var(--button-hover); }
-  .headtag-row .it-tag.hot:has(.headtag-nav):hover { background: linear-gradient(90deg, var(--tag-heat-soft), var(--tag-heat-fade) 58%, transparent), var(--button-hover); }
+  .it-tag:has(.headtag-nav):hover { background: var(--button-hover); }
+  .it-tag.hot:has(.headtag-nav):hover { background: linear-gradient(90deg, var(--tag-heat-soft), var(--tag-heat-fade) 58%, transparent), var(--button-hover); }
   .headtag-nav:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-  .headtag-session-menu { position: absolute; z-index: 82; top: calc(100% + 0.38rem); left: 0; width: min(20rem, calc(100vw - 2rem)); max-height: min(22rem, 52vh); overflow-y: auto; padding: 0.3rem; border: 1px solid color-mix(in srgb, var(--menu-border) 72%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--menu-background) 96%, transparent); color: var(--menu-foreground); box-shadow: var(--shadow-pop); backdrop-filter: blur(12px) saturate(1.08); }
+  .headtag-session-menu { position: fixed; z-index: 82; width: min(20rem, calc(100vw - 2rem)); max-height: min(22rem, 52vh); overflow-y: auto; padding: 0.3rem; border: 1px solid color-mix(in srgb, var(--menu-border) 72%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--menu-background) 96%, transparent); color: var(--menu-foreground); box-shadow: var(--shadow-pop); backdrop-filter: blur(12px) saturate(1.08); }
   .headtag-session-option { width: 100%; min-width: 0; min-height: 2.8rem; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 0.5rem; padding: 0.42rem 0.5rem; border: 0; border-radius: 6px; color: var(--ink-2); background: transparent; box-shadow: none; text-align: left; }
   .headtag-session-option + .headtag-session-option { margin-top: 0.05rem; }
   .headtag-session-option:hover { color: var(--ink); background: color-mix(in srgb, var(--surface-2) 78%, transparent); box-shadow: none; }
@@ -1073,7 +1082,7 @@ const STYLE = `
   .headtag-session-current { align-self: start; margin-top: 0.08rem; color: var(--accent); font-size: 0.58rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
   .headtag-row .it-context { max-width: min(38rem, 58%); }
   .headtagedit { max-width: 28rem; }
-  .topstack { display: none; margin: 0.65rem 1.1rem 0.5rem; padding: 0.35rem; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 62%, transparent); border-radius: 11px; background: color-mix(in srgb, var(--surface-2) 88%, var(--surface)); box-shadow: 0 8px 18px -16px var(--theme-chat-header-shadow); flex-direction: column; gap: 0.12rem; }
+  .topstack { display: none; margin: 0.65rem 1.1rem 0.5rem; padding: 0.35rem; border: 1px solid var(--chat-pinned-border); border-radius: 11px; background: var(--latest-gradient); box-shadow: 0 8px 18px -16px var(--theme-chat-header-shadow); flex-direction: column; gap: 0.12rem; }
   html[data-theme="dark"] .topstack { box-shadow: 0 8px 20px -16px var(--theme-chat-header-shadow); }
   .topstack.show { display: flex; }
   .latestpin { display: none; border: 0; border-radius: 7px; background: transparent; padding: 0.55rem 0.65rem; cursor: pointer; box-shadow: none; }
@@ -1082,10 +1091,10 @@ const STYLE = `
   .latestpin-body { flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.65rem; overflow: hidden; }
   .latestpin-k { flex-shrink: 0; color: var(--ink-3); border: 0; background: transparent; padding: 0; font-size: 0.64rem; line-height: 1; font-weight: 850; letter-spacing: 0.11em; text-transform: uppercase; font-family: ui-monospace, "Cascadia Mono", monospace; }
   .latestpin-arrow { margin-left: auto; flex-shrink: 0; color: var(--theme-chat-pinned-arrow-foreground); font-family: ui-monospace, "Cascadia Mono", monospace; }
-  .latestpin-text { flex: 1; min-width: 0; max-width: none; background: transparent; color: var(--ink-2); border: 0; border-radius: 0; box-shadow: none; padding: 0; font-family: inherit; font-size: 0.86rem; font-style: normal; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; font-variant: normal; text-rendering: optimizeLegibility; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .latestpin-text { flex: 1; min-width: 0; max-width: none; background: transparent; color: var(--theme-chat-pinned-foreground); border: 0; border-radius: 0; box-shadow: none; padding: 0; font-family: inherit; font-size: 0.86rem; font-style: normal; font-weight: 400; line-height: 1.45; letter-spacing: 0; text-transform: none; font-variant: normal; text-rendering: optimizeLegibility; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Back-compat for previews rendered by an older open tab before the next refresh. */
-  .latestpin-body .bubble { flex: 1; min-width: 0; max-width: none; background: transparent; color: var(--ink-2); border: 0; border-radius: 0; box-shadow: none; padding: 0; font-family: inherit; font-size: 0.86rem; line-height: 1.45; font-weight: 400; font-variant: normal; text-rendering: optimizeLegibility; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .latestpin:hover { background: var(--button-hover); }
+  .latestpin-body .bubble { flex: 1; min-width: 0; max-width: none; background: transparent; color: var(--theme-chat-pinned-foreground); border: 0; border-radius: 0; box-shadow: none; padding: 0; font-family: inherit; font-size: 0.86rem; line-height: 1.45; font-weight: 400; font-variant: normal; text-rendering: optimizeLegibility; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .latestpin:hover { background: var(--chat-pinned-hover-background); }
   .latestpin-body .bubble > :first-child { margin-top: 0; }
   .latestpin-body .bubble > :last-child { margin-bottom: 0; }
   .latestpin-body .bubble p { margin: 0; }
@@ -1096,10 +1105,10 @@ const STYLE = `
   .pintray { display: none; flex-direction: column; gap: 0.05rem; }
   .pintray.show { display: flex; }
   .pinitem { width: 100%; min-width: 0; display: flex; align-items: center; gap: 0.55rem; border: 0; border-radius: 7px; background: transparent; padding: 0.45rem 0.58rem; cursor: pointer; box-shadow: none; }
-  .pinitem:hover { background: var(--button-hover); }
+  .pinitem:hover { background: var(--chat-pinned-hover-background); }
   .pinitem-icon { width: 0.72rem; height: 0.72rem; flex-shrink: 0; fill: none; stroke: var(--ink-4); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .pinrole { flex-shrink: 0; font-size: 0.66rem; line-height: 1; font-weight: 850; letter-spacing: 0.09em; text-transform: uppercase; color: var(--theme-chat-pinned-role-foreground); border: 0; background: transparent; padding: 0; font-family: ui-monospace, "Cascadia Mono", monospace; }
-  .pintext { flex: 1; min-width: 0; max-width: none; font-family: inherit; font-size: 0.86rem; font-style: normal; line-height: 1.45; font-weight: 400; letter-spacing: 0; text-transform: none; font-variant: normal; text-rendering: optimizeLegibility; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pintext { flex: 1; min-width: 0; max-width: none; font-family: inherit; font-size: 0.86rem; font-style: normal; line-height: 1.45; font-weight: 400; letter-spacing: 0; text-transform: none; font-variant: normal; text-rendering: optimizeLegibility; color: var(--theme-chat-pinned-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pinx { flex-shrink: 0; border: 0; background: transparent; color: var(--ink-4); box-shadow: none; padding: 0.08rem 0.22rem; line-height: 1; font-size: 1.1rem; }
   .pinx:hover { color: var(--theme-chat-pinned-close-hover-foreground); background: transparent; }
   #msgs { --msg-float-actions-space: 7rem; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 1rem 1rem 1.5rem; display: flex; flex-direction: column; gap: 0.6rem; }
@@ -1174,8 +1183,8 @@ const STYLE = `
   .pincomment.unread:hover, .pincomment.unread:focus-visible { color: var(--status-unread); background: var(--status-unread-soft); }
   .commentdrawer { position: absolute; inset: 0; z-index: 95; display: flex; justify-content: flex-end; background: var(--theme-comment-overlay-background); }
   .commentdrawer[hidden] { display: none; }
-  .commentpanel { --comment-composer-overlay-height: 4rem; --comment-queue-overlay-height: 0px; --comment-scrollbar-width: 0px; position: relative; width: min(34rem, 92vw); height: 100%; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--line); box-shadow: var(--shadow-pop); }
-  .commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center; gap: 0.65rem; padding: 0 0.65rem 0 0.9rem; border-bottom: 1px solid var(--line-2); }
+  .commentpanel { --comment-composer-overlay-height: 4rem; --comment-queue-overlay-height: 0px; --comment-scrollbar-width: 0px; position: relative; width: min(34rem, 92vw); height: 100%; display: flex; flex-direction: column; background: var(--comment-background); border-left: 1px solid var(--comment-border); box-shadow: -18px 0 44px -10px var(--comment-shadow), -6px 0 16px -8px var(--comment-shadow); }
+  .commenthead { flex: 0 0 3rem; height: 3rem; display: flex; align-items: center; gap: 0.65rem; padding: 0 0.65rem 0 0.9rem; border-bottom: 1px solid var(--comment-border); }
   .commenttitle { flex: 1; min-width: 0; color: var(--ink); font-size: 0.84rem; line-height: 1; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .commentstatus { flex-shrink: 0; }
   .commentstatus[hidden] { display: none; }
@@ -1196,7 +1205,7 @@ const STYLE = `
   .commentmsgs { --msg-float-actions-space: 5rem; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0.8rem 0.9rem; display: flex; flex-direction: column; gap: 0.6rem; }
   #commentQueue { flex: 0 0 auto; z-index: 21; display: flex; flex-direction: column; gap: 0.3rem; max-height: 30vh; overflow-y: auto; padding: 0.4rem 0.9rem 0; }
   #commentQueue:empty { display: none; }
-  .commentfoot { position: relative; flex: 0 0 auto; z-index: 20; margin-right: var(--comment-scrollbar-width); padding: 0 0.9rem 0.75rem; border-top: 0; background: var(--surface); }
+  .commentfoot { position: relative; flex: 0 0 auto; z-index: 20; margin-right: var(--comment-scrollbar-width); padding: 0 0.9rem 0.75rem; border-top: 0; background: var(--comment-background); }
   .commentcomposer { width: 100%; box-sizing: border-box; }
   .commentcomposer .composerrow { min-height: 2.15rem; }
   .commentcomposer .composer-shortcut-ghost { height: 2.15rem; padding: 0.42rem 5.2rem 0.42rem 0.35rem; }
@@ -1665,11 +1674,24 @@ const STYLE = `
   .tagaction-panel { width: min(28rem, calc(100vw - 2rem)); padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--ink); box-shadow: var(--shadow-pop); }
   .tagbar button.tagttl { padding: 0; border: 0; background: transparent; cursor: pointer; }
   .tagbar button.tagttl:hover { color: var(--ink); text-decoration: underline; }
-  #tagManager .tagaction-panel { width: min(56rem, calc(100vw - 2rem)); padding: 0; overflow: hidden; border-radius: var(--radius-lg, 14px); }
+  .settings-panel.tagmanager-panel { width: min(56rem, calc(100vw - 2rem)); padding: 0; overflow: hidden; }
+  .tagmanager-panel[open] { display: flex; flex-direction: column; }
+  .tagmanager-header, .tagmanager-footer { flex-shrink: 0; }
+  .tagmanager-filters { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 0.75rem; }
+  .tagmanager-bind-options { display: flex; flex-wrap: wrap; gap: 0.35rem; max-height: 6rem; overflow-y: auto; padding: 2px; }
+  .tagmanager-bind-options button { padding: 0.3rem 0.55rem; box-shadow: none; font-size: 0.72rem; }
+  .tagmanager-bind-options button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); }
+  .tagmanager-range { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--ink-3); }
+  .tagmanager-range[hidden] { display: none; }
+  .tagmanager-range input { width: 5rem; min-width: 0; padding: 0.3rem; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--input-bg); color: var(--ink); }
+  .tagmanager-range input[aria-invalid="true"] { border-color: var(--theme-error-border); }
+  .tagmanager-filter-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; color: var(--ink-3); font-size: 0.72rem; }
+  .tagmanager-filter-summary select { max-width: 100%; padding: 0.3rem; background: var(--input-bg); color: var(--ink); border: 1px solid var(--line-2); border-radius: var(--radius-sm); }
+  .tagmanager-filter-summary button { font-size: 0.72rem; box-shadow: none; }
   .tagmanager-header { display: flex; align-items: center; gap: 1rem; padding: 1.1rem 1.25rem; border-bottom: 1px solid var(--line); }
   .tagmanager-heading { flex: 1; }
   .tagmanager-subtitle { margin-top: 0.25rem; font-size: 0.75rem; color: var(--ink-3); }
-  .tagmanager-body { padding: 1rem 1.25rem 1.25rem; }
+  .tagmanager-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 1rem 1.25rem 1.25rem; }
   .tagmanager-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
   .tagmanager-toolbar .searchbox { flex: 1; min-width: 10rem; height: 2.1rem; border-radius: var(--radius-sm); padding: 0.4rem 0.7rem; }
   .tagmanager-toolbar button { padding: 0.4rem 0.6rem; border-color: transparent; background: transparent; color: var(--ink-3); box-shadow: none; font-size: 0.72rem; }
@@ -1683,7 +1705,7 @@ const STYLE = `
   [aria-pressed="true"] > .tagmanager-mark { color: var(--accent); }
   .tagmanager-count { flex: 0 0 auto; font-size: 0.65rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
   .tagmanager-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-  .tagmanager-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; padding: 0.85rem 1.25rem; border-top: 1px solid var(--line); background: var(--surface-2); }
+  .tagmanager-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; padding: 0.85rem 1.25rem; border-top: 1px solid var(--line); background: var(--floating-panel-background); }
   .tagmanager-footer .tagaction-actions { margin: 0 0 0 auto; }
   .tagmanager-help { color: var(--ink-3); font-size: 0.72rem; margin: 0; }
   .tagmanager-help strong { display: block; color: var(--ink-2); font-weight: 600; margin-bottom: 0.2rem; }
@@ -1828,7 +1850,7 @@ const STYLE = `
   .qitem.scheduled { background: color-mix(in srgb, var(--surface) 78%, var(--theme-queue-scheduled-background)); }
   .qitem.blocked { border-color: var(--warning); background: var(--warning-soft); }
   .qitem .qtime { flex-shrink: 0; color: var(--ink-4); font-size: 0.68rem; font-variant-numeric: tabular-nums; }
-  .qitem button.qsend { padding: 0.1rem 0.45rem; color: var(--vendor-action-fg); background: var(--vendor-action-bg); border-color: var(--vendor-action-bg); font-weight: 600; }
+  .qitem button.qsend { width: auto; min-width: 3.4rem; padding: 0.1rem 0.45rem; color: var(--vendor-action-fg); background: var(--vendor-action-bg); border-color: var(--vendor-action-bg); font-weight: 600; }
   .qitem button.qsend:hover:not(:disabled) { background: var(--vendor-action-hover); border-color: var(--vendor-action-hover); }
   .qaction { width: 1.7rem; height: 1.7rem; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-color: transparent; background: transparent; box-shadow: none; color: var(--theme-queue-action-foreground); }
   .qaction:hover { color: var(--theme-queue-action-hover-foreground); border-color: transparent; background: var(--theme-queue-action-hover-background); box-shadow: none; }
@@ -2491,6 +2513,13 @@ export function renderConsole(v: ConsoleView): string {
         <span class="settings-note" id="settingsCustomColumnsNote" aria-live="polite">Enter a whole number of 1 or more.</span>
       </label>
     </section>
+    <section class="settings-group" aria-labelledby="settingsChatTitle">
+      <h3 id="settingsChatTitle">Chat</h3>
+      <div class="settings-control-row">
+        <label class="settings-control-copy" for="settingsChatSendMode"><span>Messages during generation</span><span class="settings-note" id="settingsChatSendModeNote">Append after a 5-second countdown. Choose Queue on the message to wait for the next turn. Unsupported providers use Queue.</span></label>
+        <div class="settings-field"><select id="settingsChatSendMode" aria-describedby="settingsChatSendModeNote"><option value="queue">Queue</option><option value="append">Append</option></select></div>
+      </div>
+    </section>
     <section class="settings-group" aria-labelledby="settingsAnalysisTitle">
       <h3 id="settingsAnalysisTitle">Background analysis</h3>
       <p class="settings-group-description">Keep session insights up to date as you work.</p>
@@ -2588,12 +2617,11 @@ export function renderConsole(v: ConsoleView): string {
     </div>
   </section>
 </div>
-<div class="tagaction" id="tagManager" hidden aria-hidden="true">
-  <section class="tagaction-panel" role="dialog" aria-modal="true" aria-labelledby="tagManagerTitle">
+<dialog class="settings-panel tagmanager-panel" id="tagManager" aria-labelledby="tagManagerTitle" aria-describedby="tagManagerIntro">
     <header class="tagmanager-header">
       <div class="tagmanager-heading">
         <div class="tagaction-title" id="tagManagerTitle">Tags</div>
-        <div class="tagmanager-subtitle">Select tags to manage across your chats</div>
+        <div class="tagmanager-subtitle" id="tagManagerIntro">Bind counts cover all chats in this Attend instance.</div>
       </div>
       <button id="tagManagerClose" class="workstats-close" type="button" aria-label="Close tag manager"></button>
     </header>
@@ -2603,17 +2631,30 @@ export function renderConsole(v: ConsoleView): string {
         <button id="tagManagerAll" type="button">Select all shown</button>
         <button id="tagManagerClearSelection" type="button">Clear selection</button>
       </div>
+      <div class="tagmanager-filters">
+        <div id="tagManagerBinds" class="tagmanager-bind-options" role="group" aria-label="Filter by bind count"></div>
+        <div id="tagManagerRange" class="tagmanager-range" hidden>
+          <label>Min binds <input id="tagManagerMin" type="number" min="0" step="1" placeholder="0" aria-describedby="tagManagerRangeHelp"></label>
+          <span aria-hidden="true">–</span>
+          <label>Max binds <input id="tagManagerMax" type="number" min="0" step="1" placeholder="Any" aria-describedby="tagManagerRangeHelp"></label>
+          <span id="tagManagerRangeHelp">Inclusive; leave either end blank for no limit.</span>
+        </div>
+        <div class="tagmanager-filter-summary">
+          <span id="tagManagerResults" role="status" aria-live="polite"></span>
+          <label>Sort <select id="tagManagerSort" aria-label="Sort tags"><option value="name">Name</option><option value="bind-asc">Fewest binds</option><option value="bind-desc">Most binds</option></select></label>
+          <button id="tagManagerResetFilters" type="button">Reset filters</button>
+        </div>
+      </div>
       <div id="tagManagerList" class="tagmanager-list" role="group" aria-label="Tags"></div>
     </div>
     <footer class="tagmanager-footer">
-      <div class="tagmanager-help"><strong id="tagManagerStatus" role="status"></strong>Unbind keeps tags. Delete removes them.</div>
+      <div class="tagmanager-help"><strong id="tagManagerStatus" role="status"></strong>Unbind keeps tags. Delete removes them. Actions apply across all Attend instances.</div>
       <div class="tagaction-actions">
         <button id="tagManagerUnbind" class="tagaction-clear" type="button" disabled>Unbind selected</button>
         <button id="tagManagerDelete" class="tagaction-delete" type="button" disabled>Delete selected</button>
       </div>
     </footer>
-  </section>
-</div>
+</dialog>
 <div class="toast-host" id="toastHost" aria-live="polite" aria-atomic="true"></div>
 <section class="sessiontag-popover" id="sessionTagPopover" role="dialog" aria-label="Edit session tags" hidden>
   <div class="sessiontag-search">
@@ -2677,6 +2718,7 @@ window.__CHANGELOG__ = ${changelogJson};
 (function(){
   var THEME_COLORS = ${JSON.stringify(THEME_COLORS).replace(/</g, "\\u003c")};
   var THEME_ENGINE = (${createThemeEngine.toString()})(THEME_COLORS);
+  var TAG_COLOR_ENGINE = (${createTagColorEngine.toString()})();
   var SESS = window.__SESSIONS__ || [];
   var ANALYZER_SETTINGS = window.__ANALYZER_SETTINGS__ || {mode:'economical',revision:0};
   var lastEnabledDaemonMode = ANALYZER_SETTINGS.mode==='follow'?'follow':'economical';
@@ -2963,6 +3005,12 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!runConfigStaged(existing)) clearStagedRunConfig(existing);
     return existing;
   }
+  function hydrateHiddenTags(res){
+    if(!Array.isArray(res.hiddenTags)||sameStringList(hiddenTags,res.hiddenTags)) return false;
+    hiddenTags=res.hiddenTags.slice();
+    VAULT_STATE.hiddenTags=hiddenTags.slice();
+    return true;
+  }
   function hydrateSessionIndex(res){
     var listed = res && Array.isArray(res.sessions) ? res.sessions : [];
     var hiddenSessionIds=hiddenSessionIdMap(res);
@@ -2996,6 +3044,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(Array.isArray(res.knownDirs)) DIRS = res.knownDirs;
     if(typeof res.defaultNewDir==='string') DEFAULT_NEW_DIR = res.defaultNewDir;
     if(Array.isArray(res.tags)) TAGS = res.tags;
+    hydrateHiddenTags(res);
     applyVaultSessionTitles();
     syncSchedules(SCHEDULES,true);
     restoreChatGroups();
@@ -3022,6 +3071,7 @@ window.__CHANGELOG__ = ${changelogJson};
       drainOrphanBusEvents(s);
       drainOrphanAnalysis(s);
     });
+    positionHeaderTagSessionMenu();
   }
   function hydrateSessionIndexDelta(res){
     var upserts=Array.isArray(res&&res.upserts)?res.upserts:[];
@@ -3066,6 +3116,7 @@ window.__CHANGELOG__ = ${changelogJson};
       if(!sameStringList(TAGS,res.tags)) tagsAffected=true;
       TAGS=res.tags;
     }
+    if(hydrateHiddenTags(res)) tagsAffected=true;
     applyVaultSessionTitles();
     var hiddenCurrent=cur&&(hiddenSessionIds[providerSessionId(cur)]||hiddenSessionIds[String(cur.sessionId||'')]) ? cur : null;
     if(hiddenCurrent){
@@ -3093,6 +3144,7 @@ window.__CHANGELOG__ = ${changelogJson};
       drainOrphanBusEvents(s);
       drainOrphanAnalysis(s);
     });
+    positionHeaderTagSessionMenu();
   }
   function requestSessionIndexSnapshot(epoch,revision,snapshotUrl,force){
     if(!snapshotUrl) snapshotUrl='/session-index?epoch='+encodeURIComponent(epoch)+'&revision='+revision;
@@ -3442,6 +3494,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var sessionReorderDeferred = false;
   var sidebarRenderDeferred = false;
   var headerTagSessionMenu = '';
+  var headerTagSessionState = null;
   var WORK_STATS_RANGES = ['1h','3h','6h','12h','today','24h','3d','7d','15d'];
   var workStatsRange = loadWorkStatsRange();
   var workStatsRequest = 0;
@@ -3557,11 +3610,13 @@ window.__CHANGELOG__ = ${changelogJson};
   function transcriptCacheCost(messages){
     return (messages||[]).reduce(function(total,message){
       var chars=String(message&&message.text||'').length;
+      (message&&message.attachments||[]).forEach(function(att){ chars+=String(att&&att.data||'').length+String(att&&att.text||'').length; });
+      (message&&message.references||[]).forEach(function(ref){ chars+=String(ref&&ref.text||'').length; });
       var memory=message&&message.memoryCitations;
       (memory&&memory.entries||[]).forEach(function(entry){ chars+=String(entry&&entry.path||'').length+String(entry&&entry.note||'').length+32; });
       (memory&&memory.rolloutIds||[]).forEach(function(id){ chars+=String(id||'').length; });
       (message&&message.tools||[]).forEach(function(tool){
-        chars+=String(tool&&tool.result||'').length;
+        chars+=String(tool&&tool.result||'').length+String(tool&&tool.name||'').length+String(tool&&tool.id||'').length+String(tool&&tool.historyId||'').length+96;
         try{ chars+=String(JSON.stringify(tool&&tool.input)||'').length; }catch(_err){ chars+=1024; }
       });
       return total+chars*2+256;
@@ -3663,12 +3718,16 @@ window.__CHANGELOG__ = ${changelogJson};
   var TRANSCRIPT_VIRTUAL_THRESHOLD = 120;
   var TRANSCRIPT_VIRTUAL_OVERSCAN_PX = 1400;
   var TRANSCRIPT_VIRTUAL_MIN_TURNS = 10;
+  // A single agent turn can contain thousands of tool calls. Bound the unit
+  // of virtualization as well as the number of units in the viewport.
+  var TRANSCRIPT_VIRTUAL_MAX_TURN_BLOCKS = 12;
   var transcriptVirtualState = null;
   var transcriptVirtualRaf = 0;
   var transcriptVirtualMeasureRaf = 0;
   var transcriptVirtualResizeObserver = null;
   var transcriptTurnHeightCaches = {};
   var transcriptVirtualModelCaches = {};
+  var TRANSCRIPT_MODEL_CACHE_MAX_BYTES = 16 * 1024 * 1024;
   // A tab switch should exchange viewport ownership, not rebuild an unchanged
   // transcript. Keep a small, weighted LRU of connected-but-hidden panes. Each
   // pane owns the DOM window and the virtual layout state that produced it; the
@@ -4512,7 +4571,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var p=item.payload||{}, client=String(p.clientSessionId||'');
     if(!client) return null;
     var isFork=p.mode==='fork', parent=isFork?String(p.parentSessionId||''):'';
-    var session={vendor:p.vendor||'claude',model:p.model||'',effort:p.effort||'',speed:p.speed||'',sessionId:client,clientBranchId:client,providerSessionId:null,forkParentId:parent||null,pendingNew:true,pendingScheduled:true,scheduleRunId:item.id,scheduledAt:item.runAt,title:isFork?forkTitleFromSession(findSessionById(parent),p.text):p.text||'(scheduled session)',lastPrompt:p.text||null,cwd:p.cwd||'',tabTitle:String(p.tabTitle||''),project:basename(p.cwd||''),file:'',ageDays:0,lastTs:item.createdAt||Date.now(),prompts:1,brief:null,state:null,seen:true,tags:Array.isArray(p.tags)?p.tags.slice():[],_pendingSessionTags:Array.isArray(p.tags)?p.tags.slice():[],generating:false,generatingStartedAt:null};
+    var session={vendor:p.vendor||'claude',model:p.model||'',effort:p.effort||'',speed:p.speed||'',sessionId:client,clientBranchId:client,providerSessionId:null,forkParentId:parent||null,pendingNew:true,pendingScheduled:true,scheduleRunId:item.id,scheduledAt:item.runAt,title:isFork?forkTitleFromSession(findSessionById(parent),p.text):p.text||'(scheduled session)',lastPrompt:p.text||null,cwd:p.cwd||'',tabTitle:String(p.tabTitle||''),project:basename(p.cwd||''),file:'',ageDays:0,lastTs:item.createdAt||Date.now(),prompts:1,brief:null,state:null,seen:true,tags:Array.isArray(p.tags)?p.tags.slice():[],_pendingSessionTags:Array.isArray(p.tags)&&p.tags.length?p.tags.slice():undefined,generating:false,generatingStartedAt:null};
     projectScheduledSessionTranscript(session,item);
     return session;
   }
@@ -4844,7 +4903,9 @@ window.__CHANGELOG__ = ${changelogJson};
       byId('settingsDaemonStatus').textContent='Could not save. Try again.';
     }).finally(function(){ savingDaemonSettings=false; syncDaemonToggle(); });
   }
+  function chatSendMode(){ return newPrefs.chatSendMode==='append' ? 'append' : 'queue'; }
   function openSettings(){
+    byId('settingsChatSendMode').value=chatSendMode();
     renderThemeList();
     syncColumnSettings();
     syncDaemonToggle();
@@ -5582,8 +5643,8 @@ window.__CHANGELOG__ = ${changelogJson};
     return { fg:'var(--theme-tag-foreground)', bg:'var(--theme-tag-background)', border:'var(--theme-tag-border)' };
   }
   function userTagBorderColor(tag){
-    // Stable pseudorandom hue: shared across surfaces, independent of activity.
-    var hue=hashText('tag:'+normalizeTag(tag))%360;
+    // Name-only SHA-256 hue, shared across surfaces and independent of activity.
+    var hue=TAG_COLOR_ENGINE.hue(tag);
     var dark=document.documentElement.getAttribute('data-theme')==='dark';
     return 'hsl('+hue+' 68% '+(dark?'65%':'45%')+')';
   }
@@ -5714,7 +5775,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!def || def.kind!=='user') return;
     stats = stats || tagHeatStats();
     var count = stats.counts[def.key] || 0;
-    var pinTip=isTagHidden(def.value) ? ' · hidden; restore it to return it to the everyday area' : (isTagPinned(def.value) ? ' · pinned; drag past the first unpinned tag to unpin' : ' · drag to the front to pin');
+    var pinTip=!btn ? '' : isTagHidden(def.value) ? ' · hidden; restore it to return it to the everyday area' : (isTagPinned(def.value) ? ' · pinned; drag past the first unpinned tag to unpin' : ' · drag to the front to pin');
     var activityTip = (def.title || def.label) + ' · ' + count + ' user message' + (count===1?'':'s') + ' in latest-action 24h' + pinTip;
     chip.title = activityTip;
     if(btn) btn.title = activityTip;
@@ -5799,6 +5860,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(isUser){ chip.style.backgroundColor=''; chip.style.borderColor=''; chip.style.color=''; }
     applyTagHeatStyle(chip, null, chip.querySelector('button'), def, false);
     if(isUser) styleUserTagBorder(chip, def.value);
+    chip.setAttribute('data-tag-preview-key',def.key);
   }
   function activeTagLabels(){
     return tagLabels(currentFilterTags());
@@ -6216,7 +6278,7 @@ window.__CHANGELOG__ = ${changelogJson};
       : goalArmed ? (turnActive?'Goal armed — the next queued message becomes the objective':'Goal armed — the next message becomes the objective')
       : 'Use the next message as a Goal';
     var input=byId('input');
-    if(input) input.placeholder=goalArmed?'describe a verifiable completion condition…':(turnActive?'Generating… Enter queues your message':'message');
+    if(input) input.placeholder=goalArmed?'describe a verifiable completion condition…':(turnActive?(chatSendMode()==='append'?'Generating… Enter appends after 5s':'Generating… Enter queues your message'):'message');
   }
   function syncGoalFromServer(s){
     var id=providerSessionId(s),vendor=String((s&&s.vendor)||'').toLowerCase(),generation=++goalSyncGeneration;
@@ -6685,6 +6747,14 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!entries.length) return null;
     return {entries:entries,rolloutIds:(Array.isArray(value.rolloutIds)?value.rolloutIds:[]).map(function(id){ return String(id||''); }).filter(Boolean)};
   }
+  function readingViewTool(tc){
+    if(isQuestionTool(tc.name,tc.input)) return Object.assign({},tc);
+    return {
+      id:tc.id,name:tc.name,input:null,
+      result:typeof tc.result==='string'?'':undefined,isError:tc.isError,
+      historyId:tc.historyId,historyOrdinal:tc.historyOrdinal,historyIndex:tc.historyIndex
+    };
+  }
   function cloneTranscriptMsgs(msgs){
     return Array.isArray(msgs) ? msgs.map(function(m){
       var ts=transcriptTs(m);
@@ -6694,7 +6764,7 @@ window.__CHANGELOG__ = ${changelogJson};
         attachments: cloneAttachments(m && m.attachments),
         references: clonePinReferences(m && m.references),
         memoryCitations: cloneMemoryCitations(m && m.memoryCitations)||undefined,
-        tools: Array.isArray(m && m.tools) ? m.tools.map(function(t){ return Object.assign({}, t); }) : [],
+        tools: Array.isArray(m && m.tools) ? m.tools.map(readingViewTool) : [],
         historyId: String(m&&m.historyId||'')||undefined,
         historyOrdinal: Number.isFinite(Number(m&&m.historyOrdinal)) ? Number(m.historyOrdinal) : undefined,
         historyIndex: Number.isFinite(Number(m&&m.historyIndex)) ? Number(m.historyIndex) : undefined,
@@ -6750,6 +6820,11 @@ window.__CHANGELOG__ = ${changelogJson};
     // one — an empty array most of all. Answering with it forked branches that
     // silently carried none of the conversation, with no error to notice.
     if(transcriptHasEarlierHistory(cur)) return null;
+    // Ordinary tool calls are deliberately absent from the reading view. The
+    // canonical cache still carries them, including empty/error completions,
+    // so a Fork must use that history rather than copying only visible text.
+    var history=cur&&cachedTranscriptFor(cur);
+    if(history&&history.some(function(message){ return (message.tools||[]).some(function(tool){ return !isQuestionTool(tool.name,tool.input); }); })) return null;
     var out=[], node=msgs.firstChild;
     while(node && node!==msgEl){
       if(node.nodeType===1 && node.classList){
@@ -6930,30 +7005,26 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!tc) return;
     var msg=ensureAssistantTranscriptMsg(s);
     if(!msg) return;
-    msg.tools.push({
-      id: tc.id ?? null,
-      name: tc.name,
-      input: tc.input,
-      result: tc.result,
-      isError: tc.isError === true
-    });
+    msg.tools.push(readingViewTool(tc));
     bumpTranscriptVersion(s);
   }
   function cacheTranscriptToolResult(s, id, text, isError){
     var state=ensureTranscriptState(s);
-    if(!state) return;
+    if(!state) return false;
     for(var i=state.length-1;i>=0;i--){
       var tools=state[i] && state[i].tools;
       if(!tools || !tools.length) continue;
       for(var j=tools.length-1;j>=0;j--){
         if((tools[j].id||null)===(id||null)){
+          text = isQuestionTool(tools[j].name,tools[j].input) ? text : '';
           tools[j].result = text;
           tools[j].isError = !!isError;
           patchTranscriptVirtualToolResult(s,id,text,isError);
-          return;
+          return true;
         }
       }
     }
+    return false;
   }
   function cachedTranscriptFor(s){
     if(!s) return null;
@@ -7125,18 +7196,27 @@ window.__CHANGELOG__ = ${changelogJson};
       };
     });
     var turns=[],current=null,msgIndex=0,toolIndex=0,blockCount=0,blockOrder=0,keyToTurn={},keyOrder={},historyIdToKey={},keyToHistoryId={},firstUserKey='',lastUserKey='';
+    var readableKey='',unanchoredToolIds=[];
     function finishTurn(){
       if(!current||!current.entries.length) return;
       current.estimate=Math.max(52,current.entries.reduce(function(total,entry){ return total+transcriptVirtualEntryEstimate(entry); },0));
       turns.push(current); current=null;
     }
     function addEntry(entry){
+      if(entry.kind==='msg'){
+        readableKey=entry.key;
+        unanchoredToolIds.forEach(function(id){ historyIdToKey[id]=readableKey; });
+        unanchoredToolIds=[];
+      }
       if(entry.kind==='msg'&&entry.role==='user'){
         finishTurn();
         current={key:entry.key,entries:[]};
         if(!firstUserKey) firstUserKey=entry.key;
         lastUserKey=entry.key;
-      } else if(!current) current={key:'intro:'+turns.length,entries:[]};
+      } else {
+        if(current&&current.entries.length>=TRANSCRIPT_VIRTUAL_MAX_TURN_BLOCKS) finishTurn();
+        if(!current) current={key:'chunk:'+entry.key,entries:[]};
+      }
       current.entries.push(entry); blockCount++;
     }
     function addPendingAt(index){
@@ -7161,6 +7241,15 @@ window.__CHANGELOG__ = ${changelogJson};
         var historyToolOrdinal=Number(tool&&tool.historyOrdinal);
         var ordinal=Number.isFinite(historyToolOrdinal)?historyToolOrdinal:toolIndex;
         toolIndex=Math.max(toolIndex,ordinal+1);
+        if(!isQuestionTool(tool.name,tool.input)){
+          // Old tool Pins still lead to their surrounding text, without
+          // resurrecting execution blocks in the reading view.
+          if(tool.historyId){
+            if(readableKey) historyIdToKey[tool.historyId]=readableKey;
+            else unanchoredToolIds.push(tool.historyId);
+          }
+          return;
+        }
         var key=transcriptVirtualToolKey(tool,ordinal);
         addEntry({kind:'tool',key:key,ordinal:ordinal,tool:tool,historyId:tool&&tool.historyId,historyIndex:tool&&tool.historyIndex});
       });
@@ -7180,9 +7269,22 @@ window.__CHANGELOG__ = ${changelogJson};
     var pending=sessionId&&localPendingMsgs[sessionId];
     if(!s||pending&&pending.length) return buildTranscriptVirtualModel(msgs,sessionId);
     var key=transcriptVirtualKey(sessionId),stamp=transcriptPaneStamp(s),cached=key&&transcriptVirtualModelCaches[key];
-    if(cached&&cached.stamp===stamp) return cached.model;
+    if(cached&&cached.stamp===stamp){
+      objectCacheSet(transcriptVirtualModelCaches,key,cached,80);
+      return cached.model;
+    }
     var model=buildTranscriptVirtualModel(msgs,sessionId);
-    if(key) objectCacheSet(transcriptVirtualModelCaches,key,{stamp:stamp,model:model},80);
+    if(key){
+      // Derived models retain message/tool payloads even after the primary
+      // transcript LRU evicts them. Give these references their own byte budget.
+      objectCacheSet(transcriptVirtualModelCaches,key,{stamp:stamp,model:model,cost:transcriptCacheCost(msgs)+model.blockCount*384},80);
+      var keys=Object.keys(transcriptVirtualModelCaches);
+      var bytes=keys.reduce(function(total,k){ return total+transcriptVirtualModelCaches[k].cost; },0);
+      while(bytes>TRANSCRIPT_MODEL_CACHE_MAX_BYTES&&keys.length){
+        var oldest=keys.shift(); bytes-=transcriptVirtualModelCaches[oldest].cost;
+        delete transcriptVirtualModelCaches[oldest];
+      }
+    }
     return model;
   }
   function transcriptTurnHeightCache(key){
@@ -7400,6 +7502,7 @@ window.__CHANGELOG__ = ${changelogJson};
     else if(options.keepScroll) host.scrollTop=previousTop;
     else host.scrollTop=host.scrollHeight;
     scheduleTranscriptVirtualMeasure(state,pinBottom);
+    restoreVirtualStreamingTargets(state);
   }
   function transcriptSelectionIsActive(host){
     if(host.querySelector('.msg.editing, .inline-edit')) return true;
@@ -7559,7 +7662,7 @@ window.__CHANGELOG__ = ${changelogJson};
       msgOrdinal:msgOrdinal,
       toolOrdinal:toolOrdinal,
       width:host.clientWidth,
-      cost:transcriptPaneCost(host)
+      cost:transcriptPaneCost(host)+(transcriptVirtualState?transcriptCacheCost(transcriptStateRef(s)||[]):0)
     };
     suspendTranscriptVirtualRuntime();
     host.style.visibility='';
@@ -7996,7 +8099,8 @@ window.__CHANGELOG__ = ${changelogJson};
     for(var i=0;nodes&&i<nodes.length;i++){
       if(nodes[i].getAttribute('data-history-id')===historyId) return String(nodes[i].getAttribute('data-msg-key')||'');
     }
-    return String(transcriptVirtualState&&transcriptVirtualState.historyIdToKey&&transcriptVirtualState.historyIdToKey[historyId]||'');
+    var model=transcriptVirtualState||(cur&&transcriptVirtualModelFor(transcriptStateRef(cur)||[],cur.sessionId));
+    return String(model&&model.historyIdToKey&&model.historyIdToKey[historyId]||'');
   }
   function pinMatchesRenderedBlock(pin,target){
     if(!pin||!target) return false;
@@ -8572,6 +8676,11 @@ window.__CHANGELOG__ = ${changelogJson};
     for(var i=0;nodes&&i<nodes.length;i++){
       if(nodes[i].getAttribute('data-history-id')===historyId) return String(nodes[i].getAttribute('data-msg-key')||'');
     }
+    // A targeted history fetch retains the canonical records in the cache.
+    // Reuse the reading-view mapping for old Pins on hidden comment tools.
+    var messages=commentMessageCache[commentDrawerState.threadId]||[];
+    var key=buildTranscriptVirtualModel(messages).historyIdToKey[historyId]||'';
+    if(key.indexOf('user:')===0||key.indexOf('assistant:')===0) return 'comment:'+msgIndexFromKey(key);
     return '';
   }
   function scrollToCommentMsgKey(key,pin){
@@ -8877,6 +8986,7 @@ window.__CHANGELOG__ = ${changelogJson};
   function appendCommentTool(tc){
     var host=byId('commentMsgs'); if(!host||!tc) return null;
     var block=addTool(tc,{target:host,registry:commentToolEls,readonly:true});
+    if(!block) return null;
     keepCommentGeneratingLast();
     if(commentStick) host.scrollTop=host.scrollHeight;
     syncScrollBottomButton(host,byId('commentScrollBottom'));
@@ -9012,13 +9122,15 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function commentHistoryContentSize(messages){
     return (messages||[]).reduce(function(total,message){
-      var tools=message&&message.tools||[],toolSize=0;
-      try{ toolSize=JSON.stringify(tools).length; }catch(_err){ toolSize=tools.length; }
+      // The open-drawer cache contains the reading view. Hidden execution
+      // payloads in an older disk snapshot must not outweigh newer live text.
+      var tools=(message&&message.tools||[]).filter(function(tool){ return isQuestionTool(tool.name,tool.input); }),toolSize=0;
+      if(tools.length){ try{ toolSize=JSON.stringify(tools).length; }catch(_err){ toolSize=tools.length; } }
       return total+String(message&&message.text||'').length+toolSize;
     },0);
   }
   function commentHistoryUrl(threadId,before){
-    var url='/comments/messages?id='+encodeURIComponent(threadId)+'&paged=1&limit=60';
+    var url='/comments/messages?id='+encodeURIComponent(threadId)+'&paged=1&limit=60&view=reading';
     if(before!=null) url+='&before='+encodeURIComponent(before);
     return url;
   }
@@ -9142,7 +9254,10 @@ window.__CHANGELOG__ = ${changelogJson};
       if(res&&res.thread) thread=rememberCommentThread(res.thread)||thread;
       var fresh=res&&res.messages||[],cached=commentMessageCache[threadId]||[];
       var keepCached=thread.status==='generating'&&commentHistoryContentSize(cached)>commentHistoryContentSize(fresh);
-      seedCommentGenerationTiming(thread,keepCached?cached:fresh);
+      // Even when the live text is ahead, disk-only tool activity still counts
+      // toward quiet. Seed timing before the reading view discards those tools.
+      seedCommentGenerationTiming(thread,fresh);
+      if(keepCached) seedCommentGenerationTiming(thread,cached);
       if(!keepCached) commentHistoryPages[threadId]=Object.assign({},res&&res.page||{before:0,hasMore:false,total:fresh.length,version:responseVersion},{loading:false});
       renderCommentMessages(keepCached?cached:fresh);
       if(responseVersion){
@@ -10526,14 +10641,17 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function saveNewPrefs(){
     VAULT_STATE.modelPrefs=newPrefs;
-    saveVaultUiState({modelPrefs:newPrefs});
+    // Ordinary model picks must never resurrect a preset deleted in another tab.
+    var prefs=Object.assign({},newPrefs);
+    delete prefs.configPresets; delete prefs.configPresetsRevision;
+    saveVaultUiState({modelPrefs:prefs});
   }
-  function saveVaultUiState(patch){
+  function saveVaultUiState(patch,onSaved){
     // Persist local UI patches in issue order. These writes are tiny and rare;
     // serialization avoids an older title/pin/theme request winning on disk.
     vaultWriteChain=vaultWriteChain.catch(function(){}).then(function(){
       return fetch('/vault/ui-state',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(patch)})
-        .then(function(r){ if(!r.ok) throw new Error('ui state save failed'); return true; })
+        .then(function(r){ if(!r.ok) throw new Error('ui state save failed'); return onSaved ? r.json().then(function(res){ onSaved(res); return true; }) : true; })
         .catch(function(){ showToast('Could not save this UI change. It may not survive restart.','warn'); return false; });
     });
     return vaultWriteChain;
@@ -10574,22 +10692,23 @@ window.__CHANGELOG__ = ${changelogJson};
     var store=kind==='notes' ? VAULT_STATE.sessionNotes : VAULT_STATE.sessionTodos;
     return Array.isArray(store[ownerKey]) ? store[ownerKey] : [];
   }
-  // Every item the hub can show, tagged with the scope it lives in. Shortcuts are
-  // one unscoped list; notes/todos are gathered across every known session, and
-  // todos additionally carry the inbox.
+  // Saved text owns the list; the session scan only supplies navigation. A
+  // session aging out, disappearing or leaving this scope must not hide its work.
   function todoHubEntries(kind){
     ensureComposerCollections();
     if(kind==='shortcuts'){
       return VAULT_STATE.shortcuts.map(function(item){ return {ownerKey:'global',session:null,item:item}; });
     }
-    var entries=[],seenKeys={};
+    var entries=[],sessionsByKey=Object.create(null);
     if(kind==='todo'){
       VAULT_STATE.inboxTodos.forEach(function(item){ entries.push({ownerKey:'inbox',session:null,item:item}); });
     }
     SESS.forEach(function(s){
-      var key=sessionTextKey(s); if(!key||seenKeys[key]) return;
-      seenKeys[key]=true;
-      hubOwnerItems(kind,key).forEach(function(item){ entries.push({ownerKey:key,session:s,item:item}); });
+      var key=sessionTextKey(s); if(key&&!sessionsByKey[key]) sessionsByKey[key]=s;
+    });
+    var store=kind==='notes' ? VAULT_STATE.sessionNotes : VAULT_STATE.sessionTodos;
+    Object.keys(store).forEach(function(key){
+      hubOwnerItems(kind,key).forEach(function(item){ entries.push({ownerKey:key,session:sessionsByKey[key]||null,item:item}); });
     });
     return entries;
   }
@@ -10733,6 +10852,12 @@ window.__CHANGELOG__ = ${changelogJson};
       var scope=el('button','todohub-scope',sessionLabel); scope.type='button';
       scope.setAttribute('data-hover-tip',sessionLabel);
       scope.onclick=function(){ if(!todoHubPinned) closeTodoHub(); select(entry.session); }; meta.appendChild(scope);
+    } else if(entry.ownerKey!=='global'&&entry.ownerKey!=='inbox'){
+      var savedTitle=VAULT_STATE.sessionTitles&&VAULT_STATE.sessionTitles[entry.ownerKey];
+      var unavailableLabel=[savedTitle,'Session unavailable'].filter(Boolean).join(' · ');
+      var unavailable=el('span','todohub-scope',unavailableLabel);
+      unavailable.setAttribute('data-hover-tip',unavailableLabel+' · '+entry.ownerKey);
+      meta.appendChild(unavailable);
     }
     meta.appendChild(el('span','',ageLabelAt(item.updatedAt)));
     content.appendChild(meta); row.appendChild(content);
@@ -12074,6 +12199,8 @@ window.__CHANGELOG__ = ${changelogJson};
     return request;
   }
   function refreshVendorModels(vendor){
+    var info=vendorInfo(vendor);
+    if(!info||!info.available) return Promise.resolve();
     if(vendor==='claude') return refreshClaudeModels();
     if(vendor==='codex') return refreshCodexModels();
     if(vendor==='cursor') return refreshCursorModels();
@@ -12405,6 +12532,15 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   // Saved combinations live alongside the existing persistent model preferences.
   var configPresetEditing=null;
+  var configPresetWrites=0;
+  function syncConfigPresets(snapshot){
+    if(!snapshot || !Array.isArray(snapshot.items) || configPresetWrites) return;
+    var revision=Number(snapshot.revision)||0;
+    if(revision<(Number(newPrefs.configPresetsRevision)||0)) return;
+    newPrefs.configPresets=snapshot.items;
+    newPrefs.configPresetsRevision=revision;
+    VAULT_STATE.modelPrefs=newPrefs;
+  }
   function configPresets(){
     return Array.isArray(newPrefs.configPresets) ? newPrefs.configPresets.filter(function(preset){
       return preset && typeof preset.id==='string' && typeof preset.vendor==='string';
@@ -12478,8 +12614,14 @@ window.__CHANGELOG__ = ${changelogJson};
     host.appendChild(section);
   }
   function persistConfigPresets(presets){
-    return saveVaultUiState({modelPrefs:{configPresets:presets}}).then(function(ok){
-      if(ok){ newPrefs.configPresets=presets; VAULT_STATE.modelPrefs=newPrefs; }
+    configPresetWrites++;
+    return saveVaultUiState({modelPrefs:{configPresets:presets}},function(res){
+      var prefs=res&&res.state&&res.state.modelPrefs;
+      newPrefs.configPresets=presets;
+      if(prefs) newPrefs.configPresetsRevision=Number(prefs.configPresetsRevision)||0;
+      VAULT_STATE.modelPrefs=newPrefs;
+    }).then(function(ok){
+      configPresetWrites--;
       return ok;
     });
   }
@@ -12848,6 +12990,107 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   var hoverTipAnchor=null;
   var hoverTipTimer=null;
+  var tagPreviewKey='',tagPreviewPointer=null,tagPreviewFocus=null,tagPreviewPoint=null,tagPreviewFrame=0;
+  // All relation previews share tag hover's lifecycle, dimming and refresh logic.
+  function tagPreviewAnchor(target){
+    return target&&target.closest ? target.closest('[data-tag-preview-key],[data-session-relation-key]') : null;
+  }
+  function sessionPreviewKey(anchor){
+    return anchor ? anchor.getAttribute('data-tag-preview-key')||anchor.getAttribute('data-session-relation-key')||'' : '';
+  }
+  function sessionRelationHue(key){ return hashText('session-relation:'+key)%360; }
+  function sessionRelationColor(key){
+    var dark=document.documentElement.getAttribute('data-theme')==='dark';
+    return 'hsl('+sessionRelationHue(key)+' 42% '+(dark?'64%':'40%')+')';
+  }
+  function sessionMatchesTagPreview(s,key){
+    if(key.indexOf('group:')===0) return sessionGroupKeys[chatMemberKey(chatSessionRef(s))]===key;
+    if(key.indexOf('fork:')===0) return sidebarForkKeys[forkNodeId(s)]===key;
+    if(key.indexOf('tag:')===0){
+      var tag=key.slice(4).toLowerCase();
+      return (s.tags||[]).some(function(value){ return normalizeTag(value).toLowerCase()===tag; });
+    }
+    return sessionTagKeys(s).indexOf(key)>=0;
+  }
+  function paintTagPreviewCard(item){
+    var s=item._session,active=!!tagPreviewKey&&!!s;
+    var match=active&&sessionMatchesTagPreview(s,tagPreviewKey);
+    item.classList.toggle('tag-preview-match',!!match);
+    item.classList.toggle('tag-preview-dim',active&&!match);
+    item.classList.toggle('tag-preview-live',active&&!!s.generating);
+  }
+  function paintTagPreview(){
+    var anchor=tagPreviewPointer||tagPreviewFocus;
+    tagPreviewKey=sessionPreviewKey(anchor);
+    var color=tagPreviewKey.indexOf('tag:')===0 ? userTagBorderColor(tagPreviewKey.slice(4)) : /^(group|fork):/.test(tagPreviewKey) ? sessionRelationColor(tagPreviewKey) : 'var(--accent)';
+    [byId('list'),byId('sessionPanelList')].forEach(function(host){
+      if(!host) return;
+      if(tagPreviewKey) host.style.setProperty('--tag-preview-color',color);
+      else host.style.removeProperty('--tag-preview-color');
+      host.querySelectorAll('.item').forEach(paintTagPreviewCard);
+    });
+  }
+  function clearTagPreview(){
+    tagPreviewPointer=null; tagPreviewFocus=null; tagPreviewPoint=null;
+    if(tagPreviewKey) paintTagPreview();
+  }
+  function scheduleTagPreviewRefresh(){
+    if(!tagPreviewKey||tagPreviewFrame) return;
+    tagPreviewFrame=requestAnimationFrame(function(){
+      tagPreviewFrame=0;
+      // Re-resolve the actual pointer target after a scan or virtual-list scroll.
+      // An old detached tag must never leave the lists permanently dimmed.
+      if(tagPreviewPointer&&tagPreviewPoint) tagPreviewPointer=tagPreviewAnchor(document.elementFromPoint(tagPreviewPoint.x,tagPreviewPoint.y));
+      if(tagPreviewFocus&&!tagPreviewFocus.isConnected) tagPreviewFocus=null;
+      paintTagPreview();
+      if(hoverTipAnchor&&!hoverTipAnchor.isConnected){
+        hideHoverTip();
+        if(tagPreviewPointer&&tagPreviewPoint){
+          var target=document.elementFromPoint(tagPreviewPoint.x,tagPreviewPoint.y);
+          var anchor=target&&target.closest('[data-hover-tip]');
+          if(anchor) queueHoverTip(anchor,{clientX:tagPreviewPoint.x,clientY:tagPreviewPoint.y});
+        }
+      }
+    });
+  }
+  function setupTagPreviews(){
+    document.addEventListener('pointerover',function(ev){
+      if(ev.pointerType==='touch'||ev.buttons) return;
+      var anchor=tagPreviewAnchor(ev.target);
+      if(anchor===tagPreviewPointer) return;
+      tagPreviewPointer=anchor; tagPreviewPoint={x:ev.clientX,y:ev.clientY};
+      paintTagPreview();
+    });
+    document.addEventListener('pointermove',function(ev){
+      if(ev.pointerType==='touch'||ev.buttons) return;
+      if(tagPreviewPointer) tagPreviewPoint={x:ev.clientX,y:ev.clientY};
+    });
+    document.addEventListener('pointerout',function(ev){
+      if(!tagPreviewPointer) return;
+      var anchor=tagPreviewAnchor(ev.relatedTarget);
+      if(anchor===tagPreviewPointer) return;
+      tagPreviewPointer=anchor;
+      paintTagPreview();
+    });
+    document.addEventListener('focusin',function(ev){
+      if(!ev.target.matches||!ev.target.matches(':focus-visible')) return;
+      tagPreviewFocus=tagPreviewAnchor(ev.target); paintTagPreview();
+    });
+    document.addEventListener('focusout',function(){ tagPreviewFocus=null; paintTagPreview(); });
+    document.addEventListener('pointerdown',clearTagPreview,true);
+    document.addEventListener('dragstart',clearTagPreview,true);
+    document.addEventListener('keydown',function(ev){ if(ev.key==='Escape') clearTagPreview(); },true);
+    window.addEventListener('blur',clearTagPreview);
+    document.addEventListener('visibilitychange',function(){ if(document.hidden) clearTagPreview(); });
+    window.addEventListener('scroll',scheduleTagPreviewRefresh,true);
+    window.addEventListener('resize',scheduleTagPreviewRefresh);
+    if(window.MutationObserver){
+      var observer=new MutationObserver(scheduleTagPreviewRefresh);
+      ['list','sessionPanelList','tagFilters','h-tags'].forEach(function(id){
+        var host=byId(id); if(host) observer.observe(host,{childList:true,subtree:true});
+      });
+    }
+  }
   var HOVER_TIP_DELAY_MS=80;
   function hoverTipRoot(){ return byId('hoverTip'); }
   function normalizeHoverTitle(node){
@@ -12885,11 +13128,19 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!tip || !anchor) return;
     var value=String(anchor.getAttribute('data-hover-tip')||'').trim();
     if(!value) return;
+    var preview=tagPreviewAnchor(anchor);
+    if(preview&&(anchor===preview||anchor.classList.contains('gtagbtn'))){
+      var key=sessionPreviewKey(preview),count=SESS.filter(function(s){ return sessionMatchesTagPreview(s,key); }).length;
+      var relation=key.indexOf('group:')===0?' in this group':key.indexOf('fork:')===0?' in this fork tree':'';
+      value+='\\n'+count+' matching session'+(count===1?'':'s')+relation+' · highlighted in sidebar and session panel';
+      if(preview.hasAttribute('data-tag-preview-key')) value+='\\n'+(preview.classList.contains('gtag')?'Click to filter sessions':'Click to view recent sessions');
+    }
     if(hoverTipTimer) clearTimeout(hoverTipTimer);
     hoverTipAnchor=anchor;
     hoverTipTimer=setTimeout(function(){
       hoverTipTimer=null;
       if(hoverTipAnchor!==anchor || !anchor.isConnected) return;
+      tip.style.whiteSpace=preview ? 'pre-line' : '';
       tip.textContent=value;
       tip.hidden=false;
       positionHoverTip(anchor,ev);
@@ -13657,6 +13908,8 @@ window.__CHANGELOG__ = ${changelogJson};
       if(def.kind==='user' && !hidden && visiblePinnedCount && !pinned && !pinDividerInserted) appendPinDivider();
       var manageable=def.deletable;
       var chip=el('span','gtag'+(active?' on':'')+(def.kind!=='user'?' auto':'')+(def.kind==='untagged'?' untagged':'')+(manageable?' deletable':'')+(pinned?' tag-pinned':'')+(hidden?' tag-hidden':''));
+      chip.setAttribute('data-tag-preview-key',def.key);
+      chip.title=def.title||def.label;
       var btn=el('button','gtagbtn',def.label);
       var count=tagCounts[def.key]||0;
       btn.appendChild(el('span','gtagcount',String(count)));
@@ -13835,17 +14088,68 @@ window.__CHANGELOG__ = ${changelogJson};
     VAULT_STATE.pinnedTags=nextPinned.slice();
     saveVaultUiState({hiddenTags:nextHidden,pinnedTags:nextPinned});
   }
-  var tagManagerSelected=new Set(), tagManagerBusy=false;
-  function visibleManagerTags(){
-    var query=byId('tagManagerSearch').value.trim().toLowerCase();
-    return TAGS.filter(function(tag){ return tag.toLowerCase().indexOf(query)>=0; });
+  var tagManagerSelected=new Set(), tagManagerBusy=false, tagManagerBindCounts=new Set(), tagManagerRangeMode=false;
+  function managerRange(){
+    var low=byId('tagManagerMin'), high=byId('tagManagerMax');
+    var min=low.value===''?0:Number(low.value), max=high.value===''?Infinity:Number(high.value);
+    var lowValid=!low.validity.badInput&&Number.isSafeInteger(min)&&min>=0;
+    var highValid=!high.validity.badInput&&(max===Infinity||Number.isSafeInteger(max)&&max>=0);
+    var ordered=min<=max;
+    low.setAttribute('aria-invalid',tagManagerRangeMode&&(!lowValid||!ordered)?'true':'false');
+    high.setAttribute('aria-invalid',tagManagerRangeMode&&(!highValid||!ordered)?'true':'false');
+    return {min:min,max:max,valid:lowValid&&highValid&&ordered};
+  }
+  function managerNameMatches(tag){
+    return tag.toLowerCase().indexOf(byId('tagManagerSearch').value.trim().toLowerCase())>=0;
+  }
+  function visibleManagerTags(counts){
+    counts=counts||tagSessionCounts();
+    var range=managerRange();
+    var shown=TAGS.filter(function(tag){
+      if(!managerNameMatches(tag)) return false;
+      var count=counts['tag:'+tag]||0;
+      if(tagManagerRangeMode) return range.valid&&count>=range.min&&count<=range.max;
+      return !tagManagerBindCounts.size||tagManagerBindCounts.has(count);
+    });
+    var sort=byId('tagManagerSort').value;
+    return shown.sort(function(a,b){
+      var diff=(counts['tag:'+a]||0)-(counts['tag:'+b]||0);
+      return (sort==='bind-asc'?diff:sort==='bind-desc'?-diff:0)||a.localeCompare(b);
+    });
+  }
+  function renderManagerBindFilters(counts){
+    var host=byId('tagManagerBinds'), facets={}, values=new Set([0,1]);
+    TAGS.forEach(function(tag){
+      var count=counts['tag:'+tag]||0; values.add(count);
+      if(managerNameMatches(tag)) facets[count]=(facets[count]||0)+1;
+    });
+    tagManagerBindCounts.forEach(function(count){ values.add(count); });
+    var active=document.activeElement, focusKey=active&&active.parentNode===host?active.getAttribute('data-bind-filter'):null;
+    host.textContent='';
+    function add(key,label,pressed,handler){
+      var button=el('button','',label); button.type='button'; button.disabled=tagManagerBusy;
+      button.setAttribute('data-bind-filter',key); button.setAttribute('aria-pressed',pressed?'true':'false');
+      button.onclick=function(){ handler(); renderTagManager(); };
+      host.appendChild(button);
+      if(key===focusKey) button.focus();
+    }
+    add('all','All binds',!tagManagerRangeMode&&!tagManagerBindCounts.size,function(){ tagManagerRangeMode=false; tagManagerBindCounts.clear(); });
+    Array.from(values).sort(function(a,b){return a-b;}).forEach(function(count){
+      add(String(count),count+' bind'+(count===1?'':'s')+' · '+(facets[count]||0),!tagManagerRangeMode&&tagManagerBindCounts.has(count),function(){
+        tagManagerRangeMode=false;
+        if(tagManagerBindCounts.has(count)) tagManagerBindCounts.delete(count); else tagManagerBindCounts.add(count);
+      });
+    });
+    add('range','Range…',tagManagerRangeMode,function(){ tagManagerRangeMode=true; tagManagerBindCounts.clear(); });
+    byId('tagManagerRange').hidden=!tagManagerRangeMode;
   }
   function renderTagManager(){
-    if(byId('tagManager').hidden) return;
+    if(!byId('tagManager').open) return;
     var list=byId('tagManagerList'), counts=tagSessionCounts();
     tagManagerSelected.forEach(function(tag){ if(TAGS.indexOf(tag)<0) tagManagerSelected.delete(tag); });
+    renderManagerBindFilters(counts);
     list.innerHTML='';
-    var shown=visibleManagerTags();
+    var shown=visibleManagerTags(counts);
     shown.forEach(function(tag){
       var row=el('button','tagmanager-row'), mark=el('span','tagmanager-mark');
       row.type='button'; row.setAttribute('aria-pressed',tagManagerSelected.has(tag)?'true':'false'); row.disabled=tagManagerBusy;
@@ -13863,30 +14167,37 @@ window.__CHANGELOG__ = ${changelogJson};
       row.title=tag+' · '+count+' chats here'; row.appendChild(badge);
       list.appendChild(row);
     });
-    if(!shown.length) list.appendChild(el('p','tagmanager-help',TAGS.length?'No matching tags.':'No tags yet.'));
-    syncTagManagerControls();
+    if(!shown.length) list.appendChild(el('p','tagmanager-help',tagManagerRangeMode&&!managerRange().valid?'Enter a valid bind range.':TAGS.length?'No matching tags. Reset filters to see all tags.':'No tags yet.'));
+    syncTagManagerControls(counts);
   }
-  function syncTagManagerControls(){
+  function syncTagManagerControls(counts){
     var count=tagManagerSelected.size, all=byId('tagManagerAll');
-    var shown=visibleManagerTags(), selected=shown.filter(function(tag){ return tagManagerSelected.has(tag); }).length;
+    var shown=visibleManagerTags(counts), selected=shown.filter(function(tag){ return tagManagerSelected.has(tag); }).length;
+    var invalidRange=tagManagerRangeMode&&!managerRange().valid;
     all.textContent=shown.length&&selected===shown.length?'Deselect all shown':'Select all shown';
     all.disabled=tagManagerBusy||!shown.length;
-    byId('tagManagerSearch').disabled=tagManagerBusy;
+    ['tagManagerSearch','tagManagerSort','tagManagerMin','tagManagerMax','tagManagerResetFilters'].forEach(function(id){ byId(id).disabled=tagManagerBusy; });
     byId('tagManagerClearSelection').disabled=tagManagerBusy||!count;
-    byId('tagManagerUnbind').disabled=tagManagerBusy||!count;
-    byId('tagManagerDelete').disabled=tagManagerBusy||!count;
+    byId('tagManagerUnbind').disabled=tagManagerBusy||!count||invalidRange;
+    byId('tagManagerDelete').disabled=tagManagerBusy||!count||invalidRange;
     byId('tagManagerClose').disabled=tagManagerBusy;
-    byId('tagManagerStatus').textContent=tagManagerBusy?'Saving…':count+' selected';
+    byId('tagManagerResults').textContent=shown.length+' of '+TAGS.length+' tags shown';
+    byId('tagManagerStatus').textContent=tagManagerBusy?'Saving…':count+' selected'+(count>selected?' ('+(count-selected)+' hidden by filters)':'');
+    ['tagManagerUnbind','tagManagerDelete'].forEach(function(id){ byId(id).title='Applies to all '+count+' selected tags, including '+(count-selected)+' hidden by filters.'; });
+  }
+  function resetManagerFilters(){
+    byId('tagManagerSearch').value=''; tagManagerBindCounts.clear(); tagManagerRangeMode=false;
+    byId('tagManagerMin').value=''; byId('tagManagerMax').value='';
+    renderTagManager();
   }
   function openTagManager(){
-    closeGlobalTagAction(); tagManagerSelected.clear(); byId('tagManagerSearch').value='';
-    byId('tagManager').hidden=false; byId('tagManager').setAttribute('aria-hidden','false');
+    closeGlobalTagAction(); tagManagerSelected.clear(); resetManagerFilters(); byId('tagManagerSort').value='name';
+    byId('tagManager').showModal(); byId('tagManagerOpen').setAttribute('aria-expanded','true');
     renderTagManager(); byId('tagManagerSearch').focus();
   }
   function closeTagManager(){
     if(tagManagerBusy) return;
-    byId('tagManager').hidden=true; byId('tagManager').setAttribute('aria-hidden','true');
-    byId('tagManagerOpen').focus();
+    byId('tagManager').close();
   }
   function manageSelectedTags(action){
     if(tagManagerBusy||!tagManagerSelected.size) return;
@@ -14315,7 +14626,7 @@ window.__CHANGELOG__ = ${changelogJson};
   // must never steal focus from New Session, search, tag editing, or another field.
   function setInputEnabled(on){ var i=byId('input'); if(!i) return; i.disabled=false;
     i.placeholder = on ? (goalArmed?'describe a verifiable completion condition…':'message')
-                       : 'Generating… Enter queues your message'; }
+                       : (chatSendMode()==='append'?'Generating… Enter appends after 5s':'Generating… Enter queues your message'); }
   function draftKey(s){ return s && s.sessionId ? String(s.sessionId) : ''; }
   function sessionScrollKey(s){
     if(!s) return '';
@@ -14650,12 +14961,12 @@ window.__CHANGELOG__ = ${changelogJson};
     var vendor=String((turn&&turn.vendor)||(s&&s.vendor)||'').toLowerCase();
     var qualifier=edited?'edited queued message':'queued message';
     if(vendor==='claude') return {
-      label:'append',
+      label:'send now',
       title:'Append this '+qualifier+' to the current Claude turn',
       unavailable:'Claude cannot accept an appended message right now'
     };
     if(vendor==='codex') return {
-      label:'guide',
+      label:'send now',
       title:'Guide the current Codex response with this '+qualifier,
       unavailable:'Codex cannot accept guidance right now'
     };
@@ -14801,6 +15112,37 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   // Render the pinned "queued" list (above the composer). Each row: the text plus
   // a Send/Edit/Delete control set — Codex-style.
+  function appendCountdown(row,turn,s,comment){
+    if(!turn.appendAt) return;
+    var timer=el('span','qtag qcountdown');
+    timer.dataset.appendAt=String(turn.appendAt);
+    updateAppendCountdown(timer);
+    row.appendChild(timer);
+    var button=el('button','qdispatch qkeep','queue'); button.type='button';
+    button.title='Keep this message queued for the next turn';
+    button.onclick=function(){
+      button.disabled=true;
+      var sessionId=providerSessionId(s);
+      var operation=beginOperation(comment?'comment-queue-view':'queue-view',comment?s.id:s);
+      serializeMutation(comment?'comment-queue-write':'queue-write',comment?s.id:s,function(){
+        return fetch('/chat/queue?session='+encodeURIComponent(sessionId)+'&item='+encodeURIComponent(turn.id),{
+          method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({mode:'queue'})
+        }).then(function(r){ return r.json(); });
+      }).then(function(res){
+        if(!operationIsCurrent(operation)) return;
+        if(!res.ok) throw new Error('queue conversion failed');
+        if(comment) applyCommentServerQueue(s.id,res); else applyServerQueue(s,res);
+      }).catch(function(){ button.disabled=false; showToast('Could not keep this message queued','warn'); });
+    };
+    row.appendChild(button);
+  }
+  function updateAppendCountdown(timer){
+    var remaining=Math.max(0,Math.ceil((Number(timer.dataset.appendAt)-Date.now())/1000));
+    timer.textContent=remaining ? 'sending in '+remaining+'s' : 'sending…';
+  }
+  window.setInterval(function(){
+    document.querySelectorAll('[data-append-at]').forEach(updateAppendCountdown);
+  },250);
   function renderQueue(){
     var q=byId('queue'); if(!q) return;
     var openEditor=q.querySelector('.qeditta'), editingTurn=editingQueueIdx>=0&&pendingQueue[editingQueueIdx];
@@ -14815,7 +15157,8 @@ window.__CHANGELOG__ = ${changelogJson};
         return;
       }
       var row=el('div','qitem');
-      row.appendChild(el('span','qtag','queued'));
+      if(!turn.appendAt) row.appendChild(el('span','qtag','queued'));
+      appendCountdown(row,turn,cur,false);
       if(turn.goal) row.appendChild(el('span','qtag','goal'));
       if(atts.length) row.appendChild(el('span','qtag', atts.length+' file'+(atts.length>1?'s':'')));
       if(refs.length) row.appendChild(el('span','qtag', refs.length+' pin'+(refs.length>1?'s':'')));
@@ -14864,7 +15207,8 @@ window.__CHANGELOG__ = ${changelogJson};
     commentPendingQueue.forEach(function(turn,i){
       var preview=turnPreview(turn), immediate=queuedImmediateActionCopy(thread,turn,false);
       var row=el('div','qitem');
-      row.appendChild(el('span','qtag','queued'));
+      if(!turn.appendAt) row.appendChild(el('span','qtag','queued'));
+      appendCountdown(row,turn,thread,true);
       var tx=el('div','qtext',preview); tx.title=preview; row.appendChild(tx);
       var sb;
       if(commentDrawerState.generating && !commentQueueSteerable){
@@ -14927,7 +15271,7 @@ window.__CHANGELOG__ = ${changelogJson};
     serializeMutation('comment-queue-write',threadId,function(){
       return fetch('/chat/queue?session='+encodeURIComponent(providerId)+'&cwd='+encodeURIComponent(thread.cwd||'')+'&vendor='+encodeURIComponent(thread.vendor||'claude'),{
         method:'POST',headers:{'content-type':'application/json'},
-        body:JSON.stringify({text:temp.text,attachments:[],references:[],goal:false})
+        body:JSON.stringify({text:temp.text,attachments:[],references:[],goal:false,append:chatSendMode()==='append'})
       }).then(function(r){ return r.json(); });
     }).then(function(res){
       // A delete can beat the enqueue response, while the row still holds its
@@ -15414,6 +15758,9 @@ window.__CHANGELOG__ = ${changelogJson};
   function renderChatTabs(){
     var host=byId('chatTabs'); if(!host) return;
     pruneChatGroups();
+    indexSessionGroupKeys();
+    document.querySelectorAll('#list .item,#sessionPanelList .item').forEach(paintSessionRelations);
+    scheduleTagPreviewRefresh();
     var tabs=activeChatGroup?activeChatGroup.sessions:[];
     host.innerHTML=''; host.hidden=tabs.length<=1;
     tabs.forEach(function(s,index){
@@ -15443,18 +15790,67 @@ window.__CHANGELOG__ = ${changelogJson};
       return (s.tags||[]).some(function(value){ return normalizeTag(value).toLowerCase()===key; });
     }).sort(function(a,b){ return Number(sessionSortTs(b)||0)-Number(sessionSortTs(a)||0); }).slice(0,10);
   }
-  function closeHeaderTagSessionMenu(){
+  function closeHeaderTagSessionMenu(restoreFocus){
+    var state=headerTagSessionState;
+    headerTagSessionState=null;
     headerTagSessionMenu='';
     var menu=byId('headerTagSessionMenu'); if(menu) menu.remove();
     Array.prototype.forEach.call(document.querySelectorAll('.headtag-nav[aria-expanded="true"]'),function(node){ node.setAttribute('aria-expanded','false'); });
+    if(restoreFocus&&state&&state.trigger.isConnected) state.trigger.focus();
   }
-  function toggleHeaderTagSessionMenu(trigger,tag){
-    var normalized=normalizeTag(tag),same=headerTagSessionMenu===normalized;
+  function positionHeaderTagSessionMenu(){
+    var state=headerTagSessionState,menu=byId('headerTagSessionMenu');
+    if(!state||!menu) return;
+    var session=SESS.find(function(s){ return sameChatSession(state.session,s); });
+    if(!session||!(session.tags||[]).some(function(tag){ return normalizeTag(tag)===headerTagSessionMenu; })){ closeHeaderTagSessionMenu(); return; }
+    if(!state.trigger.isConnected) return;
+    var anchor=state.trigger.getBoundingClientRect(),pad=8,gap=6;
+    var width=Math.min(320,window.innerWidth-pad*2);
+    var below=window.innerHeight-pad-anchor.bottom-gap,above=anchor.top-pad-gap;
+    menu.style.width=width+'px';
+    menu.style.maxHeight=Math.min(352,window.innerHeight*0.52,Math.max(above,below))+'px';
+    var height=menu.offsetHeight;
+    menu.style.left=Math.round(Math.max(pad,Math.min(anchor.left,window.innerWidth-width-pad)))+'px';
+    menu.style.top=Math.round(below>=height ? anchor.bottom+gap : Math.max(pad,anchor.top-gap-height))+'px';
+  }
+  function bindTagSessionNavigation(chip,tag,s,surface){
+    var trigger=chip.firstElementChild;
+    if(!trigger) return;
+    trigger.classList.add('headtag-nav'); trigger.setAttribute('role','button'); trigger.setAttribute('tabindex','0');
+    trigger.setAttribute('aria-haspopup','menu'); trigger.setAttribute('aria-expanded','false');
+    trigger.setAttribute('aria-label','Recent sessions tagged '+tag);
+    var state=headerTagSessionState;
+    if(state&&state.surface===surface&&sameChatSession(state.session,s)&&headerTagSessionMenu===normalizeTag(tag)){
+      state.trigger.setAttribute('aria-expanded','false');
+      state.trigger=trigger; state.session=s;
+      trigger.setAttribute('aria-expanded','true');
+      window.requestAnimationFrame(positionHeaderTagSessionMenu);
+    }
+    trigger.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); toggleHeaderTagSessionMenu(trigger,tag,s,surface); };
+    trigger.onkeydown=function(ev){
+      if(ev.key!=='Enter'&&ev.key!==' '&&ev.key!=='ArrowDown') return;
+      ev.preventDefault(); ev.stopPropagation(); toggleHeaderTagSessionMenu(trigger,tag,s,surface);
+      var first=byId('headerTagSessionMenu')&&byId('headerTagSessionMenu').querySelector('button'); if(first) first.focus();
+    };
+  }
+  function toggleHeaderTagSessionMenu(trigger,tag,s,surface){
+    var normalized=normalizeTag(tag),same=headerTagSessionState&&headerTagSessionState.trigger===trigger;
     hideHoverTip();
     closeHeaderTagSessionMenu();
     if(same) return;
+    closeSessionTagPopover();
+    headerTagSessionState={trigger:trigger,session:s,surface:surface};
     headerTagSessionMenu=normalized; trigger.setAttribute('aria-expanded','true');
     var menu=el('div','headtag-session-menu'); menu.id='headerTagSessionMenu'; menu.setAttribute('role','menu');
+    menu.setAttribute('aria-label','Recent sessions tagged '+normalized);
+    menu.onkeydown=function(ev){
+      if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); closeHeaderTagSessionMenu(true); return; }
+      if(ev.key!=='ArrowDown'&&ev.key!=='ArrowUp'&&ev.key!=='Home'&&ev.key!=='End') return;
+      ev.preventDefault(); ev.stopPropagation();
+      var options=Array.from(menu.querySelectorAll('button')),index=options.indexOf(document.activeElement);
+      var next=ev.key==='Home'?0:ev.key==='End'?options.length-1:(index+(ev.key==='ArrowDown'?1:-1)+options.length)%options.length;
+      if(options[next]) options[next].focus();
+    };
     sessionsForHeaderTag(normalized).forEach(function(s){
       var active=sameChatSession(cur,s),option=el('button','headtag-session-option'+(active?' on':''));
       option.type='button'; option.setAttribute('role','menuitem');
@@ -15469,11 +15865,12 @@ window.__CHANGELOG__ = ${changelogJson};
       option.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); closeHeaderTagSessionMenu(); if(!active) select(s); };
       menu.appendChild(option);
     });
-    trigger.parentElement.appendChild(menu);
+    document.body.appendChild(menu);
+    positionHeaderTagSessionMenu();
   }
   function renderHeaderTags(s){
     var wrap=byId('h-tags'); if(!wrap) return;
-    closeHeaderTagSessionMenu();
+    if(headerTagSessionState&&headerTagSessionState.surface==='header'&&(!sameChatSession(headerTagSessionState.session,s)||!(s.tags||[]).includes(headerTagSessionMenu))) closeHeaderTagSessionMenu();
     wrap.innerHTML='';
     if(!s) return;
     var row=el('div','headtag-row it-footrow');
@@ -15482,17 +15879,7 @@ window.__CHANGELOG__ = ${changelogJson};
       var def=userTagDef(tag);
       if(!def) return;
       var chip=tagChip(def, !!s.sessionId, function(){ removeSessionTag(s, def.value); });
-      var trigger=chip.firstElementChild;
-      if(trigger){
-        trigger.classList.add('headtag-nav'); trigger.setAttribute('role','button'); trigger.setAttribute('tabindex','0');
-        trigger.setAttribute('aria-haspopup','menu'); trigger.setAttribute('aria-expanded','false');
-        trigger.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); toggleHeaderTagSessionMenu(trigger,def.value); };
-        trigger.onkeydown=function(ev){
-          if(ev.key!=='Enter'&&ev.key!==' '&&ev.key!=='ArrowDown') return;
-          ev.preventDefault(); ev.stopPropagation(); toggleHeaderTagSessionMenu(trigger,def.value);
-          var first=byId('headerTagSessionMenu')&&byId('headerTagSessionMenu').querySelector('button'); if(first) first.focus();
-        };
-      }
+      bindTagSessionNavigation(chip,def.value,s,'header');
       tags.appendChild(chip);
     });
     if(s.sessionId){
@@ -16178,6 +16565,7 @@ window.__CHANGELOG__ = ${changelogJson};
       var dot=document.createElementNS(ns,'circle');
       dot.setAttribute('cx',String(px(node.x))); dot.setAttribute('cy',String(py(node.y)));
       dot.setAttribute('r',node.id===current?'2.6':'1.65');
+      dot.setAttribute('data-fork-node-id',node.id);
       if(node.id===current) dot.setAttribute('class','current');
       svg.appendChild(dot);
     });
@@ -16831,6 +17219,7 @@ window.__CHANGELOG__ = ${changelogJson};
   }
   function animateSessionPinShift(host,before){
     if(!host||!before) return;
+    if(window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     var moved=[],dragToken=sessionCardDragToken;
     sessionPinCards(host).forEach(function(node){
       var previous=before['id:'+(node.getAttribute('data-session-id')||'')];
@@ -16894,7 +17283,7 @@ window.__CHANGELOG__ = ${changelogJson};
       if(node!==source&&node.getAttribute('data-session-id')===draggedPinnedSessionId) node.classList.add('session-pin-drag-peer');
     });
   }
-  function beginSessionCardDrag(item,s,surface){
+  function beginSessionCardDrag(item,s,surface,ev){
     var token=++sessionCardDragToken;
     draggedChatSession=s;
     item.classList.add('session-card-dragging');
@@ -16977,7 +17366,7 @@ window.__CHANGELOG__ = ${changelogJson};
   var sidebarRowUse=0;
   var sidebarVirtualRaf=0;
   var sidebarRenderRaf=0;
-  var sidebarForkSizes={};
+  var sidebarForkSizes={},sidebarForkKeys={},sessionGroupKeys={};
   var sessionPanelVirtualState=null;
   var sessionPanelVirtualRaf=0;
   var sessionPanelRowHeights={};
@@ -17002,10 +17391,47 @@ window.__CHANGELOG__ = ${changelogJson};
     Object.keys(parents).forEach(function(child){ add(child); add(parents[child]); join(child,parents[child]); });
     SESS.forEach(function(s){ add(forkNodeId(s)); });
     Object.keys(roots).forEach(function(id){ var root=find(id); sizes[root]=(sizes[root]||0)+1; });
-    var out={}; Object.keys(roots).forEach(function(id){ out[id]=sizes[find(id)]||1; });
+    // Use the ancestry root, not traversal order, so sorting and adding a child
+    // cannot change an existing family's identity color. Cycles use a stable ID.
+    var canonical={},fallback={};
+    Object.keys(roots).sort().forEach(function(id){
+      var root=find(id);
+      if(!fallback[root]) fallback[root]=id;
+      if(!parents[id]&&!canonical[root]) canonical[root]=id;
+    });
+    var out={},keys={}; Object.keys(roots).forEach(function(id){
+      var root=find(id); out[id]=sizes[root]||1;
+      if(out[id]>1) keys[id]='fork:'+(canonical[root]||fallback[root]);
+    });
     sidebarForkSizes=out;
+    sidebarForkKeys=keys;
   }
   function sidebarForkCount(s){ return sidebarForkSizes[forkNodeId(s)]||1; }
+  function indexSessionGroupKeys(){
+    var keys={},saved=savedChatGroups();
+    chatGroups.forEach(function(group){
+      var record=saved[group.id];
+      if(group.sessions.length<2&&!(record&&Array.isArray(record.members)&&record.members.length>1)) return;
+      group.sessions.forEach(function(s){ keys[chatMemberKey(chatSessionRef(s))]='group:'+group.id; });
+    });
+    sessionGroupKeys=keys;
+  }
+  function paintSessionRelations(item){
+    var s=item._session; if(!s) return;
+    var group=sessionGroupKeys[chatMemberKey(chatSessionRef(s))]||'',fork=sidebarForkKeys[forkNodeId(s)]||'';
+    function mark(node,key){
+      if(!node) return;
+      if(key) node.setAttribute('data-session-relation-key',key);
+      else node.removeAttribute('data-session-relation-key');
+    }
+    mark(item.querySelector('.it-title'),group);
+    mark(item.querySelector('.it-forktree'),fork);
+    if(group) item.style.setProperty('--session-group-hue',sessionRelationHue(group));
+    else item.style.removeProperty('--session-group-hue');
+    if(fork) item.style.setProperty('--session-fork-hue',sessionRelationHue(fork));
+    else item.style.removeProperty('--session-fork-hue');
+    paintTagPreviewCard(item);
+  }
   function retainedHeaderLiveTimings(){
     var headerSignals=byId('h-sig'),panelList=byId('sessionPanelList'),retained={};
     Object.keys(liveTimingEls).forEach(function(id){
@@ -17048,6 +17474,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!cached || cached.session!==s){ cached={node:buildSessionRow(s,'sidebar'),session:s,used:0}; sidebarRowCache[key]=cached; }
     cached.used=++sidebarRowUse;
     cached.node.setAttribute('data-sidebar-key',key);
+    paintSessionRelations(cached.node);
     return cached.node;
   }
   function sidebarOffsets(){
@@ -17249,6 +17676,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(!cached||cached.session!==s){ cached={session:s,node:buildSessionRow(s,'panel')}; sessionPanelCardCache[key]=cached; }
     cached.node.classList.toggle('active',!!(cur&&sameChatSession(cur,s)));
     paintSessionPanelRowStatus(cached.node,s);
+    paintSessionRelations(cached.node);
     paintSessionReadProgress(cached.node.querySelector('.session-read-progress'),s);
     return cached.node;
   }
@@ -17344,6 +17772,7 @@ window.__CHANGELOG__ = ${changelogJson};
     renderViewTabs();
     var list=byId('list');
     indexSidebarForkComponents();
+    indexSessionGroupKeys();
     sidebarVisibleSessions=projectedSessionListOrder(SESS.filter(matchesFilter));
     sidebarRowCache={}; sidebarRowUse=0;
     resetSidebarRegistrations();
@@ -17484,22 +17913,12 @@ window.__CHANGELOG__ = ${changelogJson};
       item.removeAttribute('title');
       item.removeAttribute('data-hover-tip');
       item._session=s;
+      paintTagPreviewCard(item);
       if(surface==='panel') paintSessionPanelRowStatus(item,s);
       item.setAttribute('data-session-surface',surface);
       if(s.sessionId) item.setAttribute('data-session-id',String(s.sessionId));
       if(pinned) item.setAttribute('aria-description','Pinned session. Drag to reorder pinned sessions.');
       if(s.pattern==='avoidance') item.title='avoidance';
-      var borderTags=(s.tags||[]).map(normalizeTag).filter(Boolean);
-      if(surface==='panel' && borderTags.length){
-        var tagBorder=el('span','session-tag-border');
-        tagBorder.setAttribute('aria-hidden','true');
-        borderTags.forEach(function(tag){
-          var segment=el('span');
-          segment.style.backgroundColor=userTagBorderColor(tag);
-          tagBorder.appendChild(segment);
-        });
-        item.appendChild(tagBorder);
-      }
       var readProgress=el('span','session-read-progress');
       readProgress.hidden=true;
       readProgress.setAttribute('aria-hidden','true');
@@ -17556,7 +17975,7 @@ window.__CHANGELOG__ = ${changelogJson};
       if(meta.childNodes.length) item.appendChild(meta);
       // two subtitles: my first message, then my latest message
       var promptTail=null;
-      if(s.title){ promptTail=sessionPromptLine('it-firstline','First',s.title,null,promptAgeLabel(s,'first')); item.appendChild(promptTail); }
+      if(s.title){ promptTail=sessionPromptLine('it-firstline it-firstmsg','First',s.title,null,promptAgeLabel(s,'first')); item.appendChild(promptTail); }
       promptTail=appendLatestPrompt(item, s, 'it-firstline')||promptTail;
       if(s.sessionId){
         var workBadges=el('span','it-workbadges');
@@ -17583,15 +18002,8 @@ window.__CHANGELOG__ = ${changelogJson};
         (s.tags||[]).forEach(function(tag){
           var def=userTagDef(tag);
           if(!def) return;
-          var chip=el('span','it-tag');
-          chip.appendChild(el('span',null,def.label));
-          if(taggable){
-            var rm=el('button',null,'×');
-            rm.title='Remove tag';
-            rm.onclick=function(ev){ ev.stopPropagation(); removeSessionTag(s, def.value); };
-            chip.appendChild(rm);
-          }
-          styleSessionTagChip(chip, def);
+          var chip=tagChip(def,taggable,function(){ removeSessionTag(s,def.value); });
+          bindTagSessionNavigation(chip,def.value,s,surface);
           tagrow.appendChild(chip);
         });
         if(taggable){
@@ -17604,6 +18016,7 @@ window.__CHANGELOG__ = ${changelogJson};
       foot.appendChild(tagrow);
       foot.appendChild(sessionContextRow(s));
       item.appendChild(foot);
+      paintSessionRelations(item);
       // Mouse navigation finishes on a window-level pointerup: this survives a
       // live sidebar rerender without opening the card at the start of a drag.
       // Touch/pen stay click-based so scrolling the list never navigates.
@@ -17639,7 +18052,7 @@ window.__CHANGELOG__ = ${changelogJson};
       var rowDragToken=0;
       item.ondragstart=function(ev){
         if(window.innerWidth<=760||isSessionRowControl(ev.target,item)){ ev.preventDefault(); return; }
-        rowDragToken=beginSessionCardDrag(item,s,surface);
+        rowDragToken=beginSessionCardDrag(item,s,surface,ev);
         if(ev.dataTransfer){
           ev.dataTransfer.effectAllowed='move';
           try{ ev.dataTransfer.setData('application/x-attend-session',String(s.sessionId||s.clientBranchId||'')); }catch(_err){}
@@ -18503,6 +18916,10 @@ window.__CHANGELOG__ = ${changelogJson};
   // tc = { id?, name, input, result?, isError? }
   function addTool(tc,opts){
     opts=opts||{};
+    // Keep the transcript focused on text and questions requiring an answer.
+    // Filter before formatting inputs, diffs or results, not with hidden DOM.
+    // Explicit references to older tool comments can still render their anchor.
+    if(!opts.reference&&!isQuestionTool(tc.name,tc.input)){ toolOrdinal++; return null; }
     var registry=opts.registry||toolEls;
     if(!opts.reference&&tc.id&&registry[tc.id]) return registry[tc.id];
     if(!opts.reference) clearPh();
@@ -18573,7 +18990,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var id=providerSessionId(s),query=id
       ? 'session='+encodeURIComponent(id)
       : 'file='+encodeURIComponent(s&&s.file||'');
-    var url='/chat/messages?'+query+'&vendor='+encodeURIComponent(s&&s.vendor||'')+'&paged=1&limit=60';
+    var url='/chat/messages?'+query+'&vendor='+encodeURIComponent(s&&s.vendor||'')+'&paged=1&limit=60&view=reading';
     if(before!=null) url+='&before='+encodeURIComponent(before);
     return url;
   }
@@ -18795,6 +19212,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(input && !input.disabled) input.focus({preventScroll:true});
   }
   function select(s){
+    closeHeaderTagSessionMenu();
     var selectionGeneration=++transcriptSelectionGeneration;
     var previousSelection=cur;
     if(previousSelection!==s){
@@ -18987,6 +19405,7 @@ window.__CHANGELOG__ = ${changelogJson};
     // them must be able to project the same bus state by stable client identity.
     latestLiveSnapshot=res||{};
     applyDaemonSettings(res&&res.analyzerSettings);
+    syncConfigPresets(res&&res.configPresets);
     if(Array.isArray(res&&res.schedules)) syncSchedules(res.schedules);
     applyStats(res && res.stats);
     var active={}; (res.active||[]).forEach(function(id){ active[id]=true; });
@@ -19071,7 +19490,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(cur && cur.sessionId && res.queues){
       var curQueueInfo=res.queues[providerSessionId(cur)];
       var serverCount=curQueueInfo ? Number(curQueueInfo.count||0) : 0;
-      if(serverCount!==pendingQueue.length || (!!curQueueInfo && curQueueInfo.parked===true)!==queueParked) refreshServerQueue(cur);
+      if(serverCount!==pendingQueue.length || (!!curQueueInfo && curQueueInfo.parked===true)!==queueParked || (curQueueInfo && typeof curQueueInfo.appends==='number' && curQueueInfo.appends!==pendingQueue.filter(function(item){ return !!item.appendAt; }).length)) refreshServerQueue(cur);
     }
     var curLiveId=providerSessionId(cur);
     if(cur && curLiveId && (active[curLiveId] || sessionAwaitingLiveStart(cur)) && !turnActive){
@@ -19214,7 +19633,7 @@ window.__CHANGELOG__ = ${changelogJson};
       return;
     }
     closeLiveStateStream();
-    var source=new EventSource('/chat/live-stream'+(liveLastEventId?'?lastEventId='+encodeURIComponent(liveLastEventId):''));
+    var source=new EventSource('/chat/live-stream?view=reading'+(liveLastEventId?'&lastEventId='+encodeURIComponent(liveLastEventId):''));
     liveStateSource=source;
     liveLastMessageAt=Date.now();
     var opened=false,needsReconcile=!!recovering;
@@ -19613,13 +20032,13 @@ window.__CHANGELOG__ = ${changelogJson};
       assistantEl=null; // catch-up persists across tools (tools dedup by id below)
       cacheTranscriptToolUse(cur, {id:ev.id,name:ev.name,input:ev.input});
       var d=ev.id&&toolEls[ev.id] ? toolEls[ev.id] : addTool({id:ev.id,name:ev.name,input:ev.input});
-      if(ev.id) toolEls[ev.id]=d;
+      if(ev.id&&d) toolEls[ev.id]=d;
       if(isQuestionTool(ev.name, ev.input) && !isAsyncQuestionTool(ev.name) && turnActive) endTurn();
     }
     else if(ev.kind==='tool_result'){ finalizeStreamingMessage(assistantEl); assistantEl=null; var t=ev.id?toolEls[ev.id]:null;
-      cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
+      var cachedToolResult=cacheTranscriptToolResult(cur, ev.id, String(ev.text||'').slice(0,8000), ev.isError);
       if(t){ var o=t.querySelector('.tool-out'); o.textContent=String(ev.text||'').slice(0,8000); o.style.display=''; if(ev.isError) o.className='tool-out err'; updateToolBlockResult(t,ev.text,ev.isError); if(hasQuestionAnswerResult(ev.text, ev.isError,t._attendTool&&t._attendTool.name)) lockQuestionTool(t); }
-      else { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
+      else if(!cachedToolResult) { addTool({name:'result',input:null,result:ev.text,isError:ev.isError}); }
       keepGenLast(); scroll(); scheduleLatestPin(); }
     else if(ev.kind==='goal'){ applyGoalState(cur,ev.goal||null); }
     else if(ev.kind==='result'){
@@ -19645,6 +20064,19 @@ window.__CHANGELOG__ = ${changelogJson};
       if(ev.turnActive && !turnActive) beginTurn(ev.startedAt);
       else if(!ev.turnActive) recoverCurrentTurnFromSync(ev);
     }
+    if(ev.kind==='tool_result'||ev.kind==='tool_use'||ev.kind==='result'||ev.kind==='user_turn_started'||ev.kind==='queued_turn_started') compactLiveTranscript();
+  }
+  function compactLiveTranscript(){
+    var host=byId('msgs');
+    // Compact at structural boundaries, when no text bubble is being streamed.
+    // Preserve an active selection and the reader's anchor instead of jumping.
+    if(!cur||!host||assistantEl||transcriptSelectionIsActive(host)||chatAnchorJump) return;
+    var tail=transcriptLiveTail(host);
+    if(tail ? tail.childElementCount<32 : host.childElementCount<=TRANSCRIPT_VIRTUAL_THRESHOLD) return;
+    var history=transcriptStateRef(cur);
+    if(!history) return;
+    var mode=stick?undefined:{top:host.scrollTop,anchor:transcriptViewportAnchor()};
+    renderPersistedAndPending(history,cur.sessionId,mode);
   }
   function send(){
     if(!cur) return;
@@ -19722,7 +20154,7 @@ window.__CHANGELOG__ = ${changelogJson};
     serializeMutation('queue-write',target,function(){
       return fetch('/chat/queue?session='+encodeURIComponent(providerId)+'&cwd='+encodeURIComponent(target.cwd||'')+'&vendor='+encodeURIComponent(target.vendor||'claude'),{
         method:'POST', headers:{'content-type':'application/json'},
-        body:JSON.stringify({text:turn.text,attachments:turn.attachments||[],references:pinReferencePayload(turn.references),goal:goalRequested===true})
+        body:JSON.stringify({text:turn.text,attachments:turn.attachments||[],references:pinReferencePayload(turn.references),goal:goalRequested===true,append:!(options&&options.preserveDraft)&&chatSendMode()==='append'})
       }).then(function(r){ return r.json(); });
     }).then(function(res){
       if(temp.cancelled && res.ok && res.item && res.item.id){
@@ -20162,7 +20594,7 @@ window.__CHANGELOG__ = ${changelogJson};
     var previous=cur;
     var clientSessionId=makeClientSessionId('new');
     var shown=composeTurnText(text, attachments);
-    var ns={vendor:vendor,model:model||'',effort:effort||'',speed:speed||'',sessionId:clientSessionId,clientBranchId:clientSessionId,providerSessionId:null,pendingNew:true,title:shown||'(new session)',lastPrompt:null,cwd:dir,tabTitle:'',project:basename(dir),file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:initialTags,_pendingSessionTags:initialTags.slice(),generating:!!shown,generatingStartedAt:shown?Date.now():null};
+    var ns={vendor:vendor,model:model||'',effort:effort||'',speed:speed||'',sessionId:clientSessionId,clientBranchId:clientSessionId,providerSessionId:null,pendingNew:true,title:shown||'(new session)',lastPrompt:null,cwd:dir,tabTitle:'',project:basename(dir),file:'',ageDays:0,lastTs:Date.now(),prompts:0,brief:null,state:null,seen:true,tags:initialTags,_pendingSessionTags:initialTags.length?initialTags.slice():undefined,generating:!!shown,generatingStartedAt:shown?Date.now():null};
     if(shown) expectSessionRun(ns,ns.generatingStartedAt);
     var runEpoch=Number(ns._runEpoch)||0;
     cacheTranscript(ns, []);
@@ -20344,8 +20776,8 @@ window.__CHANGELOG__ = ${changelogJson};
   // The first list must not wait for a long-lived connection to traverse a
   // mobile proxy. SSE remains the authority for live turn/connection state.
   if(SESSIONS_PENDING) requestSessionIndexSnapshot('',0,'/session-index');
-  // Bootstrap already includes model catalogs. Refresh once after the initial
-  // data load, then on demand when a vendor's configuration is opened.
+  // Pick up background-prewarmed catalogs once after the initial data load.
+  // The server keeps them fresh; opening configuration reads its cached snapshot.
   window.setTimeout(function(){
     if(document.hidden||livePageSuspended) return;
     ['claude','codex','cursor','antigravity','copilot','opencode'].forEach(refreshVendorModels);
@@ -20405,6 +20837,7 @@ window.__CHANGELOG__ = ${changelogJson};
   bindComposerDrop();
   bindNewAttachments();
   setupHoverTips();
+  setupTagPreviews();
   renderAttachments();
   renderAttachments('new');
   scheduleOverlayOffsets();
@@ -20455,6 +20888,7 @@ window.__CHANGELOG__ = ${changelogJson};
     if(ev.clientX<rect.left||ev.clientX>rect.right||ev.clientY<rect.top||ev.clientY>rect.bottom) this.close();
   });
   syncDaemonToggle();
+  byId('settingsChatSendMode').onchange=function(){ newPrefs.chatSendMode=this.value; saveNewPrefs(); refreshGoalToggle(); };
   byId('settingsDaemon').onchange=function(){ changeDaemonEnabled(this.checked); };
   byId('themeCopy').onclick=function(){openThemeEditor(null);};
   byId('themeEdit').onclick=function(){openThemeEditor(selectedThemeId());};
@@ -20491,15 +20925,17 @@ window.__CHANGELOG__ = ${changelogJson};
   byId('workStats').onclick=function(ev){ if(ev.target===this) closeWorkStats(); };
   byId('tagManagerOpen').onclick=openTagManager;
   byId('tagManagerClose').onclick=closeTagManager;
-  byId('tagManager').onclick=function(ev){ if(ev.target===this) closeTagManager(); };
-  byId('tagManager').addEventListener('keydown',function(ev){
-    if(ev.key!=='Tab') return;
-    var controls=Array.from(this.querySelectorAll('button:not(:disabled),input:not(:disabled)'));
-    if(!controls.length){ ev.preventDefault(); return; }
-    var first=controls[0],last=controls[controls.length-1];
-    if(ev.shiftKey&&document.activeElement===first){ ev.preventDefault(); last.focus(); }
-    else if(!ev.shiftKey&&document.activeElement===last){ ev.preventDefault(); first.focus(); }
-  });
+  byId('tagManager').onclick=function(ev){
+    if(ev.target!==this) return;
+    var rect=this.getBoundingClientRect();
+    if(ev.clientX<rect.left||ev.clientX>rect.right||ev.clientY<rect.top||ev.clientY>rect.bottom) closeTagManager();
+  };
+  byId('tagManager').addEventListener('cancel',function(ev){ ev.preventDefault(); closeTagManager(); });
+  byId('tagManager').addEventListener('close',function(){ byId('tagManagerOpen').setAttribute('aria-expanded','false'); byId('tagManagerOpen').focus(); });
+  byId('tagManager').addEventListener('keydown',function(ev){ if(ev.key==='Escape'){ ev.preventDefault(); ev.stopPropagation(); closeTagManager(); } });
+  byId('tagManagerMin').oninput=byId('tagManagerMax').oninput=renderTagManager;
+  byId('tagManagerSort').onchange=renderTagManager;
+  byId('tagManagerResetFilters').onclick=resetManagerFilters;
   byId('tagManagerSearch').oninput=renderTagManager;
   setIconButton(byId('tagManagerClose'),'close','Close tag manager');
   byId('tagManagerClearSelection').onclick=function(){ tagManagerSelected.clear(); renderTagManager(); };
@@ -21162,8 +21598,7 @@ window.__CHANGELOG__ = ${changelogJson};
   document.addEventListener('keydown',function(e){
     if(e.defaultPrevented||isTextEditingTarget(e.target)) return;
     if(e.key==='Escape' && memoryCitationPopoverState){ closeMemoryCitationPopover(); return; }
-    if(e.key==='Escape' && headerTagSessionMenu){ closeHeaderTagSessionMenu(); return; }
-    if(e.key==='Escape' && !byId('tagManager').hidden){ e.preventDefault(); closeTagManager(); return; }
+    if(e.key==='Escape' && headerTagSessionMenu){ e.preventDefault(); closeHeaderTagSessionMenu(true); return; }
     if(e.key==='Escape' && !byId('tagAction').hidden){ closeGlobalTagAction(); return; }
     if(e.key==='Escape' && !byId('forkTree').hidden){ closeForkTree(); return; }
     if(e.key==='Escape' && !byId('workStats').hidden){ closeWorkStats(); return; }
@@ -21215,6 +21650,8 @@ window.__CHANGELOG__ = ${changelogJson};
   });
   window.addEventListener('resize',function(){ if(sessionTagPopoverState) positionSessionTagPopover(); });
   window.addEventListener('scroll',function(){ if(sessionTagPopoverState) positionSessionTagPopover(); },true);
+  window.addEventListener('resize',positionHeaderTagSessionMenu);
+  window.addEventListener('scroll',positionHeaderTagSessionMenu,true);
   document.addEventListener('click',function(ev){
     var priorityTag=byId('priorityTag');
     if(!priorityMenuOpen || (priorityTag && priorityTag.contains(ev.target))) return;

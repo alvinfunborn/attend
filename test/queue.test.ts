@@ -18,6 +18,19 @@ function store(): { file: string; queue: ChatQueueStore } {
 }
 
 describe("ChatQueueStore", () => {
+  it("persists append deadlines, prevents early draining, and atomically cancels append", () => {
+    const { file, queue } = store();
+    const appendAt = Date.now() + 5000;
+    const item = queue.enqueue("s1", { cwd: "/tmp", vendor: "claude", text: "later", appendAt });
+    const reloaded = new ChatQueueStore(file);
+    expect(reloaded.peek("s1")?.appendAt).toBe(appendAt);
+    expect(reloaded.claim("s1", "owner")).toBeNull();
+    expect(reloaded.clearAppend("s1", item.id, appendAt + 1)).toBeNull();
+    expect(reloaded.clearAppend("s1", item.id)?.appendAt).toBeUndefined();
+    expect(queue.clearAppend("s1", item.id, appendAt)).toBeNull();
+    expect(queue.claim("s1", "owner")?.id).toBe(item.id);
+  });
+
   it("persists ordered turns independently of the browser", () => {
     const { file, queue } = store();
     const first = queue.enqueue("s1", { cwd: "/tmp", vendor: "claude", text: "one" });
@@ -60,7 +73,7 @@ describe("ChatQueueStore", () => {
 
     const restored = new ChatQueueStore(file);
     expect(restored.parked("s1")).toBe(true);
-    expect(restored.summary()).toEqual({ s1: { count: 1, parked: true } });
+    expect(restored.summary()).toEqual({ s1: { count: 1, parked: true, appends: 0 } });
     expect(restored.promote("s1", item.id)).toBe(true);
     expect(restored.parked("s1")).toBe(false);
   });

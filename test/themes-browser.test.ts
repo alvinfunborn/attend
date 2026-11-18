@@ -33,6 +33,126 @@ afterAll(async () => {
 });
 
 describe("theme settings", () => {
+  it.each(["light", "dark"] as const)(
+    "resolves shared floating surfaces, component overrides and pinned backgrounds in %s",
+    async (type) => {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(3000);
+      await page.route("**/*", (route) =>
+        new URL(route.request().url()).pathname === "/"
+          ? route.fulfill({
+              contentType: "text/html",
+              body: renderConsole({ ...view, vaultState: { theme: type } }),
+            })
+          : route.fulfill({ json: { ok: true } }),
+      );
+      const style = (selector: string) =>
+        page.locator(selector).evaluate((node) => {
+          const win = node.ownerDocument.defaultView;
+          if (!win) throw new Error("Missing browser window");
+          const css = win.getComputedStyle(node);
+          return {
+            background: css.backgroundColor,
+            gradient: css.backgroundImage,
+            border: css.borderLeftColor,
+            shadow: css.boxShadow,
+          };
+        });
+      const preview = async (colors: Record<string, string>) => {
+        await page.locator("#themeJson").fill(JSON.stringify({ name: "Surfaces", type, colors }));
+        expect(await page.locator("#themeSave").isEnabled()).toBe(true);
+      };
+      const solidGradient = (color: string) => `linear-gradient(${color} 0%, ${color} 100%)`;
+      try {
+        await page.goto("http://theme-surfaces.test/");
+        const originalList = await style("#todoHub");
+        const originalPin = await style("#topStack");
+        expect(originalList.background).not.toBe((await style(".main")).background);
+        expect(originalList.border).not.toBe(originalList.background);
+        expect((await style(".commentpanel")).background).toBe(originalList.background);
+        expect((await style("#newbox")).gradient).toBe(solidGradient(originalList.background));
+        expect(originalPin.gradient).not.toBe(solidGradient(originalList.background));
+        await page.locator("#settingsToggle").click();
+        await page.locator("#themeCopy").click();
+        // Old broad overrides still flow through the new, more specific color families.
+        await preview({ background: "#102030", strongBorder: "#405060" });
+        expect(await style("#todoHub")).toMatchObject({
+          background: "rgb(16, 32, 48)",
+          border: "rgb(64, 80, 96)",
+        });
+        const shared = {
+          background: "#102030",
+          "floatingPanel.background": "#213243",
+          "floatingPanel.border": "#657687",
+          "floatingPanel.shadow": "rgba(12,24,36,0.5)",
+          "chat.pinned.background": "#453621",
+          "chat.pinned.border": "#987654",
+          "chat.pinned.foreground": "#fedcba",
+        };
+        await preview(shared);
+        for (const selector of ["#newbox", "#todoHub", ".commentpanel"]) {
+          const css = await style(selector);
+          expect(selector === "#newbox" ? css.gradient : css.background).toBe(
+            selector === "#newbox" ? solidGradient("rgb(33, 50, 67)") : "rgb(33, 50, 67)",
+          );
+          expect(css.border).toBe("rgb(101, 118, 135)");
+          expect(css.shadow).toContain("rgba(12, 24, 36, 0.5)");
+        }
+        expect((await style(".commentfoot")).background).toBe("rgb(33, 50, 67)");
+        for (const selector of ["#topStack", "#commentTopStack"]) {
+          expect(await style(selector)).toMatchObject({
+            gradient: solidGradient("rgb(69, 54, 33)"),
+            border: "rgb(152, 118, 84)",
+          });
+        }
+        // A component override must not leak into its siblings, even for shadows.
+        for (const [family, selector] of [
+          ["newSession", "#newbox"],
+          ["listPanel", "#todoHub"],
+          ["comment", ".commentpanel"],
+        ] as const) {
+          await preview({
+            ...shared,
+            [`${family}.background`]: "#345678",
+            [`${family}.border`]: "#abcdef",
+            [`${family}.shadow`]: "rgba(90,60,30,0.7)",
+          });
+          const css = await style(selector);
+          expect(selector === "#newbox" ? css.gradient : css.background).toBe(
+            selector === "#newbox" ? solidGradient("rgb(52, 86, 120)") : "rgb(52, 86, 120)",
+          );
+          expect(css.border).toBe("rgb(171, 205, 239)");
+          expect(css.shadow).toContain("rgba(90, 60, 30, 0.7)");
+          expect(
+            (await style(family === "listPanel" ? ".commentpanel" : "#todoHub")).background,
+          ).toBe("rgb(33, 50, 67)");
+          if (family === "comment")
+            expect((await style(".commentfoot")).background).toBe(css.background);
+        }
+        await preview({
+          ...shared,
+          "newSession.gradientStart": "#123456",
+          "chat.pinned.gradientStart": "#456789",
+          "chat.pinned.gradientEnd": "#789abc",
+        });
+        expect((await style("#newbox")).gradient).toBe(
+          "linear-gradient(rgb(18, 52, 86) 0%, rgb(33, 50, 67) 100%)",
+        );
+        expect((await style("#todoHub")).background).toBe("rgb(33, 50, 67)");
+        expect((await style("#topStack")).gradient).toBe(
+          "linear-gradient(rgb(69, 103, 137) 0%, rgb(120, 154, 188) 100%)",
+        );
+        await preview(shared);
+        expect((await style("#topStack")).gradient).toBe(solidGradient("rgb(69, 54, 33)"));
+        await page.locator("#themeCancel").click();
+        expect(await style("#todoHub")).toEqual(originalList);
+        expect(await style("#topStack")).toEqual(originalPin);
+      } finally {
+        await page.close();
+      }
+    },
+  );
+
   it("previews, cancels, saves, reloads, edits, imports, exports and deletes custom themes", async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     page.setDefaultTimeout(3000);

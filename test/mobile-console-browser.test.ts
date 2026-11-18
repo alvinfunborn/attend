@@ -190,7 +190,7 @@ describe("mobile console initialization and layout", () => {
     }
   });
 
-  it("refreshes model catalogs once instead of polling throughout the first minute", async () => {
+  it("preloads all available catalogs and skips unavailable vendors", async () => {
     const page = await browser.newPage();
     await stubLiveStream(page);
     await page.clock.install();
@@ -198,7 +198,20 @@ describe("mobile console initialization and layout", () => {
     await page.route("**/*", async (route) => {
       const pathname = new URL(route.request().url()).pathname;
       if (pathname === "/")
-        await route.fulfill({ contentType: "text/html", body: renderConsole(view) });
+        await route.fulfill({
+          contentType: "text/html",
+          body: renderConsole({
+            ...view,
+            vendors: [
+              { vendor: "claude", available: true, chat: true },
+              { vendor: "codex", available: false, chat: true },
+              { vendor: "cursor", available: true, chat: true },
+              { vendor: "antigravity", available: true, chat: true },
+              { vendor: "copilot", available: true, chat: true },
+              { vendor: "opencode", available: true, chat: true },
+            ],
+          }),
+        });
       else {
         if (pathname.startsWith("/models/")) modelReads.push(pathname);
         await route.fulfill({ json: { ok: true, models: [], items: [] } });
@@ -208,14 +221,61 @@ describe("mobile console initialization and layout", () => {
       await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
       expect(modelReads).toHaveLength(0);
       await page.clock.fastForward(16_000);
-      await expect.poll(() => modelReads.length).toBe(6);
+      await expect.poll(() => modelReads.length).toBe(5);
       await page.clock.fastForward(44_000);
-      expect(modelReads).toHaveLength(6);
-      expect(new Set(modelReads).size).toBe(6);
+      expect(modelReads.sort()).toEqual([
+        "/models/antigravity",
+        "/models/claude",
+        "/models/copilot",
+        "/models/cursor",
+        "/models/opencode",
+      ]);
     } finally {
       await page.close();
     }
   });
+
+  it.each(["antigravity", "copilot", "opencode"] as const)(
+    "preloads %s models before configuration opens and avoids repeated page polling",
+    async (vendor) => {
+      const page = await browser.newPage();
+      await stubLiveStream(page);
+      await page.clock.install();
+      const modelReads: string[] = [];
+      await page.route("**/*", async (route) => {
+        const pathname = new URL(route.request().url()).pathname;
+        if (pathname === "/")
+          await route.fulfill({
+            contentType: "text/html",
+            body: renderConsole({
+              ...view,
+              vendors: [{ vendor, available: true, chat: true }],
+            }),
+          });
+        else {
+          if (pathname.startsWith("/models/")) modelReads.push(pathname);
+          await route.fulfill({
+            json: { ok: true, models: [{ value: "test-model", label: "Test Model" }], items: [] },
+          });
+        }
+      });
+      try {
+        await page.goto("http://attend.test/", { waitUntil: "domcontentloaded" });
+        await page.clock.fastForward(16_000);
+        await expect.poll(() => modelReads).toEqual([`/models/${vendor}`]);
+        await expect.poll(() => page.locator('#nmodel option[value="test-model"]').count()).toBe(1);
+        await page.locator("#newToggle").click();
+        await page.locator("#newToggle").click();
+        await page.locator("#newToggle").click();
+        expect(modelReads).toHaveLength(1);
+        await page.locator("#newToggle").click();
+        await page.clock.fastForward(24 * 60 * 60_000);
+        expect(modelReads).toHaveLength(1);
+      } finally {
+        await page.close();
+      }
+    },
+  );
 
   it("retains a slow comment snapshot and does not reload an unchanged version", async () => {
     const page = await browser.newPage();

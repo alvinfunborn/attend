@@ -163,6 +163,61 @@ describe("per-session run config in the composer rail", () => {
     await browser.close();
   });
 
+  it("forgets presets deleted in another instance without restoring them on model picks", async () => {
+    const deletedPreset = {
+      id: "deleted-high",
+      name: "high",
+      vendor: "claude",
+      model: "removed-model",
+      effort: "high",
+      speed: "",
+    };
+    const writes: Record<string, unknown>[] = [];
+    const page = await openConsole(
+      browser,
+      (request) => {
+        if (new URL(request.url()).pathname === "/vault/ui-state" && request.method() === "POST")
+          writes.push(request.postDataJSON());
+      },
+      {
+        ...view,
+        vaultState: { modelPrefs: { configPresets: [deletedPreset], configPresetsRevision: 1 } },
+      },
+    );
+    try {
+      await page.locator("#list .item", { hasText: "Low effort session" }).click();
+      // The shared list was deleted elsewhere; a delayed older snapshot must
+      // not put the now-unavailable custom /high back in front of built-in high.
+      for (const configPresets of [
+        { revision: 2, items: [] },
+        { revision: 1, items: [deletedPreset] },
+      ]) {
+        await page.evaluate((snapshot) => {
+          const source = (globalThis as unknown as Record<string, unknown>)
+            .__runConfigEventSource as { onmessage: ((event: { data: string }) => void) | null };
+          source.onmessage?.({ data: JSON.stringify({ configPresets: snapshot }) });
+        }, configPresets);
+      }
+      const input = page.locator("#input");
+      await input.fill("Draft /high ");
+      expect(await input.inputValue()).toBe("Draft ");
+      expect(await railEffort(page).textContent()).toBe("high");
+      expect(await page.locator("body").innerText()).not.toContain(
+        "This configuration is no longer available",
+      );
+      await expect.poll(() => writes.some((patch) => patch.modelPrefs)).toBe(true);
+      for (const patch of writes) {
+        if (!patch.modelPrefs) continue;
+        expect(patch.modelPrefs).not.toHaveProperty("configPresets");
+        expect(patch.modelPrefs).not.toHaveProperty("configPresetsRevision");
+      }
+      await page.locator("#railVendor").click();
+      expect(await page.locator("#composerRailPop .preset-pick").count()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("shows each session's own effort on both the button and the menu", async () => {
     const page = await openConsole(browser);
     try {
@@ -178,6 +233,41 @@ describe("per-session run config in the composer rail", () => {
       await page.locator("#list .item", { hasText: "High effort session" }).click();
       expect(await railEffort(page).textContent()).toBe("high");
       expect(await menuCurrentEffort(page)).toBe("high");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("keeps Enter as send rather than a config command trigger in chat and New", async () => {
+    const sends: { path: string; body: Record<string, unknown> }[] = [];
+    const page = await openConsole(browser, (request) => {
+      const path = new URL(request.url()).pathname;
+      if (["/chat/send", "/chat/fork", "/chat/new"].includes(path))
+        sends.push({ path, body: request.postDataJSON() });
+    });
+    try {
+      await page.locator("#list .item", { hasText: "Low effort session" }).click();
+      const input = page.locator("#input");
+      await input.fill("/high");
+      await input.press("Enter");
+      await expect
+        .poll(() => sends[0])
+        .toMatchObject({
+          path: "/chat/send",
+          body: { text: "/high" },
+        });
+      expect(await railEffort(page).textContent()).toBe("low");
+
+      await page.locator("#newToggle").click();
+      await page.locator("#np").fill("/xhigh");
+      await page.locator("#np").press("Enter");
+      await expect
+        .poll(() => sends[1])
+        .toMatchObject({
+          path: "/chat/new",
+          body: { text: "/xhigh" },
+        });
+      expect(sends[1]?.body.effort).not.toBe("xhigh");
     } finally {
       await page.close();
     }

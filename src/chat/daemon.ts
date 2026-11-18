@@ -18,6 +18,9 @@ export class DaemonOrchestrator {
     (taskId: string, daemonId: string, vendor: string, cwd: string) => void
   >();
   private readonly analyzing = new Set<string>();
+  private readonly analysisListeners = new Set<
+    (taskId: string, analysis: Analysis, previous: Analysis | null) => void
+  >();
   private readonly analyzeAgain = new Map<string, { cwd: string; uiContext: string }>();
   private readonly prompting = new Set<string>();
   private readonly analysisEpoch = new Map<string, number>();
@@ -37,6 +40,14 @@ export class DaemonOrchestrator {
 
   configurePolicy(policy: AnalyzerPolicy): void {
     this.policy = policy;
+  }
+
+  /** Only fresh accepted verdicts, including internally coalesced reruns; never cached returns. */
+  onAnalysis(
+    listener: (taskId: string, analysis: Analysis, previous: Analysis | null) => void,
+  ): () => void {
+    this.analysisListeners.add(listener);
+    return () => this.analysisListeners.delete(listener);
   }
 
   /** Apply persisted settings to work already in progress as well as future turns. */
@@ -326,6 +337,13 @@ export class DaemonOrchestrator {
             : parsed;
         if (plan) next.analyzerProfile = plan.fingerprint;
         this.cache.set(taskId, next);
+        for (const listener of this.analysisListeners) {
+          try {
+            listener(taskId, next, prev);
+          } catch {
+            // A metadata consumer must not invalidate a successfully cached verdict.
+          }
+        }
         return next;
       }
       return null;

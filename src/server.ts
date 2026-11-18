@@ -14,6 +14,7 @@ import { WorkerAnalyzerContext } from "./chat/analyzer/context-worker-client.js"
 import type { AnalyzerContextReader } from "./chat/analyzer/context.js";
 import { condenseUiContext, looksLikeDaemonPrompt } from "./chat/analyzer/contract.js";
 import { ProcessAnalyzer } from "./chat/analyzer/process.js";
+import { tagContext } from "./chat/analyzer/tag-context.js";
 import { makeAntigravityExec } from "./chat/antigravity/exec.js";
 import { readAntigravityTranscript } from "./chat/antigravity/transcript.js";
 import { ClaudeSdkDriver, type QueryFn } from "./chat/claude/driver.js";
@@ -52,6 +53,7 @@ import {
   classifyOpencodeError,
 } from "./chat/process/errors.js";
 import { ChatQueueStore, type QueuedChatTurn } from "./chat/queue.js";
+import { ReadingViewEvents, readingViewMessages } from "./chat/reading-view.js";
 import { ChatDriverRegistry } from "./chat/registry.js";
 import type { SessionSearch } from "./chat/search-service.js";
 import { WorkerSessionSearch } from "./chat/search-worker-client.js";
@@ -70,6 +72,7 @@ import { EngagementStore } from "./core/engagement.js";
 import { type LaunchAction, type LaunchVendor, launchSession, revealPath } from "./core/launch.js";
 import type { ModelDefaults, ModelOption } from "./core/model-options.js";
 import { RuntimePerformanceMonitor } from "./core/performance.js";
+import { BoundedSseWriter } from "./core/sse-writer.js";
 import {
   avoidanceEvidence,
   avoidanceEvidenceData,
@@ -102,12 +105,12 @@ import { TagStore } from "./core/tags.js";
 import { themeEngine, validThemeId } from "./core/themes.js";
 import type { Brief, Pattern, RawSession, Telemetry } from "./core/types.js";
 import {
-  cleanLayoutPreferences,
   type CommentAnchorData,
   type CommentThreadState,
   type UiSessionGoal,
   type UiSessionRunConfig,
   VaultUiStateStore,
+  cleanLayoutPreferences,
 } from "./core/ui-state.js";
 import { inspectAnalyzerCatalog } from "./core/vendor/analyzer-catalog.js";
 import {
@@ -152,6 +155,10 @@ import { TranscriptPathIndex, type TranscriptPathWriter } from "./core/vendor/tr
 import { migrateWorkspaceState } from "./core/workspace-state-migration.js";
 
 const LIVE_SNAPSHOT_INTERVAL_MS = 60_000;
+// CLI/SDK catalog discovery can download the full provider directory. Keep the
+// minute tick cheap; successful catalogs refresh hourly, failures back off.
+const MODEL_CATALOG_MAX_AGE_MS = 60 * 60_000;
+const MODEL_CATALOG_RETRY_MS = 60_000;
 const SCHEDULE_TICK_INTERVAL_MS = 15_000;
 import { WorkEventStore } from "./core/work-events.js";
 import { buildWorkStats, trailingPromptActivity } from "./core/work-stats.js";
@@ -1922,13 +1929,22 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     copilot: { model: "", effort: "", speed: "" },
     opencode: { model: "", effort: "", speed: "" },
   };
+  const modelCatalogFailures = new Map<string, number>();
+  const modelCatalogMaxAge = (vendor: string, hasModels: boolean): number => {
+    const failures = hasModels ? 0 : Math.min((modelCatalogFailures.get(vendor) ?? 0) + 1, 7);
+    modelCatalogFailures.set(vendor, failures);
+    return hasModels
+      ? MODEL_CATALOG_MAX_AGE_MS
+      : Math.min(MODEL_CATALOG_RETRY_MS * 2 ** (failures - 1), MODEL_CATALOG_MAX_AGE_MS);
+  };
   let claudeModelsWarning: string | null = vendorStatus("claude").available
     ? "Discovering models from Claude…"
     : (vendorStatus("claude").message ?? "Claude CLI is unavailable.");
   let claudeModelRefresh: Promise<void> | null = null;
-  let claudeModelRefreshedAt = 0;
-  const refreshClaudeModels = (maxAgeMs = 10 * 60_000): Promise<void> => {
-    if (!deps.claudeModelCatalog) return Promise.resolve();
+  let claudeModelRefreshedAt = Number.NEGATIVE_INFINITY;
+  let claudeModelMaxAgeMs = MODEL_CATALOG_RETRY_MS;
+  const refreshClaudeModels = (maxAgeMs = claudeModelMaxAgeMs): Promise<void> => {
+    if (!deps.claudeModelCatalog || !vendorStatus("claude").available) return Promise.resolve();
     if (claudeModelRefresh) return claudeModelRefresh;
     const now = Date.now();
     if (now - claudeModelRefreshedAt < maxAgeMs) return Promise.resolve();
@@ -1936,11 +1952,13 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     claudeModelRefresh = deps
       .claudeModelCatalog()
       .then((inspection) => {
+        claudeModelMaxAgeMs = modelCatalogMaxAge("claude", inspection.models.length > 0);
         if (inspection.models.length) claudeModelsSnapshot = inspection.models;
         modelDefaults.claude = inspection.defaults;
         claudeModelsWarning = inspection.warning;
       })
       .catch(() => {
+        claudeModelMaxAgeMs = modelCatalogMaxAge("claude", false);
         claudeModelsWarning =
           "Claude model discovery failed; Attend will use Claude's default model.";
       })
@@ -1953,7 +1971,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   let codexDefaultsRefresh: Promise<void> | null = null;
   let codexDefaultsRefreshedAt = 0;
   const refreshCodexDefaults = (maxAgeMs = 60_000): Promise<void> => {
-    if (!deps.codexModelDefaults) return Promise.resolve();
+    if (!deps.codexModelDefaults || !vendorStatus("codex").available) return Promise.resolve();
     if (codexDefaultsRefresh) return codexDefaultsRefresh;
     const now = Date.now();
     if (now - codexDefaultsRefreshedAt < maxAgeMs) return Promise.resolve();
@@ -1970,7 +1988,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     return codexDefaultsRefresh;
   };
   void refreshCodexDefaults();
-  const claudeModelRefreshTimer = setInterval(() => void refreshClaudeModels(60_000), 60_000);
+  const claudeModelRefreshTimer = setInterval(
+    () => void refreshClaudeModels(),
+    MODEL_CATALOG_RETRY_MS,
+  );
   claudeModelRefreshTimer.unref();
   const claudeModelOptions = () => claudeModelsSnapshot;
   // Catalog refreshes are stale-while-revalidate. Production catalog functions
@@ -1981,8 +2002,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   let codexModelsWarning: string | null = "Discovering models from Codex…";
   let codexModelRefresh: Promise<void> | null = null;
   let codexModelRefreshedAt = Number.NEGATIVE_INFINITY;
+  let codexModelMaxAgeMs = MODEL_CATALOG_RETRY_MS;
   const applyCodexModels = (inspection: CodexModelCacheInspection): void => {
     const latest = inspection.models;
+    codexModelMaxAgeMs = modelCatalogMaxAge("codex", latest.length > 0);
     if (!latest.length) {
       codexModelsWarning = inspection.warning;
       return;
@@ -2005,7 +2028,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       codexModelsWarning = null;
     }
   };
-  const refreshCodexModels = (maxAgeMs = 60_000): Promise<void> => {
+  const refreshCodexModels = (
+    maxAgeMs = deps.codexModelCatalog ? codexModelMaxAgeMs : MODEL_CATALOG_RETRY_MS,
+  ): Promise<void> => {
+    if (!vendorStatus("codex").available) return Promise.resolve();
     const catalog = codexCatalog;
     if (codexModelRefresh)
       return maxAgeMs === 0
@@ -2023,6 +2049,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       codexModelRefresh = Promise.resolve(result)
         .then(applyCodexModels)
         .catch(() => {
+          codexModelMaxAgeMs = modelCatalogMaxAge("codex", false);
           codexModelsWarning = "Codex model discovery failed; Attend will use the CLI default.";
         })
         .finally(() => {
@@ -2030,13 +2057,17 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         });
       return codexModelRefresh;
     } catch {
+      codexModelMaxAgeMs = modelCatalogMaxAge("codex", false);
       codexModelsWarning = "Codex model discovery failed; Attend will use the CLI default.";
       return Promise.resolve();
     }
   };
   const codexModelOptions = () => codexModelsSnapshot;
   void refreshCodexModels(0);
-  const codexModelRefreshTimer = setInterval(() => void refreshCodexModels(), 60_000);
+  const codexModelRefreshTimer = setInterval(
+    () => void refreshCodexModels(),
+    MODEL_CATALOG_RETRY_MS,
+  );
   codexModelRefreshTimer.unref();
   let cursorModelsSnapshot: ModelOption[] = [];
   let cursorModelsWarning: string | null = deps.cursorModelCatalog
@@ -2044,14 +2075,16 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     : null;
   let cursorModelRefresh: Promise<void> | null = null;
   let cursorModelRefreshedAt = Number.NEGATIVE_INFINITY;
+  let cursorModelMaxAgeMs = MODEL_CATALOG_RETRY_MS;
   const applyCursorModels = (inspection: CursorModelInspection): void => {
+    cursorModelMaxAgeMs = modelCatalogMaxAge("cursor", inspection.models.length > 0);
     if (inspection.models.length) cursorModelsSnapshot = inspection.models;
     modelDefaults.cursor = inspection.defaults;
     cursorModelsWarning = inspection.warning;
   };
-  const refreshCursorModels = (maxAgeMs = 60_000): Promise<void> => {
+  const refreshCursorModels = (maxAgeMs = cursorModelMaxAgeMs): Promise<void> => {
     const catalog = deps.cursorModelCatalog;
-    if (!catalog) return Promise.resolve();
+    if (!catalog || !vendorStatus("cursor").available) return Promise.resolve();
     if (cursorModelRefresh)
       return maxAgeMs === 0
         ? cursorModelRefresh.then(() => refreshCursorModels(0))
@@ -2068,6 +2101,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       cursorModelRefresh = Promise.resolve(result)
         .then(applyCursorModels)
         .catch(() => {
+          cursorModelMaxAgeMs = modelCatalogMaxAge("cursor", false);
           cursorModelsWarning =
             "Cursor model discovery failed; Attend will use Cursor's default model.";
         })
@@ -2076,6 +2110,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         });
       return cursorModelRefresh;
     } catch {
+      cursorModelMaxAgeMs = modelCatalogMaxAge("cursor", false);
       cursorModelsWarning =
         "Cursor model discovery failed; Attend will use Cursor's default model.";
       return Promise.resolve();
@@ -2083,7 +2118,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   };
   const cursorModelOptions = () => cursorModelsSnapshot;
   void refreshCursorModels(0);
-  const cursorModelRefreshTimer = setInterval(() => void refreshCursorModels(), 60_000);
+  const cursorModelRefreshTimer = setInterval(
+    () => void refreshCursorModels(),
+    MODEL_CATALOG_RETRY_MS,
+  );
   cursorModelRefreshTimer.unref();
   const processCatalogs = {
     antigravity: deps.antigravityModelCatalog,
@@ -2096,9 +2134,18 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     opencode: [],
   };
   const processModelWarnings: Record<"antigravity" | "copilot" | "opencode", string | null> = {
-    antigravity: processCatalogs.antigravity ? "Discovering models from Antigravity…" : null,
-    copilot: processCatalogs.copilot ? "Discovering models from Copilot…" : null,
-    opencode: processCatalogs.opencode ? "Discovering models from OpenCode…" : null,
+    antigravity:
+      processCatalogs.antigravity && vendorStatus("antigravity").available
+        ? "Discovering models from Antigravity…"
+        : null,
+    copilot:
+      processCatalogs.copilot && vendorStatus("copilot").available
+        ? "Discovering models from GitHub Copilot…"
+        : null,
+    opencode:
+      processCatalogs.opencode && vendorStatus("opencode").available
+        ? "Discovering models from OpenCode…"
+        : null,
   };
   const processModelRefreshes: Record<
     "antigravity" | "copilot" | "opencode",
@@ -2113,6 +2160,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     copilot: Number.NEGATIVE_INFINITY,
     opencode: Number.NEGATIVE_INFINITY,
   };
+  const processModelMaxAges: Record<"antigravity" | "copilot" | "opencode", number> = {
+    antigravity: MODEL_CATALOG_RETRY_MS,
+    copilot: MODEL_CATALOG_RETRY_MS,
+    opencode: MODEL_CATALOG_RETRY_MS,
+  };
   const processModelFallbackWarning = (vendor: "antigravity" | "copilot" | "opencode"): string => {
     if (vendor === "antigravity")
       return "Antigravity model discovery failed; Attend will use the CLI default.";
@@ -2121,10 +2173,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   };
   const refreshProcessModels = (
     vendor: "antigravity" | "copilot" | "opencode",
-    maxAgeMs = 60_000,
+    maxAgeMs = processModelMaxAges[vendor],
   ): Promise<void> => {
     const catalog = processCatalogs[vendor];
-    if (!catalog) return Promise.resolve();
+    if (!catalog || !vendorStatus(vendor).available) return Promise.resolve();
     const active = processModelRefreshes[vendor];
     if (active) return active;
     const now = Date.now();
@@ -2133,11 +2185,13 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     const refresh = Promise.resolve()
       .then(catalog)
       .then((inspection) => {
+        processModelMaxAges[vendor] = modelCatalogMaxAge(vendor, inspection.models.length > 0);
         if (inspection.models.length) processModelSnapshots[vendor] = inspection.models;
         modelDefaults[vendor] = inspection.defaults;
         processModelWarnings[vendor] = inspection.warning;
       })
       .catch(() => {
+        processModelMaxAges[vendor] = modelCatalogMaxAge(vendor, false);
         processModelWarnings[vendor] = processModelFallbackWarning(vendor);
       })
       .finally(() => {
@@ -2146,14 +2200,15 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     processModelRefreshes[vendor] = refresh;
     return refresh;
   };
-  void refreshProcessModels("antigravity");
-  void refreshProcessModels("copilot");
-  void refreshProcessModels("opencode");
-  const processModelRefreshTimer = setInterval(() => {
-    void refreshProcessModels("antigravity");
-    void refreshProcessModels("copilot");
-    void refreshProcessModels("opencode");
-  }, 60_000);
+  // Prewarm available vendors without delaying startup, then keep their cached
+  // catalogs fresh. Background analysis has separate task-triggered discovery.
+  const refreshProcessCatalogs = (): void => {
+    for (const vendor of ["antigravity", "copilot", "opencode"] as const) {
+      void refreshProcessModels(vendor);
+    }
+  };
+  refreshProcessCatalogs();
+  const processModelRefreshTimer = setInterval(refreshProcessCatalogs, MODEL_CATALOG_RETRY_MS);
   processModelRefreshTimer.unref();
   const resolveRunOptions = (
     vendor: string,
@@ -2439,7 +2494,13 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (!hasSessionRunConfig(normalizeSessionRunConfig(config))) return;
     uiState.recordSessionRunConfig(vendor, sessionId, config, { observed });
   };
+  const pruneHiddenTags = (): string[] => {
+    const removed = tags.pruneUnbound(uiState.get().hiddenTags ?? []);
+    uiState.forgetTags(removed);
+    return removed;
+  };
   const prepareConsoleView = () => {
+    pruneHiddenTags();
     const now = Date.now();
     const scanned = getSessions();
     const all = filterVisibleSessions(scanned);
@@ -2623,6 +2684,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     };
   };
   const visibleTags = (opts: { extraTags?: string[]; extraSessionIds?: string[] } = {}) => {
+    if (pruneHiddenTags().length) scheduleSessionProjection();
     if (config.scopeRoots.length === 0) return tags.list();
     const sessions = visibleSessions();
     return scopeTagList(sessions, tags, orchestrator, {
@@ -2675,6 +2737,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     );
     return {
       analyzerSettings: analyzerSettings.get(),
+      configPresets: configPresetSnapshot(),
       active: states.map((s) => s.sessionId),
       startedAt: Object.fromEntries(states.map((s) => [s.sessionId, s.startedAt])),
       lastAssistantAt: Object.fromEntries(
@@ -2694,9 +2757,17 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       stats: throughputSnapshot(),
     };
   };
+  function configPresetSnapshot() {
+    const prefs = uiState.get().modelPrefs;
+    return {
+      revision: Number(prefs?.configPresetsRevision) || 0,
+      items: Array.isArray(prefs?.configPresets) ? prefs.configPresets : [],
+    };
+  }
   type LiveSnapshotMessage = ReturnType<typeof liveSnapshot>;
   let cachedLiveSnapshot: LiveSnapshotMessage = {
     analyzerSettings: analyzerSettings.get(),
+    configPresets: configPresetSnapshot(),
     active: [],
     startedAt: {},
     lastAssistantAt: {},
@@ -2720,6 +2791,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     knownDirs?: string[];
     defaultNewDir?: string;
     tags?: string[];
+    hiddenTags?: string[];
     sessions1h?: number;
     prompts1h?: number;
     chars1h?: number;
@@ -2788,6 +2860,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         status: "completed" | "failed";
         result: Record<string, unknown>;
       };
+  const readingViewEvents = new ReadingViewEvents();
   const liveSubscribers = new Set<(message: LiveBusMessage, eventId?: number) => void>();
   const liveEventBuffer: Array<{ id: number; message: LiveBusMessage; bytes: number }> = [];
   let liveEventBufferBytes = 0;
@@ -2825,6 +2898,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     knownDirs: view.knownDirs,
     defaultNewDir: view.defaultNewDir,
     tags: view.tags,
+    hiddenTags: view.vaultState?.hiddenTags ?? [],
     sessions1h: view.sessions1h,
     prompts1h: view.prompts1h,
     chars1h: view.chars1h,
@@ -2870,6 +2944,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       knownDirs: next.knownDirs,
       defaultNewDir: next.defaultNewDir,
       tags: next.tags,
+      hiddenTags:
+        JSON.stringify(previous.hiddenTags) === JSON.stringify(next.hiddenTags)
+          ? undefined
+          : next.hiddenTags,
       sessions1h: next.sessions1h,
       prompts1h: next.prompts1h,
       chars1h: next.chars1h,
@@ -3221,6 +3299,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         ok: event.kind === "result" ? event.ok : event.kind === "tool_use",
       });
     }
+    // Classify question results even when no reading client is currently connected.
+    readingViewEvents.project(`${vendor}\u0000${sessionId}`, event);
     const message: LiveBusMessage = {
       kind: "session_event",
       sessionId,
@@ -3263,8 +3343,47 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   // When a task turn ends, re-run its daemon analysis (DESIGN v2.3 #3 — triggered
   // on completion, not polled). Daemon turns are ignored to avoid recursion.
   // Registered on every backend so supported vendor sessions behave identically.
-  const analyzeAndRecordState = (sid: string, cwd: string, knownVendor?: string) =>
-    orchestrator.analyzeTask(sid, cwd, daemonUiContext(sid)).then((analysis) => {
+  const unsubscribeAutoTags = orchestrator.onAnalysis((sid, analysis, previous) => {
+    if (!analysis.tags || orchestrator.isDaemon(sid)) return;
+    const session = visibleSessions().find((item) => item.sessionId === sid);
+    const aliases = session
+      ? [
+          ...sessionTagKeys(session, previous?.brief).slice(1),
+          ...sessionTagKeys(session, analysis.brief).slice(1),
+        ]
+      : [];
+    const applied = tags.applyAutoTags(sid, analysis.tags, aliases);
+    if (!applied.changed) return;
+    uiState.hideNewTags(applied.created);
+    for (const tag of tags.tagsForSession(sid))
+      rememberScopeTag(tags, config.scopeRoots, config.scopeId, tag, session?.cwd || cwdOf(sid));
+    scheduleSessionProjection();
+  });
+  const analyzeAndRecordState = (sid: string, cwd: string, knownVendor?: string) => {
+    const sessions = visibleSessions()
+      .sort(
+        (a, b) =>
+          Number(b.sessionId === sid) - Number(a.sessionId === sid) ||
+          Number(b.cwd === cwd) - Number(a.cwd === cwd) ||
+          (b.lastTs ?? 0) - (a.lastTs ?? 0),
+      )
+      .slice(0, 200)
+      .flatMap((session) => {
+        if (!session.sessionId) return [];
+        const brief = orchestrator.analysis(session.sessionId)?.brief;
+        return [
+          {
+            sessionId: session.sessionId,
+            cwd: session.cwd ?? "",
+            title: brief || session.title || "",
+            aliases: sessionTagKeys(session, brief).slice(1),
+          },
+        ];
+      });
+    const context = [daemonUiContext(sid), tagContext(tags, sid, cwd, sessions)]
+      .filter(Boolean)
+      .join("\n\n");
+    return orchestrator.analyzeTask(sid, cwd, context).then((analysis) => {
       // Push regardless of null: a non-null verdict updates the tab live; a null one
       // clears the console's "analyzing" flag so it doesn't hang after an unparseable
       // reply. This is what makes the verdict appear without a fixed-window poll.
@@ -3282,6 +3401,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       });
       return analysis;
     });
+  };
   const onTurnEnd = (sid: string, vendor?: string) => {
     flushAssistantOutput(sid);
     // Claude's native /goal owns the continuation loop inside this provider
@@ -3347,6 +3467,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       backgroundClosed = true;
       analyzerSettings.close();
       unsubscribeSessionIndex();
+      unsubscribeAutoTags();
       unsubscribeAlignmentModel();
       if (!deps.sessionIndex) backgroundSessionIndex.close();
       if (!deps.transcriptHistory) transcriptHistory.close?.();
@@ -3671,10 +3792,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   // Let the already-open console pick up that newer snapshot without a full reload.
   app.get("/models/codex", async (c) => {
     c.header("Cache-Control", "no-store");
-    await Promise.all([
-      refreshCodexModels(deps.codexModelCatalog ? 60_000 : 0),
+    const refresh = Promise.all([
+      refreshCodexModels(deps.codexModelCatalog ? undefined : 0),
       refreshCodexDefaults(),
     ]);
+    if (!deps.codexModelCatalog || !codexModelsSnapshot.length) await refresh;
     return c.json({
       models: codexModelOptions(),
       defaults: modelDefaults.codex,
@@ -3682,14 +3804,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     });
   });
 
-  // Claude Code can refresh its gateway model cache outside Attend too.
+  // Browser reloads share the same catalog TTL as the background refresh.
   app.get("/models/claude", async (c) => {
     c.header("Cache-Control", "no-store");
-    // Claude can publish an expanded catalog just after Attend starts. The UI
-    // polls this route every five seconds for its first minute, so honor that
-    // cadence and wait for the shared discovery rather than returning the stale
-    // startup snapshot while a refresh is still running.
-    await refreshClaudeModels(5_000);
+    const refresh = refreshClaudeModels();
+    if (!claudeModelsSnapshot.length) await refresh;
     return c.json({
       models: claudeModelOptions(),
       defaults: modelDefaults.claude,
@@ -3697,9 +3816,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     });
   });
 
-  app.get("/models/cursor", (c) => {
+  app.get("/models/cursor", async (c) => {
     c.header("Cache-Control", "no-store");
-    void refreshCursorModels();
+    const refresh = refreshCursorModels();
+    if (!cursorModelsSnapshot.length) await refresh;
     return c.json({
       models: cursorModelOptions(),
       defaults: modelDefaults.cursor,
@@ -3707,9 +3827,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     });
   });
 
-  app.get("/models/antigravity", (c) => {
+  app.get("/models/antigravity", async (c) => {
     c.header("Cache-Control", "no-store");
-    void refreshProcessModels("antigravity");
+    const refresh = refreshProcessModels("antigravity");
+    if (!processModelSnapshots.antigravity.length) await refresh;
     return c.json({
       models: processModelSnapshots.antigravity,
       defaults: modelDefaults.antigravity,
@@ -3717,9 +3838,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     });
   });
 
-  app.get("/models/copilot", (c) => {
+  app.get("/models/copilot", async (c) => {
     c.header("Cache-Control", "no-store");
-    void refreshProcessModels("copilot");
+    const refresh = refreshProcessModels("copilot");
+    if (!processModelSnapshots.copilot.length) await refresh;
     return c.json({
       models: processModelSnapshots.copilot,
       defaults: modelDefaults.copilot,
@@ -3727,9 +3849,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     });
   });
 
-  app.get("/models/opencode", (c) => {
+  app.get("/models/opencode", async (c) => {
     c.header("Cache-Control", "no-store");
-    void refreshProcessModels("opencode");
+    const refresh = refreshProcessModels("opencode");
+    if (!processModelSnapshots.opencode.length) await refresh;
     return c.json({
       models: processModelSnapshots.opencode,
       defaults: modelDefaults.opencode,
@@ -3865,8 +3988,10 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
           return c.json({ error: error instanceof Error ? error.message : "Invalid theme" }, 400);
         }
       }
-      const merged = { ...uiState.get().customThemes, ...patch.customThemes };
-      if (Object.values(merged).filter(Boolean).length > 64)
+      const current = uiState.get().customThemes || {};
+      const merged = { ...current, ...patch.customThemes };
+      const count = Object.values(merged).filter(Boolean).length;
+      if (count > 64 && count > Object.keys(current).length)
         return c.json({ error: "At most 64 custom themes are supported" }, 400);
     }
     if (body.theme !== undefined) {
@@ -3912,7 +4037,14 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (body.chatGroups && typeof body.chatGroups === "object")
       patch.chatGroups = body.chatGroups as NonNullable<typeof patch.chatGroups>;
     if (!Object.keys(patch).length) return c.json({ ok: false, error: "nothing to set" }, 400);
-    return c.json({ ok: true, state: uiState.patch(patch) });
+    let state = uiState.patch(patch);
+    if (patch.hiddenTags) {
+      pruneHiddenTags();
+      state = uiState.get();
+      scheduleSessionProjection();
+    }
+    if (patch.modelPrefs && Object.hasOwn(patch.modelPrefs, "configPresets")) broadcastLive();
+    return c.json({ ok: true, state });
   });
 
   app.post("/tags", async (c) => {
@@ -4067,18 +4199,47 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         // to an old process and must not suppress this process's buffered events.
         const reconnecting = requestedLastEventId > 0 && requestedLastEventId <= liveEventId;
         let lastSentId = reconnecting ? requestedLastEventId : 0;
-        let sendChain = Promise.resolve();
+        const writer = new BoundedSseWriter(
+          (frame) => stream.writeSSE(frame),
+          () => stream.abort(),
+        );
         const send = (message: LiveBusMessage, eventId?: number) => {
           if (closed) return;
           if (eventId && eventId <= lastSentId) return;
           if (eventId) lastSentId = eventId;
-          const data = e2ee.enabled ? e2ee.encryptJson(message) : JSON.stringify(message);
+          const payload =
+            c.req.query("view") === "reading" &&
+            "kind" in message &&
+            message.kind === "session_event"
+              ? {
+                  ...message,
+                  event: readingViewEvents.project(
+                    `${message.vendor}\u0000${message.sessionId}`,
+                    message.event,
+                  ),
+                }
+              : message;
+          const data = e2ee.enabled ? e2ee.encryptJson(payload) : JSON.stringify(payload);
           const id = String(eventId ?? liveEventId);
           // One global bus must also be one ordered byte stream. Explicitly queue
           // writes so an assistant_text immediately followed by result/error can
           // never race at the HTTP stream boundary.
-          sendChain = sendChain.then(() => stream.writeSSE({ data, id })).catch(() => {});
+          writer.send({ data, id });
         };
+        const timer = setInterval(() => {
+          send(cachedLiveSnapshot);
+          scheduleLiveProjection();
+        }, LIVE_SNAPSHOT_INTERVAL_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        // Install cleanup before the handshake: even that first payload can
+        // exceed the budget, and abort must release this subscriber immediately.
+        stream.onAbort(() => {
+          closed = true;
+          writer.close();
+          clearInterval(timer);
+          liveSubscribers.delete(send);
+          resolve();
+        });
         liveSubscribers.add(send);
         if (reconnecting) {
           for (const buffered of liveEventBuffer) send(buffered.message, buffered.id);
@@ -4096,17 +4257,6 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         void refreshCommentProjection()
           .then(() => send(commentIndexMessage()))
           .catch(() => {});
-        const timer = setInterval(() => {
-          send(cachedLiveSnapshot);
-          scheduleLiveProjection();
-        }, LIVE_SNAPSHOT_INTERVAL_MS);
-        (timer as unknown as { unref?: () => void }).unref?.();
-        stream.onAbort(() => {
-          closed = true;
-          clearInterval(timer);
-          liveSubscribers.delete(send);
-          resolve();
-        });
       });
     }),
   );
@@ -4182,7 +4332,9 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (loaded.historyVersion !== commentHistoryVersion(thread, file)) {
       loaded = await loadHistory();
     }
-    const { messages, historyVersion } = loaded;
+    const { historyVersion } = loaded;
+    const messages =
+      c.req.query("view") === "reading" ? readingViewMessages(loaded.messages) : loaded.messages;
     const response = {
       ok: true,
       thread,
@@ -4653,9 +4805,13 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       .read(file, vendor || "claude", CHAT_HISTORY_LIMIT)
       .catch(() => null);
     if (!snapshot) return c.json({ ok: false, error: "transcript not found" }, 404);
+    const messages =
+      c.req.query("view") === "reading"
+        ? readingViewMessages(snapshot.messages)
+        : snapshot.messages;
     const around = c.req.query("around")?.trim() ?? "";
     if (around) {
-      const window = targetedHistoryWindow(snapshot.messages, around, c.req.query("radius"));
+      const window = targetedHistoryWindow(messages, around, c.req.query("radius"));
       if (!window) {
         return c.json({ ok: false, error: "history target not found" }, 404);
       }
@@ -4665,7 +4821,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         page: {
           before: window.start,
           hasMore: window.start > 0,
-          total: snapshot.messages.length,
+          total: messages.length,
           version: snapshot.version,
           sourceTruncated: snapshot.truncatedBefore,
         },
@@ -4675,8 +4831,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
           start: window.start,
           end: window.end,
           hasEarlier: window.start > 0,
-          hasLater: window.end < snapshot.messages.length,
-          total: snapshot.messages.length,
+          hasLater: window.end < messages.length,
+          total: messages.length,
           version: snapshot.version,
         },
       });
@@ -4690,11 +4846,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     if (c.req.query("full") === "1") {
       return c.json({
         ok: true,
-        messages: snapshot.messages,
+        messages: messages,
         page: {
           before: 0,
           hasMore: false,
-          total: snapshot.messages.length,
+          total: messages.length,
           version: snapshot.version,
           sourceTruncated: snapshot.truncatedBefore,
         },
@@ -4702,7 +4858,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     }
     if (c.req.query("paged") !== "1") {
       return c.json(
-        snapshot.messages.map(
+        messages.map(
           ({
             historyId: _historyId,
             historyOrdinal: _historyOrdinal,
@@ -4726,8 +4882,8 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
 
     const rawBefore = Number(c.req.query("before"));
     const before = Number.isFinite(rawBefore)
-      ? Math.max(0, Math.min(snapshot.messages.length, Math.floor(rawBefore)))
-      : snapshot.messages.length;
+      ? Math.max(0, Math.min(messages.length, Math.floor(rawBefore)))
+      : messages.length;
     const rawLimit = Number(c.req.query("limit"));
     const pageSize = Number.isFinite(rawLimit)
       ? Math.max(1, Math.min(CHAT_HISTORY_PAGE_MAX, Math.floor(rawLimit)))
@@ -4735,11 +4891,11 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     const start = Math.max(0, before - pageSize);
     return c.json({
       ok: true,
-      messages: snapshot.messages.slice(start, before),
+      messages: messages.slice(start, before),
       page: {
         before: start,
         hasMore: start > 0,
-        total: snapshot.messages.length,
+        total: messages.length,
         version: snapshot.version,
         sourceTruncated: snapshot.truncatedBefore,
       },
@@ -4777,10 +4933,71 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     };
   };
 
+  // Deadlines live with the durable queue, so navigation/reload cannot cancel a send.
+  const appendTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  function scheduleQueuedAppend(item: QueuedChatTurn) {
+    if (!item.appendAt || !isVendorId(item.vendor) || appendTimers.has(item.id)) return;
+    const timer = setTimeout(
+      async () => {
+        appendTimers.delete(item.id);
+        const current = chatQueue.list(item.sessionId).find((entry) => entry.id === item.id);
+        if (!current?.appendAt) return;
+        const ready = chatQueue.clearAppend(item.sessionId, item.id, current.appendAt);
+        if (!ready) return;
+        broadcastLive();
+        if (chatQueue.parked(item.sessionId)) return;
+        if (!isVendorId(item.vendor) || !vendorStatus(item.vendor).available) return;
+        const driver = driverFor(item.vendor);
+        if (nativeCapability(item.vendor, "steer") && driver.canSteer(item.sessionId)) {
+          if (!(await steerQueuedItem(item.sessionId, ready)))
+            await drainQueuedTurn(item.sessionId);
+        } else {
+          await drainQueuedTurn(item.sessionId);
+        }
+      },
+      Math.max(0, item.appendAt - Date.now()),
+    );
+    timer.unref();
+    appendTimers.set(item.id, timer);
+  }
+
+  async function steerQueuedItem(id: string, item: QueuedChatTurn): Promise<boolean> {
+    const extracted = chatQueue.extract(id, item.id);
+    if (!extracted) return false;
+    const steeredAt = Date.now();
+    let steered = false;
+    try {
+      steered = await driverFor(item.vendor).steer(id, await queuedProviderTurn(extracted.item));
+    } catch (error) {
+      debugLog("chat", `steer threw for ${id} (${item.vendor})`, error);
+    }
+    if (!steered) {
+      chatQueue.restore(extracted);
+      broadcastLive();
+      return false;
+    }
+    recordUserMessageSent(id);
+    broadcastSessionEvent(id, item.vendor, {
+      kind: "queued_turn_steered",
+      queueId: item.id,
+      text: item.text,
+      attachments: item.attachments,
+      references: item.references,
+      steeredAt,
+    });
+    broadcastLive();
+    return true;
+  }
+
   const queueDraining = new Set<string>();
   const queueOwner = crypto.randomUUID();
   async function drainQueuedTurn(sessionId: string): Promise<boolean> {
     if (queueDraining.has(sessionId)) return false;
+    const head = chatQueue.peek(sessionId);
+    if (head?.appendAt && head.appendAt > Date.now()) {
+      scheduleQueuedAppend(head);
+      return false;
+    }
     const item = chatQueue.claim(sessionId, queueOwner);
     if (!item) {
       broadcastLive();
@@ -4889,6 +5106,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   }
 
   for (const sessionId of chatQueue.sessionIds()) {
+    for (const item of chatQueue.list(sessionId)) scheduleQueuedAppend(item);
     setTimeout(() => void drainQueuedTurn(sessionId), 0);
   }
 
@@ -4913,6 +5131,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       scheduleRunId?: unknown;
       scheduledAt?: unknown;
       dispatchIfReady?: unknown;
+      append?: unknown;
     };
     const text = body.text?.trim() ?? "";
     const attachments = parseChatAttachments(body.attachments);
@@ -4947,6 +5166,9 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       references,
       referenceContext: pinContext.context,
       ...(goalRequested ? { goal: true } : {}),
+      ...(body.append === true && !goalRequested && nativeCapability(vendor, "steer")
+        ? { appendAt: Date.now() + 5_000 }
+        : {}),
       ...(typeof body.scheduleRunId === "string" && body.scheduleRunId
         ? { scheduleRunId: body.scheduleRunId }
         : {}),
@@ -4954,6 +5176,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
         ? { scheduledAt: Number(body.scheduledAt) }
         : {}),
     });
+    scheduleQueuedAppend(item);
     workEvents.record({
       kind: "queue_enqueued",
       at: item.createdAt,
@@ -4978,9 +5201,19 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
   app.patch("/chat/queue", async (c) => {
     const id = c.req.query("session");
     const itemId = c.req.query("item");
-    const body = (await c.req.json().catch(() => ({}))) as { text?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { text?: string; mode?: string };
     const text = body.text?.trim() ?? "";
     if (!id || !itemId) return c.json({ ok: false, error: "missing queue item" }, 400);
+    if (body.mode === "queue") {
+      const item = chatQueue.clearAppend(id, itemId);
+      if (!item) return c.json({ ok: false, error: "queue item not found" }, 404);
+      const timer = appendTimers.get(itemId);
+      if (timer) clearTimeout(timer);
+      appendTimers.delete(itemId);
+      broadcastLive();
+      setTimeout(() => void drainQueuedTurn(id), 0);
+      return c.json({ ok: true, item: publicQueueItem(item), ...queueResponse(id) });
+    }
     if (!text) return c.json({ ok: false, error: "empty message" }, 400);
     const item = chatQueue.updateText(id, itemId, text);
     if (!item) return c.json({ ok: false, error: "queue item not found" }, 404);
@@ -5014,20 +5247,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
       return c.json(capabilityUnavailable(item.vendor, "steer"), 409);
     }
     if (!item.goal && nativeCapability(item.vendor, "steer") && driver.canSteer(id)) {
-      const extracted = chatQueue.extract(id, itemId);
-      if (!extracted)
-        return c.json({ ok: false, error: "queued message is no longer available" }, 409);
-      const steeredAt = Date.now();
-      let steered = false;
-      try {
-        steered = await driver.steer(id, await queuedProviderTurn(extracted.item));
-      } catch (error) {
-        debugLog("chat", `steer threw for ${id} (${item.vendor})`, error);
-        steered = false;
-      }
-      if (!steered) {
-        chatQueue.restore(extracted);
-        broadcastLive();
+      if (!(await steerQueuedItem(id, item))) {
         return c.json(
           {
             ok: false,
@@ -5037,18 +5257,9 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
           409,
         );
       }
-      recordUserMessageSent(id);
-      broadcastSessionEvent(id, item.vendor, {
-        kind: "queued_turn_steered",
-        queueId: item.id,
-        text: item.text,
-        attachments: item.attachments,
-        references: item.references,
-        steeredAt,
-      });
-      broadcastLive();
       return c.json({ ok: true, steered: true, ...queueResponse(id) });
     }
+    chatQueue.clearAppend(id, itemId);
     if (!chatQueue.promote(id, itemId))
       return c.json({ ok: false, error: "queue item not found" }, 404);
     const sent = await drainQueuedTurn(id);

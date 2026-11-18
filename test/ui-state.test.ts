@@ -6,8 +6,85 @@ import { SqliteDocument } from "../src/core/state-database.js";
 import { VaultUiStateStore } from "../src/core/ui-state.js";
 
 describe("VaultUiStateStore", () => {
+  it.each([false, true])("forgets deleted tags across all display scopes (SQLite=%s)", (sqlite) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-forget-tags-"));
+    try {
+      const file = path.join(dir, "ui-state.json");
+      const db = sqlite ? path.join(dir, "state.db") : undefined;
+      fs.writeFileSync(file, JSON.stringify({ hiddenTags: ["deleted", "legacy"] }));
+      const first = new VaultUiStateStore(file, "first", db);
+      const second = new VaultUiStateStore(file, "second", db);
+      first.patch({ hiddenTags: ["deleted", "kept"] });
+      second.patch({ pinnedTags: ["deleted", "pinned"] });
+      first.forgetTags(["deleted"]);
+      expect(first.get().hiddenTags).toEqual(["kept"]);
+      expect(second.get().hiddenTags).toEqual(["legacy"]);
+      expect(second.get().pinnedTags).toEqual(["pinned"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])(
-    "isolates appearance and layout across instances (SQLite=%s)",
+    "merges new hidden tags into each scope without losing display choices (SQLite=%s)",
+    (sqlite) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-hidden-tags-"));
+      try {
+        const file = path.join(dir, "ui-state.json");
+        const db = sqlite ? path.join(dir, "state.db") : undefined;
+        fs.writeFileSync(file, JSON.stringify({ hiddenTags: ["legacy"] }));
+        const first = new VaultUiStateStore(file, "first", db);
+        const second = new VaultUiStateStore(file, "second", db);
+        const outside = new VaultUiStateStore(file, "outside", db);
+        first.patch({ hiddenTags: ["first-hidden"], pinnedTags: ["pinned"] });
+        second.patch({ hiddenTags: ["second-hidden"] });
+        const combined = new VaultUiStateStore(file, "combined", db, ["first", "second"]);
+        first.patch({ hiddenTags: ["first-hidden", "concurrent"] });
+        combined.hideNewTags(["new", "pinned", "new"]);
+        expect(first.get().hiddenTags).toEqual(["first-hidden", "concurrent", "new"]);
+        expect(first.get().pinnedTags).toEqual(["pinned"]);
+        expect(second.get().hiddenTags).toEqual(["second-hidden", "new", "pinned"]);
+        expect(outside.get().hiddenTags).toEqual(["legacy"]);
+        outside.hideNewTags(["other"]);
+        expect(outside.get().hiddenTags).toEqual(["legacy", "other"]);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "versions shared preset deletions across instances (SQLite=%s)",
+    (sqlite) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-preset-state-"));
+      try {
+        const file = path.join(dir, "ui-state.json");
+        const db = sqlite ? path.join(dir, "state.db") : undefined;
+        const first = new VaultUiStateStore(file, "scope:first", db);
+        const second = new VaultUiStateStore(file, "scope:second", db);
+        const created = first.patch({
+          modelPrefs: { configPresets: [{ id: "high", name: "high" }], configPresetsRevision: 1 },
+        });
+        const revision = Number(created.modelPrefs?.configPresetsRevision);
+        expect(revision).toBeGreaterThan(1);
+        expect(second.get().modelPrefs?.configPresetsRevision).toBe(revision);
+        const deleted = second.patch({ modelPrefs: { configPresets: [] } });
+        const deletedRevision = Number(deleted.modelPrefs?.configPresetsRevision);
+        expect(deletedRevision).toBeGreaterThan(revision);
+        first.patch({ modelPrefs: { claude: { effort: "high" }, configPresetsRevision: 1 } });
+        expect(first.get().modelPrefs).toMatchObject({
+          configPresets: [],
+          configPresetsRevision: deletedRevision,
+          claude: { effort: "high" },
+        });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "shares theme definitions while isolating selections and layout (SQLite=%s)",
     (sqlite) => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-instance-ui-"));
       try {
@@ -28,7 +105,7 @@ describe("VaultUiStateStore", () => {
         });
         const second = new VaultUiStateStore(file, "scope:second", db);
         expect(second.get().theme).toBe("dark");
-        expect(second.get().customThemes).toBeUndefined();
+        expect(second.get().customThemes?.custom?.name).toBe("First");
         expect(second.get().layout).toBeUndefined();
         expect(second.get().sessionTitles?.shared).toBe("Shared session");
         second.patch({ theme: "light", layout: { sessionPanelColumns: 2 } });
@@ -43,6 +120,13 @@ describe("VaultUiStateStore", () => {
           },
         });
         expect(second.get()).toMatchObject({ theme: "light", layout: { sessionPanelColumns: 2 } });
+        second.patch({ theme: "custom" });
+        second.patch({
+          customThemes: {
+            custom: { name: "Shared edit", type: "dark", colors: { accent: "#123456" } },
+          },
+        });
+        expect(first.get().customThemes?.custom?.name).toBe("Shared edit");
         const combined = new VaultUiStateStore(file, "scope:combined", db, [
           "scope:first",
           "scope:second",
@@ -54,6 +138,11 @@ describe("VaultUiStateStore", () => {
           new VaultUiStateStore(file, "scope:combined", db, ["scope:first", "scope:second"]).get()
             .theme,
         ).toBe("system");
+        second.patch({ customThemes: { custom: null } });
+        expect(first.get().theme).toBe("light");
+        expect(second.get().theme).toBe("light");
+        expect(combined.get().theme).toBe("system");
+        expect(new VaultUiStateStore(file, "scope:first", db).get().customThemes).toEqual({});
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }

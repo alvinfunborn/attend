@@ -18,11 +18,12 @@ export interface UiLayoutPreferences {
 
 interface InstanceUiPreferences {
   theme?: string;
-  customThemes?: Record<string, ThemeDefinition>;
   layout?: UiLayoutPreferences;
 }
 
 export interface VaultUiState extends InstanceUiPreferences {
+  /** Machine-global theme library; each instance selects its own theme ID. */
+  customThemes?: Record<string, ThemeDefinition>;
   focusViews?: unknown[];
   modelPrefs?: Record<string, unknown>;
   /** Exact/best-known configuration Attend used for a stable provider session. */
@@ -64,7 +65,10 @@ interface PersistedScopeUiState {
 
 interface PersistedVaultUiState extends VaultUiState {
   scopes?: Record<string, PersistedScopeUiState>;
-  instances?: Record<string, InstanceUiPreferences>;
+  instances?: Record<
+    string,
+    InstanceUiPreferences & { customThemes?: Record<string, ThemeDefinition> }
+  >;
 }
 
 interface PersistedComposerTextState {
@@ -186,13 +190,13 @@ export class VaultUiStateStore {
     this.memberScopeIds = [
       ...new Set(memberScopeIds.map((id) => id.trim()).filter((id) => id && id !== this.scopeId)),
     ];
-    // Snapshot the former machine-wide appearance once for each stable instance.
-    // Future changes never flow through the legacy shared fields.
+    // Lift former per-instance libraries into the shared library before taking
+    // the initial selection/layout snapshot for a new stable instance.
     this.data.transact((state) => {
-      if (Object.hasOwn(state.instances ?? {}, this.scopeId))
-        return { result: undefined, changed: false };
+      const changed = migrateInstanceThemes(state);
+      if (Object.hasOwn(state.instances ?? {}, this.scopeId)) return { result: undefined, changed };
       state.instances ??= {};
-      state.instances[this.scopeId] = cleanInstancePreferences(state);
+      state.instances[this.scopeId] = cleanInstancePreferences(state, state.customThemes);
       return { result: undefined, changed: true };
     });
     if (this.memberScopeIds.length) this.flattenCombinedScope();
@@ -216,7 +220,6 @@ export class VaultUiStateStore {
       scopes: _scopes,
       instances: _instances,
       theme: _legacyTheme,
-      customThemes: _legacyThemes,
       layout: _legacyLayout,
       focusViews: legacyFocusViews,
       pinnedTags: legacyPinnedTags,
@@ -333,26 +336,67 @@ export class VaultUiStateStore {
     return found ? merged : legacy;
   }
 
+  /** Append daemon-created tags without replacing concurrent visibility choices. */
+  hideNewTags(tags: string[]): void {
+    const incoming = cleanPinnedTags(tags);
+    if (!incoming.length) return;
+    this.data.update((state) => {
+      state.scopes ??= {};
+      const scopes = this.memberScopeIds.length ? this.memberScopeIds : [this.scopeId];
+      for (const id of scopes) {
+        state.scopes[id] ??= {};
+        const scoped = state.scopes[id];
+        const pinned = new Set(
+          (scoped.pinnedTags ?? state.pinnedTags ?? []).map((tag) => tag.toLowerCase()),
+        );
+        scoped.hiddenTags = cleanPinnedTags([
+          ...(scoped.hiddenTags ?? state.hiddenTags ?? []),
+          ...incoming.filter((tag) => !pinned.has(tag.toLowerCase())),
+        ]);
+      }
+    });
+  }
+
+  /** A deleted global tag must not retain display preferences in another scope. */
+  forgetTags(tags: string[]): void {
+    const removed = new Set(tags);
+    if (!removed.size) return;
+    this.data.transact((state) => {
+      let changed = false;
+      for (const preferences of [state, ...Object.values(state.scopes ?? {})]) {
+        for (const key of ["hiddenTags", "pinnedTags"] as const) {
+          const current = preferences[key];
+          if (!current?.some((tag) => removed.has(tag))) continue;
+          preferences[key] = current.filter((tag) => !removed.has(tag));
+          changed = true;
+        }
+      }
+      return { result: undefined, changed };
+    });
+  }
+
   patch(next: VaultUiStatePatch): VaultUiState {
     this.data.update((state) => {
       state.instances ??= {};
       const preferences = state.instances[this.scopeId] ?? {};
       state.instances[this.scopeId] = preferences;
       if (next.customThemes) {
-        const themes = { ...preferences.customThemes };
+        const themes = { ...state.customThemes };
         for (const [id, theme] of Object.entries(next.customThemes)) {
           if (theme === null) delete themes[id];
           else Object.assign(themes, cleanCustomThemes({ [id]: theme }));
         }
-        preferences.customThemes = cleanCustomThemes(themes);
+        state.customThemes = cleanCustomThemes(themes);
       }
       if (validThemeId(next.theme)) preferences.theme = next.theme;
-      if (
-        preferences.theme &&
-        !["light", "dark", "system"].includes(preferences.theme) &&
-        !Object.hasOwn(preferences.customThemes || {}, preferences.theme)
-      )
-        preferences.theme = "light";
+      for (const instance of Object.values(state.instances)) {
+        if (
+          instance.theme &&
+          !["light", "dark", "system"].includes(instance.theme) &&
+          !Object.hasOwn(state.customThemes || {}, instance.theme)
+        )
+          instance.theme = "light";
+      }
       if (next.layout)
         preferences.layout = { ...preferences.layout, ...cleanLayoutPreferences(next.layout) };
       if (
@@ -397,8 +441,13 @@ export class VaultUiStateStore {
           }
         }
       }
-      if (next.modelPrefs && typeof next.modelPrefs === "object")
-        state.modelPrefs = patchUnknownRecord(state.modelPrefs, next.modelPrefs);
+      if (next.modelPrefs && typeof next.modelPrefs === "object") {
+        const previousRevision = Number(state.modelPrefs?.configPresetsRevision) || 0;
+        const { configPresetsRevision: _revision, ...prefs } = next.modelPrefs;
+        state.modelPrefs = patchUnknownRecord(state.modelPrefs, prefs);
+        if (Object.hasOwn(prefs, "configPresets"))
+          state.modelPrefs.configPresetsRevision = Math.max(Date.now(), previousRevision + 1);
+      }
       if (next.sessionRunConfigs && typeof next.sessionRunConfigs === "object")
         state.sessionRunConfigs = patchSessionRunConfigs(
           state.sessionRunConfigs,
@@ -840,7 +889,16 @@ function normalizeUiState(value: unknown): PersistedVaultUiState {
           instances: Object.fromEntries(
             Object.entries((input as PersistedVaultUiState).instances ?? {})
               .filter(([id]) => id && !["__proto__", "constructor", "prototype"].includes(id))
-              .map(([id, preferences]) => [id, cleanInstancePreferences(preferences)]),
+              .map(([id, preferences]) => {
+                const legacyThemes = cleanCustomThemes(preferences?.customThemes);
+                return [
+                  id,
+                  {
+                    ...cleanInstancePreferences(preferences, { ...customThemes, ...legacyThemes }),
+                    ...(preferences?.customThemes ? { customThemes: legacyThemes } : {}),
+                  },
+                ];
+              }),
           ),
         }
       : {}),
@@ -1109,10 +1167,12 @@ export function cleanLayoutPreferences(value: unknown): UiLayoutPreferences {
   return out;
 }
 
-function cleanInstancePreferences(value: unknown): InstanceUiPreferences {
+function cleanInstancePreferences(
+  value: unknown,
+  customThemes: Record<string, ThemeDefinition> = {},
+): InstanceUiPreferences {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const input = value as InstanceUiPreferences;
-  const customThemes = cleanCustomThemes(input.customThemes);
   return {
     ...(validThemeId(input.theme)
       ? {
@@ -1123,7 +1183,39 @@ function cleanInstancePreferences(value: unknown): InstanceUiPreferences {
               : "light",
         }
       : {}),
-    ...(input.customThemes ? { customThemes } : {}),
     ...(input.layout ? { layout: cleanLayoutPreferences(input.layout) } : {}),
   };
+}
+
+/** Preserve conflicting legacy IDs by renaming the imported copy and its selection. */
+function migrateInstanceThemes(state: PersistedVaultUiState): boolean {
+  let changed = false;
+  const instances = state.instances ?? {};
+  for (const [scopeId, instance] of Object.entries(instances)) {
+    if (!instance.customThemes) continue;
+    const selected = instance.theme;
+    state.customThemes ??= {};
+    for (const [id, theme] of Object.entries(instance.customThemes)) {
+      let targetId = id;
+      let suffix = 1;
+      while (Object.hasOwn(state.customThemes, targetId)) {
+        const existing = state.customThemes[targetId];
+        if (
+          existing?.name === theme.name &&
+          existing.type === theme.type &&
+          Object.keys(existing.colors).length === Object.keys(theme.colors).length &&
+          Object.entries(theme.colors).every(([key, value]) => existing.colors[key] === value)
+        )
+          break;
+        const ending = `-${suffix++}`;
+        targetId = `${id.slice(0, 80 - ending.length)}${ending}`;
+      }
+      state.customThemes[targetId] = theme;
+      if (selected === id) instance.theme = targetId;
+    }
+    const { customThemes: _legacyThemes, ...preferences } = instance;
+    instances[scopeId] = preferences;
+    changed = true;
+  }
+  return changed;
 }

@@ -334,6 +334,8 @@ describe("background policy lifecycle", () => {
   });
   it("cancels active daemons when disabled and does not start queued analysis", async () => {
     const h = harness();
+    const accepted = vi.fn();
+    h.orch.onAnalysis(accepted);
     await h.orch.ensureDaemon("task", "codex", "/repo");
     let finish!: (result: AnalyzerVerdict) => void;
     vi.mocked(h.analyzer.analyze).mockImplementationOnce(
@@ -352,6 +354,7 @@ describe("background policy lifecycle", () => {
     expect(h.analyzer.cancel).toHaveBeenCalledOnce();
     finish(structuredClone(verdict));
     expect(await pending).toBeNull();
+    expect(accepted).not.toHaveBeenCalled();
     await h.orch.analyzeTask("task", "/repo");
     await h.orch.ensureAvoidancePrompt("task", "/repo");
     expect(h.analyzer.analyze).toHaveBeenCalledOnce();

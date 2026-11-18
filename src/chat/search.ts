@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import type { RawSession } from "../core/types.js";
-import { readCodexTranscript } from "./codex/transcript.js";
+import { parseCodexTranscriptMessages, readCodexTranscript } from "./codex/transcript.js";
 import { readCopilotTranscript } from "./copilot/transcript.js";
 import { readCursorTranscript } from "./cursor/transcript.js";
 import { readOpencodeTranscript } from "./opencode/transcript.js";
 import { parseSearchQuery } from "./search-query.js";
-import { type TranscriptMsg, readClaudeTranscript } from "./transcript.js";
+import {
+  type TranscriptMsg,
+  parseClaudeTranscriptMessages,
+  readClaudeTranscript,
+} from "./transcript.js";
 
 export interface SearchHit {
   role: "user" | "assistant" | "tool";
@@ -19,6 +23,8 @@ export interface SessionSearchResult {
   count: number;
   hits: SearchHit[];
 }
+
+import { SEARCH_MAX_RECORD_BYTES, readSearchLines } from "./search-lines.js";
 
 interface CacheEntry {
   mtimeMs: number;
@@ -74,7 +80,36 @@ export function readSearchChunks(session: RawSession): SearchHit[] {
             : session.vendor === "opencode"
               ? readOpencodeTranscript
               : readClaudeTranscript;
-  const chunks = chunksFromMessages(read(session.path, Number.POSITIVE_INFINITY));
+  let chunks: SearchHit[];
+  if (session.vendor === "codex" || session.vendor === "claude") {
+    chunks = [];
+    let retainedBytes = 0;
+    const fd = fs.openSync(session.path, "r");
+    try {
+      for (const line of readSearchLines(fd, 0, st.size)) {
+        const messages =
+          session.vendor === "codex"
+            ? parseCodexTranscriptMessages(line.text, Number.POSITIVE_INFINITY, false)
+            : parseClaudeTranscriptMessages(line.text, Number.POSITIVE_INFINITY);
+        for (const chunk of chunksFromMessages(messages)) {
+          retainedBytes += Buffer.byteLength(chunk.text);
+          if (retainedBytes > SEARCH_CACHE_MAX_BYTES) {
+            throw new Error(
+              "Transcript exceeds in-memory search limit; use the persistent search index",
+            );
+          }
+          chunks.push(chunk);
+        }
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } else {
+    if (st.size > SEARCH_MAX_RECORD_BYTES) {
+      throw new Error("Transcript exceeds the 32 MiB search safety limit for this provider");
+    }
+    chunks = chunksFromMessages(read(session.path, Number.POSITIVE_INFINITY));
+  }
   const bytes = chunks.reduce((total, chunk) => total + Buffer.byteLength(chunk.text), 0);
   transcriptSearchCache.set(session.path, { mtimeMs: st.mtimeMs, size: st.size, chunks, bytes });
   transcriptSearchCacheBytes += bytes;

@@ -1,9 +1,37 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { TagStore } from "../src/core/tags.js";
 
 describe("TagStore", () => {
+  it.each([false, true])("prunes only unbound candidates across stores (SQLite=%s)", (sqlite) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-prune-tags-"));
+    try {
+      const file = path.join(dir, "tags.json");
+      const db = sqlite ? path.join(dir, "state.db") : undefined;
+      const store = new TagStore(file, db);
+      const other = new TagStore(file, db);
+      store.setCanonicalSessionTags("first", ["hidden", "visible"]);
+      store.setSessionTags("scope-id:first", ["hidden", "visible", "empty"]);
+      store.setSessionTags("scope:/second", ["hidden", "empty"]);
+      store.setSessionTags("title:legacy", ["legacy"]);
+      other.setCanonicalSessionTags("outside", ["hidden"]);
+      store.setCanonicalSessionTags("first", []);
+      expect(store.pruneUnbound(["hidden", "empty", "legacy"])).toEqual(["empty"]);
+      other.setCanonicalSessionTags("outside", []);
+      expect(store.pruneUnbound(["hidden"])).toEqual(["hidden"]);
+      const reloaded = new TagStore(file, db);
+      expect(reloaded.list()).toEqual(["visible", "legacy"]);
+      expect(reloaded.tagsFor("scope-id:first")).toEqual(["visible"]);
+      expect(reloaded.tagsFor("scope:/second")).toEqual([]);
+      expect(reloaded.tagsForSession("first", ["title:legacy"])).toEqual([]);
+      expect(reloaded.applyAutoTags("new-task", ["hidden"]).created).toEqual(["hidden"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("creates global tags and persists per-session assignments", () => {
     const uniq = Math.random().toString(36).slice(2);
     const file = path.join(os.tmpdir(), `attend-test-tags-${uniq}.json`);

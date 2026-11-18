@@ -162,6 +162,8 @@ attend ~/projects/product-b --port 5051
 
 这些实例共享 `~/.attend/attend.sqlite3` 中的 Attend 状态，但各自只展示命令行目录范围内的 session。数据库启用 WAL，工作事件使用索引表；标题、状态、pin、队列、tag 和 analyzer 结果等较小结构使用事务化文档行。多目录启动只是聚合视图：它会合并各单目录 scope 的 tag、Focus 视图和 tag 显示偏好（置顶/隐藏），修改时直接写入各单目录 scope，不再拥有独立的组合 scope。旧版全局 JSON 和 `<workspace>/.attend/` 状态会被幂等导入，并保留为迁移备份。原始 transcript 仍由各 vendor CLI 保存在它们自己的目录中。
 
+自定义 theme 全局保存在共享数据库中，所有 Attend 实例都可以使用。各目录 scope 独立保存所选 theme、daemon 模式和面板布局，重启或更换端口后仍会保留；修改共享 theme 会影响所有使用它的实例。
+
 保留周期按数据语义区分：活动和可重建遥测会过期，排队工作和用户显式偏好不会自动删除。详见 [存储与保留策略](docs/storage-retention.md)。
 
 也可以全局安装 `attend` 命令：

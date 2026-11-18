@@ -20,6 +20,7 @@ import { ChatEngine, type QueryFn } from "../src/chat/engine.js";
 import type { UiEvent } from "../src/chat/events.js";
 import { TranscriptHistoryCache } from "../src/chat/history-cache.js";
 import { searchSessions } from "../src/chat/search.js";
+import type { TranscriptMsg } from "../src/chat/transcript.js";
 import { resolveConfig } from "../src/config.js";
 import { buildAlignmentModel } from "../src/core/alignment.js";
 import { AnalysisCache } from "../src/core/daemon/cache.js";
@@ -826,6 +827,200 @@ describe("GET /", () => {
   });
 });
 
+describe("model catalog refresh traffic", () => {
+  const vendors = ["claude", "codex", "cursor", "antigravity", "copilot", "opencode"] as const;
+  const hour = 60 * 60_000;
+  function fixture(warning: string | null = null, extraDeps: Partial<AppDeps> = {}) {
+    const inspection = {
+      models: [{ value: "vendor-model", label: "Vendor Model" }],
+      defaults: { model: "vendor-model", effort: "", speed: "" },
+      warning,
+    };
+    const catalogs = vendors.map(() => vi.fn(async () => inspection));
+    const { app } = appWithSpy(resolveConfig({ positionals: [] }), {
+      claudeModelCatalog: catalogs[0],
+      codexModelCatalog: catalogs[1],
+      cursorModelCatalog: catalogs[2],
+      antigravityModelCatalog: catalogs[3],
+      copilotModelCatalog: catalogs[4],
+      opencodeModelCatalog: catalogs[5],
+      ...extraDeps,
+    });
+    return { app, catalogs, inspection };
+  }
+
+  it.each([null, "Desktop settings unavailable; using CLI catalog."])(
+    "shares the hourly TTL with browser requests (warning: %s)",
+    async (warning) => {
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+      vi.setSystemTime(0);
+      try {
+        const { app, catalogs } = fixture(warning);
+        await new Promise((resolve) => setImmediate(resolve));
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(hour - 60_000);
+        for (const vendor of vendors) {
+          await Promise.all(Array.from({ length: 3 }, () => app.request(`/models/${vendor}`)));
+        }
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(2);
+        for (const vendor of vendors) await app.request(`/models/${vendor}`);
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("automatically refreshes all available catalogs hourly while idle without starting analysis", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(0);
+    try {
+      const analyzerCatalog = vi.fn(async () => ({
+        models: [],
+        live: false,
+        source: "unavailable",
+      }));
+      const { app, catalogs } = fixture(null, { analyzerCatalog });
+      await app.request("/");
+      await vi.advanceTimersByTimeAsync(24 * hour);
+      for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(25);
+      expect(analyzerCatalog).not.toHaveBeenCalled();
+
+      await app.request("/models/copilot");
+      expect(catalogs[4]).toHaveBeenCalledTimes(25);
+      await vi.advanceTimersByTimeAsync(2 * hour);
+      for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(27);
+      expect(analyzerCatalog).not.toHaveBeenCalled();
+      await app.request("/models/copilot");
+      expect(catalogs[4]).toHaveBeenCalledTimes(27);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not discover unavailable vendors even when a route is requested", async () => {
+    const { app, catalogs } = fixture(null, {
+      vendorAvailability: vendors.map((vendor) => ({ vendor, available: false, chat: true })),
+    });
+    for (const vendor of vendors) await app.request(`/models/${vendor}`);
+    for (const catalog of catalogs) expect(catalog).not.toHaveBeenCalled();
+  });
+
+  it("serves cached models without waiting for a pending hourly refresh", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(0);
+    const finish: Array<() => void> = [];
+    try {
+      const { app, catalogs, inspection } = fixture();
+      await new Promise((resolve) => setImmediate(resolve));
+      for (const catalog of catalogs) {
+        catalog.mockImplementationOnce(
+          () => new Promise((resolve) => finish.push(() => resolve(inspection))),
+        );
+      }
+      await vi.advanceTimersByTimeAsync(hour);
+      expect(finish).toHaveLength(vendors.length);
+      const requests = Promise.all(
+        vendors.map(async (vendor) => (await app.request(`/models/${vendor}`)).json()),
+      );
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const results = await Promise.race([
+          requests,
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(
+              () => reject(new Error("Cached response blocked on discovery")),
+              1000,
+            );
+          }),
+        ]);
+        for (const result of results) expect(result).toMatchObject({ models: inspection.models });
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(2);
+      } finally {
+        clearTimeout(deadline);
+      }
+    } finally {
+      for (const resolve of finish) resolve();
+      await new Promise((resolve) => setImmediate(resolve));
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off repeated failures to an hour and resets after recovery", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(0);
+    try {
+      const { app, catalogs, inspection } = fixture();
+      await new Promise((resolve) => setImmediate(resolve));
+      for (const catalog of catalogs) catalog.mockRejectedValue(new Error("offline"));
+      await vi.advanceTimersByTimeAsync(hour);
+      let calls = 2;
+      for (const minutes of [1, 2, 4, 8, 16, 32, 60, 60]) {
+        await vi.advanceTimersByTimeAsync(minutes * 60_000 - 1);
+        for (const vendor of vendors) await app.request(`/models/${vendor}`);
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(calls);
+        await vi.advanceTimersByTimeAsync(1);
+        calls++;
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(calls);
+      }
+      for (const catalog of catalogs) catalog.mockResolvedValue(inspection);
+      await vi.advanceTimersByTimeAsync(hour);
+      calls++;
+      await vi.advanceTimersByTimeAsync(hour - 60_000);
+      for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(calls);
+      for (const catalog of catalogs) catalog.mockRejectedValue(new Error("offline again"));
+      await vi.advanceTimersByTimeAsync(60_000);
+      calls++;
+      await vi.advanceTimersByTimeAsync(60_000);
+      for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(calls + 1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["rejection", "empty catalog"])(
+    "retains the last catalog on %s and retries after a minute",
+    async (failure) => {
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+      vi.setSystemTime(0);
+      try {
+        const { app, catalogs, inspection } = fixture();
+        await new Promise((resolve) => setImmediate(resolve));
+        for (const catalog of catalogs) {
+          if (failure === "rejection") catalog.mockRejectedValueOnce(new Error("offline"));
+          else catalog.mockResolvedValueOnce({ ...inspection, models: [], warning: "Unavailable" });
+        }
+        await vi.advanceTimersByTimeAsync(hour);
+
+        for (const vendor of vendors) {
+          const response = await app.request(`/models/${vendor}`);
+          expect(await response.json()).toMatchObject({
+            models: [{ value: "vendor-model", label: "Vendor Model" }],
+            warning: expect.any(String),
+          });
+        }
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(2);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(3);
+        await vi.advanceTimersByTimeAsync(60_000);
+        for (const catalog of catalogs) expect(catalog).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+});
+
 describe("GET /models/codex", () => {
   it("reads the latest Codex model cache on every request", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-model-route-"));
@@ -907,7 +1102,7 @@ describe("GET /models/codex", () => {
         codexModelCatalog: () => ({ models, warning: null }),
       });
       models = [{ value: "gpt-5.6-sol", label: "GPT-5.6-Sol" }];
-      now += 60_001;
+      now += 60 * 60_000;
 
       const result = (await (await app.request("/models/codex")).json()) as {
         models: ModelOption[];
@@ -958,7 +1153,7 @@ describe("GET /models/claude", () => {
     expect(firstResponse.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("refreshes a partial startup catalog on the browser's next automatic poll", async () => {
+  it("reuses the startup catalog until its hourly TTL expires", async () => {
     let now = Date.now();
     const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
     let calls = 0;
@@ -989,7 +1184,19 @@ describe("GET /models/claude", () => {
     const second = (await (await app.request("/models/claude")).json()) as {
       models: Array<{ value: string }>;
     };
-    expect(second.models.map((model) => model.value)).toEqual(["sonnet", "claude-fable-5[1m]"]);
+    expect(second.models.map((model) => model.value)).toEqual(["sonnet"]);
+    expect(calls).toBe(1);
+
+    now += 60 * 60_000;
+    const third = (await (await app.request("/models/claude")).json()) as {
+      models: Array<{ value: string }>;
+    };
+    expect(third.models.map((model) => model.value)).toEqual(["sonnet"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const refreshed = (await (await app.request("/models/claude")).json()) as {
+      models: Array<{ value: string }>;
+    };
+    expect(refreshed.models.map((model) => model.value)).toEqual(["sonnet", "claude-fable-5[1m]"]);
     expect(calls).toBe(2);
     dateNow.mockRestore();
   });
@@ -1069,7 +1276,7 @@ describe("GET /models/cursor", () => {
 });
 
 describe("GET /models/process vendors", () => {
-  it("refreshes Antigravity and Copilot asynchronously and serves cached snapshots", async () => {
+  it("prewarms available vendors, coalesces requests and serves the first result", async () => {
     let finishAntigravity: ((inspection: ProcessCliModelInspection) => void) | undefined;
     const antigravityCatalog = vi.fn(
       () =>
@@ -1098,20 +1305,27 @@ describe("GET /models/process vendors", () => {
     });
 
     const pageResponse = await app.request("/");
-    const pending = (await (await app.request("/models/antigravity")).json()) as {
-      models: ModelOption[];
-      warning: string | null;
-    };
     expect(pageResponse.status).toBe(200);
-    expect(pending.models).toEqual([]);
-    expect(pending.warning).toContain("Discovering models");
+    expect(antigravityCatalog).toHaveBeenCalledOnce();
+    expect(copilotCatalog).toHaveBeenCalledOnce();
+    expect(opencodeCatalog).toHaveBeenCalledOnce();
+    const pending = Array.from({ length: 3 }, () => app.request("/models/antigravity"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(antigravityCatalog).toHaveBeenCalledOnce();
+    expect(copilotCatalog).toHaveBeenCalledOnce();
+    expect(opencodeCatalog).toHaveBeenCalledOnce();
+    expect((await app.request("/")).status).toBe(200);
 
     finishAntigravity?.({
       models: [{ value: "gemini-3-pro", label: "Gemini 3 Pro" }],
       defaults: { model: "gemini-3-pro", effort: "high", speed: "" },
       warning: null,
     });
-    await new Promise((resolve) => setImmediate(resolve));
+    for (const response of await Promise.all(pending)) {
+      expect(await response.json()).toMatchObject({
+        models: [{ value: "gemini-3-pro", label: "Gemini 3 Pro" }],
+      });
+    }
 
     const antigravity = (await (await app.request("/models/antigravity")).json()) as {
       models: ModelOption[];
@@ -1229,19 +1443,19 @@ describe("vault UI state", () => {
       ])
         expect((await send(body)).status).toBe(400);
       expect(readStateDocument(config.workEvents, "ui-state")).toMatchObject({
+        customThemes: { midnight, paper: { name: "Paper" } },
         instances: {
           [config.scopeId]: {
             theme: "midnight",
-            customThemes: { midnight, paper: { name: "Paper" } },
           },
         },
       });
       expect((await send({ theme: "dark", customThemes: { midnight: null } })).status).toBe(200);
-      const stored = readStateDocument<{ instances: Record<string, unknown> }>(
-        config.workEvents,
-        "ui-state",
-      ).instances[config.scopeId];
-      expect(stored).toMatchObject({ theme: "dark", customThemes: { paper: { name: "Paper" } } });
+      const stored = readStateDocument(config.workEvents, "ui-state");
+      expect(stored).toMatchObject({
+        instances: { [config.scopeId]: { theme: "dark" } },
+        customThemes: { paper: { name: "Paper" } },
+      });
       expect(stored).not.toHaveProperty("customThemes.midnight");
       expect((await send({ theme: "system" })).status).toBe(200);
     } finally {
@@ -1320,6 +1534,40 @@ describe("vault UI state", () => {
     expect(html).toContain("Unassigned review");
     expect(html).toContain(JSON.stringify(configPresets));
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("includes shared preset deletions in live snapshots from other instances", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "attend-preset-live-"));
+    const { app, config } = appWithSpy(resolveConfig({ positionals: [root] }));
+    const second = appWithSpy(config).app;
+    const presets = [
+      { id: "high", name: "high", vendor: "codex", model: "test-model", effort: "high" },
+    ];
+    const save = (configPresets: unknown[]) =>
+      app.request("/vault/ui-state", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ modelPrefs: { configPresets } }),
+      });
+    type Saved = { ok: boolean; state: { modelPrefs: { configPresetsRevision: number } } };
+    const livePresets = async () =>
+      ((await (await second.request("/chat/live")).json()) as { configPresets: unknown })
+        .configPresets;
+    try {
+      const created = (await (await save(presets)).json()) as Saved;
+      expect(created.ok).toBe(true);
+      const revision = created.state.modelPrefs.configPresetsRevision;
+      await expect.poll(livePresets).toEqual({ revision, items: presets });
+      const deleted = (await (await save([])).json()) as Saved;
+      expect(deleted.ok).toBe(true);
+      expect(deleted.state.modelPrefs.configPresetsRevision).toBeGreaterThan(revision);
+      await expect.poll(livePresets).toEqual({
+        revision: deleted.state.modelPrefs.configPresetsRevision,
+        items: [],
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("hydrates custom session titles from shared state into session views", async () => {
@@ -1859,6 +2107,56 @@ describe("POST /session/override", () => {
 });
 
 describe("tag routes", () => {
+  it("deletes hidden tags only after the last binding is removed and publishes the cleanup", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-hidden-tag-cleanup-"));
+    try {
+      const { app, config } = appWithSpy(resolveConfig({ positionals: [dir] }));
+      const store = new TagStore(config.tags, config.workEvents);
+      await post(app, "/session/tags?session=first", { tags: ["hidden", "visible"] });
+      await post(app, "/session/tags?session=outside", { tags: ["hidden"] });
+      await post(app, "/vault/ui-state", { hiddenTags: ["hidden"] });
+      await post(app, "/session/tags?session=first", { tags: [] });
+      expect(store.list()).toContain("hidden");
+
+      const cleared = await post(app, "/session/tags?session=outside", { tags: [] });
+      expect(await cleared.json()).toMatchObject({ sessionTags: [], tags: ["visible"] });
+      expect(store.list()).toEqual(["visible"]);
+      expect(store.tagsFor(`scope-id:${config.scopeId}`)).toEqual(["visible"]);
+      await vi.waitFor(async () => {
+        const snapshot = await (await app.request("/session-index")).json();
+        expect(snapshot).toMatchObject({ tags: ["visible"], hiddenTags: [] });
+      });
+
+      // Hiding an already-empty tag removes it immediately, including after restart.
+      await post(app, "/tags", { name: "empty" });
+      const hidden = await post(app, "/vault/ui-state", { hiddenTags: ["empty"] });
+      expect(await hidden.json()).toMatchObject({ state: { hiddenTags: [] } });
+      const restarted = appWithSpy(config).app;
+      const html = await (await restarted.request("/")).text();
+      const match = /window\.__TAGS__ = (\[[^\n]*\]);/.exec(html);
+      expect(JSON.parse(match?.[1] ?? "[]")).toEqual(["visible"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["/tags/clear-session-bindings", "/tags/batch"])(
+    "deletes an unbound hidden tag through %s while keeping visible tags",
+    async (route) => {
+      const { app, config } = appWithSpy(resolveConfig({ positionals: [] }));
+      await post(app, "/session/tags?session=first", { tags: ["hidden", "visible"] });
+      await post(app, "/vault/ui-state", { hiddenTags: ["hidden"] });
+      await post(
+        app,
+        route,
+        route === "/tags/batch"
+          ? { names: ["hidden", "visible"], action: "unbind" }
+          : { name: "hidden" },
+      );
+      expect(new TagStore(config.tags, config.workEvents).list()).toEqual(["visible"]);
+    },
+  );
+
   function appWithTags() {
     const uniq = Math.random().toString(36).slice(2);
     const config = {
@@ -3182,6 +3480,201 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
       transcriptIndex,
     };
   }
+
+  it("serves lightweight reading history for chat and comments with stable Pin IDs and intact full history", async () => {
+    const { app, config } = appWithCodexSpy();
+    fs.mkdirSync(config.codexSessions, { recursive: true });
+    type HistoryResponse = { messages: TranscriptMsg[]; page: Record<string, unknown> };
+    const command = "command-data".repeat(10_000);
+    const output = "tool-output".repeat(50_000);
+    const question = { questions: [{ title: "Choose", options: ["A", "B"] }] };
+    const writeTranscript = (id: string) => {
+      const rows = [
+        { type: "session_meta", payload: { id, cwd: os.tmpdir() } },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "task" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Working" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec",
+            call_id: "exec-1",
+            arguments: JSON.stringify({ command }),
+          },
+        },
+        {
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "exec-1", output },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "functions.request_user_input_async",
+            call_id: "question-1",
+            arguments: JSON.stringify(question),
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "question-1",
+            output: '{"accepted":true}',
+          },
+        },
+      ];
+      fs.writeFileSync(
+        path.join(config.codexSessions, `rollout-${id}.jsonl`),
+        rows
+          .map((row) => JSON.stringify({ timestamp: new Date().toISOString(), ...row }))
+          .join("\n"),
+      );
+    };
+    try {
+      writeTranscript("reading-parent");
+      writeTranscript("cx-1");
+      await app.request("/");
+      const created = await app.request("/comments/send", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId: "reading-comment",
+          parentSessionId: "reading-parent",
+          anchorKey: "assistant:1",
+          anchorText: "Working",
+          question: "side question",
+        }),
+      });
+      expect(created.status).toBe(200);
+      for (const url of [
+        "/chat/messages?session=reading-parent&vendor=codex",
+        "/comments/messages?id=reading-comment",
+      ]) {
+        const full = (await (
+          await app.request(`${url}&paged=1&limit=60`)
+        ).json()) as HistoryResponse;
+        const tool = full.messages.flatMap((m) => m.tools).find((t) => t.id === "exec-1");
+        if (!tool) throw new Error("missing tool history");
+        expect(tool.input).toEqual({ command });
+        expect(tool.result).toBe(output);
+        for (const suffix of [
+          "&paged=1&limit=60",
+          "&full=1",
+          "",
+          `&around=${tool.historyId}&radius=20`,
+        ]) {
+          const response = await app.request(`${url}${suffix}&view=reading`);
+          expect(response.status).toBe(200);
+          const body = (await response.json()) as HistoryResponse | TranscriptMsg[];
+          const messages = Array.isArray(body) ? body : body.messages;
+          const tools = messages.flatMap((m) => m.tools);
+          expect(tools).toContainEqual(
+            expect.objectContaining({ id: "exec-1", input: null, result: "" }),
+          );
+          expect(tools).toContainEqual(
+            expect.objectContaining({
+              id: "question-1",
+              input: question,
+              result: '{"accepted":true}',
+            }),
+          );
+          if (suffix.includes("paged") && !Array.isArray(body)) {
+            expect(body.page).toEqual(full.page);
+            expect(tools[0]?.historyId).toBe(tool.historyId);
+            expect(messages.map((m) => m.historyId)).toEqual(full.messages.map((m) => m.historyId));
+          }
+          expect(JSON.stringify(messages).length).toBeLessThan(
+            JSON.stringify(full.messages).length / 100,
+          );
+        }
+        // Reading projection must not mutate the shared server history cache.
+        expect(
+          ((await (await app.request(`${url}&paged=1&limit=60`)).json()) as HistoryResponse)
+            .messages,
+        ).toEqual(full.messages);
+      }
+    } finally {
+      fs.rmSync(config.codexSessions, { recursive: true, force: true });
+    }
+  });
+
+  it("projects reading live events before transport and preserves question answers and reconnect replay", async () => {
+    const { app, codex } = appWithCodexSpy();
+    codex.active = [{ sessionId: "reading-live", startedAt: Date.now() }];
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    try {
+      for (const url of ["/chat/live-stream", "/chat/live-stream?view=reading"]) {
+        const response = await app.request(url);
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("missing stream");
+        readers.push(reader);
+        await readSseUntil(reader, (text) => text.includes('"kind":"session_index"'));
+      }
+      const payload = "hidden-tool-payload".repeat(20_000);
+      const question = { questions: [{ title: "Choose", options: ["A", "B"] }] };
+      codex.emitEvent("reading-live", { kind: "assistant_text", text: "start" });
+      const events: UiEvent[] = [
+        { kind: "tool_use", id: "exec", name: "exec", input: { command: payload } },
+        { kind: "tool_result", id: "exec", text: payload, isError: true },
+        {
+          kind: "tool_use",
+          id: "question",
+          name: "functions.request_user_input_async",
+          input: question,
+        },
+        { kind: "tool_result", id: "question", text: '{"accepted":true}', isError: false },
+        { kind: "tool_result", id: "question", text: '{"answer":"A"}', isError: false },
+        { kind: "assistant_text", text: "reading-test-end" },
+      ];
+      for (const event of events) codex.emitEvent("reading-live", event);
+      const streams = await Promise.all(
+        readers.map((reader) => readSseUntil(reader, (text) => text.includes("reading-test-end"))),
+      );
+      const sessionEvents = (text: string) =>
+        sseJsonMessages(text).filter((m) => m.kind === "session_event") as Array<{
+          emittedAt: number;
+          event: UiEvent;
+        }>;
+      const full = sessionEvents(streams[0] ?? "");
+      const reading = sessionEvents(streams[1] ?? "");
+      expect(reading.map((m) => m.emittedAt)).toEqual(full.map((m) => m.emittedAt));
+      expect(full.slice(1).map((m) => m.event)).toEqual(events);
+      const expected = [
+        { ...events[0], input: null },
+        { ...events[1], text: "" },
+        ...events.slice(2),
+      ];
+      expect(reading.slice(1).map((m) => m.event)).toEqual(expected);
+      expect(JSON.stringify(reading).length).toBeLessThan(JSON.stringify(full).length / 100);
+      const response = await app.request("/chat/live-stream?view=reading&lastEventId=1");
+      const replay = response.body?.getReader();
+      if (!replay) throw new Error("missing replay stream");
+      readers.push(replay);
+      const replayText = await readSseUntil(replay, (text) => text.includes("reading-test-end"));
+      expect(sessionEvents(replayText).map((m) => m.event)).toEqual(expected);
+      const snapshot = (await (await app.request("/chat/live")).json()) as {
+        lastAssistantAt: Record<string, number>;
+      };
+      expect(snapshot.lastAssistantAt["reading-live"]).toBe(reading.at(-1)?.emittedAt);
+    } finally {
+      await Promise.all(readers.map((reader) => reader.cancel()));
+    }
+  });
 
   it("creates a visible scheduled session card record and dispatches it once", async () => {
     const { app, codex } = appWithCodexSpy();
@@ -5545,6 +6038,54 @@ describe("POST /chat/new + /chat/fork + /chat/send (faked SDK)", () => {
     });
   });
 
+  it.each(["append", "queue", "finish", "stop", "reject"])(
+    "handles the durable append countdown: %s",
+    async (action) => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      try {
+        const { app, codex } = appWithCodexSpy();
+        codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
+        const queued = await app.request(
+          `/chat/queue?session=cx-1&cwd=${encodeURIComponent(os.tmpdir())}&vendor=codex`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "countdown message", append: true }),
+          },
+        );
+        const body = (await queued.json()) as { item: { id: string; appendAt: number } };
+        expect(body.item.appendAt).toBe(Date.now() + 5000);
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(codex.steers).toEqual([]);
+        if (action === "queue") {
+          const converted = await app.request(`/chat/queue?session=cx-1&item=${body.item.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "queue" }),
+          });
+          expect(await converted.json()).toMatchObject({ ok: true, items: [{ id: body.item.id }] });
+        }
+        if (action === "finish") codex.finishTurn("cx-1");
+        if (action === "stop")
+          await app.request("/chat/abort?session=cx-1&vendor=codex", { method: "POST" });
+        if (action === "reject") codex.steerResult = false;
+        await vi.advanceTimersByTimeAsync(999);
+        expect(codex.sends).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(codex.steers).toHaveLength(action === "append" ? 1 : 0);
+        expect(codex.sends).toHaveLength(action === "finish" ? 1 : 0);
+        const snapshot = (await (await app.request("/chat/queue?session=cx-1")).json()) as {
+          items: { appendAt?: number }[];
+        };
+        expect(snapshot.items).toHaveLength(action === "append" || action === "finish" ? 0 : 1);
+        expect(snapshot.items[0]?.appendAt).toBeUndefined();
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("atomically sends a queued message as guidance to an active turn", async () => {
     const { app, codex } = appWithCodexSpy();
     codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
@@ -6214,7 +6755,7 @@ describe("startServer port rollover", () => {
 });
 
 describe("background settings API", () => {
-  it("keeps daemon, themes and layout independent in two instances sharing one database", async () => {
+  it("shares themes while keeping selections, daemon and layout independent across instances", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "attend-instance-api-"));
     try {
       const shared = { uiState: path.join(dir, "ui.json"), workEvents: path.join(dir, "state.db") };
@@ -6232,7 +6773,8 @@ describe("background settings API", () => {
       expect(
         (
           await send(first.app, "/vault/ui-state", {
-            theme: "dark",
+            theme: "shared",
+            customThemes: { shared: { name: "Shared", type: "dark", colors: {} } },
             layout: { sessionPanelColumns: 7, sessionPanelOpen: true, sidebarWidth: 260 },
           })
         ).status,
@@ -6245,15 +6787,23 @@ describe("background settings API", () => {
         mode: "economical",
       });
       await send(second.app, "/vault/ui-state", {
-        theme: "light",
+        theme: "shared",
         layout: { sessionPanelColumns: 2 },
       });
+      const edited = { name: "Edited globally", type: "dark", colors: { accent: "#123456" } };
+      const edit = await send(second.app, "/vault/ui-state", { customThemes: { shared: edited } });
+      expect(edit.status).toBe(200);
+      expect(await edit.json()).toMatchObject({
+        state: { theme: "shared", customThemes: { shared: edited } },
+      });
+      await send(second.app, "/vault/ui-state", { theme: "light" });
       await send(second.app, "/analyzer/settings", { mode: "follow" });
       const reopened = appWithSpy({ ...first.config, port: first.config.port + 10 });
       const firstHtml = await (await reopened.app.request("/")).text();
       const state = JSON.parse(firstHtml.match(/window\.__VAULT_STATE__ = (.+);/)?.[1] ?? "null");
       expect(state).toMatchObject({
-        theme: "dark",
+        theme: "shared",
+        customThemes: { shared: edited },
         layout: { sessionPanelColumns: 7, sessionPanelOpen: true, sidebarWidth: 260 },
       });
       expect(await (await reopened.app.request("/analyzer/settings")).json()).toMatchObject({
@@ -6261,6 +6811,16 @@ describe("background settings API", () => {
       });
       expect(await (await second.app.request("/analyzer/settings")).json()).toMatchObject({
         mode: "follow",
+      });
+      expect(
+        (await send(second.app, "/vault/ui-state", { customThemes: { shared: null } })).status,
+      ).toBe(200);
+      const afterDelete = await (await reopened.app.request("/")).text();
+      expect(
+        JSON.parse(afterDelete.match(/window\.__VAULT_STATE__ = (.+);/)?.[1] ?? "null"),
+      ).toMatchObject({
+        theme: "light",
+        customThemes: {},
       });
       for (const layout of [
         { sessionPanelColumns: 0 },
@@ -6405,6 +6965,7 @@ describe("live-stream daemon analysis broadcast", () => {
         etaMin: 3,
         reason: "下一步明显",
         nextStep: "继续,然后跑测试",
+        tags: ["PAYWALL", "订阅", "试用"],
       },
       observedTurns: [],
       labels: [],
@@ -6412,9 +6973,31 @@ describe("live-stream daemon analysis broadcast", () => {
     const fakeAnalyzer: SessionAnalyzer = {
       vendor: "codex",
       spawn: () => Promise.resolve("daemon-cx-1"),
-      analyze: () => Promise.resolve(verdict),
+      analyze: vi.fn(() => Promise.resolve(verdict)),
     };
-    const config = resolveConfig({ positionals: [] });
+    const config = {
+      ...resolveConfig({ positionals: [] }),
+      tags: path.join(os.tmpdir(), `attend-auto-tags-${uniq}.json`),
+      uiState: path.join(os.tmpdir(), `attend-auto-tags-ui-${uniq}.json`),
+      workEvents: path.join(os.tmpdir(), `attend-auto-tags-${uniq}.sqlite3`),
+    };
+    const tagStore = new TagStore(config.tags, config.workEvents);
+    tagStore.setCanonicalSessionTags("history", ["paywall"]);
+    const session: RawSession = {
+      sessionId: "cx-1",
+      vendor: "codex",
+      path: path.join(os.tmpdir(), `cx-${uniq}.jsonl`),
+      cwd: os.tmpdir(),
+      title: "排查付费墙",
+      lastPrompt: "排查付费墙",
+      firstTs: Date.now(),
+      lastTs: Date.now(),
+      lastTurnChars: 0,
+      chars: 0,
+      prompts: 1,
+      actions: 0,
+      visits: 1,
+    };
     const orchestrator = new DaemonOrchestrator(
       new DaemonRegistry(path.join(os.tmpdir(), `attend-test-daemons-${uniq}.json`)),
       new AnalysisCache(path.join(os.tmpdir(), `attend-test-analysis-${uniq}.json`)),
@@ -6423,6 +7006,20 @@ describe("live-stream daemon analysis broadcast", () => {
     const codex = new FakeCodexDriver();
     codex.active = [{ sessionId: "cx-1", startedAt: Date.now() }];
     const app = createApp(config, {
+      compactTransport: true,
+      sessionIndex: {
+        snapshot: () => ({
+          epoch: "tag-test",
+          revision: 1,
+          pending: false,
+          scannedAt: Date.now(),
+          sessions: [session, { ...session, sessionId: "history", title: "历史付费墙设置" }],
+        }),
+        lookup: (_vendor, id) => (id === session.sessionId ? session : null),
+        requestRefresh: () => {},
+        subscribe: () => () => {},
+        close: () => {},
+      },
       launcher: () => "noop",
       engine: new ChatEngine(fakeQuery),
       codex,
@@ -6441,32 +7038,114 @@ describe("live-stream daemon analysis broadcast", () => {
       body: JSON.stringify({ mode: "economical" }),
     });
     expect(settings.status).toBe(200);
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hiddenTags: ["old-hidden"], pinnedTags: ["paywall"] }),
+    });
     await expect(orchestrator.ensureDaemon("cx-1", "codex", os.tmpdir())).resolves.toBe(
       "daemon-cx-1",
     );
 
     const res = await app.request("/chat/live-stream");
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-    const decoder = new TextDecoder();
+    await readSseUntil(reader, (text) =>
+      sseJsonMessages(text).some(
+        (message) => message.kind === "session_index" && message.pending === false,
+      ),
+    );
     codex.finishTurn("cx-1");
-
-    let buf = "";
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline && !buf.includes('"kind":"analysis"')) {
-      const chunk = await Promise.race([
-        reader.read(),
-        new Promise<{ done: true; value?: Uint8Array }>((r) =>
-          setTimeout(() => r({ done: true }), 250),
-        ),
-      ]);
-      if (chunk.value) buf += decoder.decode(chunk.value, { stream: true });
-    }
+    const buf = await readSseUntil(
+      reader,
+      (text) =>
+        text.includes('"kind":"analysis"') &&
+        text.includes('"upserts":[') &&
+        text.includes('"paywall","订阅","试用"'),
+    );
     await reader.cancel().catch(() => {});
 
     // The verdict reaches the console via SSE (not a fixed poll), brief + nextStep intact.
     expect(buf).toContain('"kind":"analysis"');
     expect(buf).toContain("codex 排查付费墙");
     expect(buf).toContain("继续,然后跑测试");
+    expect(sseJsonMessages(buf)).toContainEqual(
+      expect.objectContaining({
+        kind: "session_index",
+        hiddenTags: ["old-hidden", "订阅", "试用"],
+        upserts: expect.arrayContaining([
+          expect.objectContaining({ sessionId: "cx-1", tags: ["paywall", "订阅", "试用"] }),
+        ]),
+      }),
+    );
     expect(orchestrator.analysis("cx-1")?.brief).toBe("codex 排查付费墙");
+    expect(tagStore.tagsForSession("cx-1")).toEqual(["paywall", "订阅", "试用"]);
+    const context = vi.mocked(fakeAnalyzer.analyze).mock.calls[0]?.[5];
+    expect(context).toContain(
+      '"styleExamples":[{"sameProject":true,"subject":"历史付费墙设置","tags":["paywall"]}]',
+    );
+    expect(context).not.toContain('"existing":');
+    expect(context).not.toContain("manualUses");
+    await vi.waitFor(async () => {
+      const snapshot = (await (await app.request("/session-index")).json()) as {
+        tags: string[];
+        hiddenTags: string[];
+        sessions: Array<{ sessionId: string; tags: string[] }>;
+      };
+      expect(snapshot.tags).toContain("订阅");
+      expect(snapshot.hiddenTags).toEqual(["old-hidden", "订阅", "试用"]);
+      expect(snapshot.sessions.find((s) => s.sessionId === "cx-1")?.tags).toEqual([
+        "paywall",
+        "订阅",
+        "试用",
+      ]);
+    });
+
+    // Once restored by the user, an existing tag stays visible on future verdicts.
+    await app.request("/vault/ui-state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hiddenTags: ["old-hidden", "试用"] }),
+    });
+    verdict.analysis.brief = "fresh verdict after restoring tag visibility";
+    codex.finishTurn("cx-1");
+    await vi.waitFor(() => expect(fakeAnalyzer.analyze).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => {
+      expect(orchestrator.analysis("cx-1")?.brief).toBe(verdict.analysis.brief);
+      const snapshot = (await (await app.request("/session-index")).json()) as {
+        hiddenTags: string[];
+      };
+      expect(snapshot.hiddenTags).toEqual(["old-hidden", "试用"]);
+    });
+
+    // Replacing automatic tags cleans up the previous hidden issue immediately.
+    verdict.analysis.tags = ["PAYWALL", "新问题"];
+    verdict.analysis.brief = "fresh verdict replacing automatic tags";
+    codex.finishTurn("cx-1");
+    await vi.waitFor(() => expect(fakeAnalyzer.analyze).toHaveBeenCalledTimes(3));
+    await vi.waitFor(async () => {
+      const snapshot = (await (await app.request("/session-index")).json()) as {
+        tags: string[];
+        hiddenTags: string[];
+      };
+      expect(snapshot.tags).toContain("新问题");
+      expect(snapshot.tags).not.toContain("试用");
+      expect(snapshot.hiddenTags).toEqual(["old-hidden", "新问题"]);
+      // The user-restored tag stays in the catalog even when unbound.
+      expect(tagStore.list()).toContain("订阅");
+    });
+
+    // A manual clear survives later fresh verdicts, not just the in-flight one.
+    await app.request("/session/tags?session=cx-1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: [] }),
+    });
+    verdict.analysis.brief = "fresh verdict after manual clear";
+    codex.finishTurn("cx-1");
+    await vi.waitFor(() => expect(fakeAnalyzer.analyze).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() =>
+      expect(orchestrator.analysis("cx-1")?.brief).toBe(verdict.analysis.brief),
+    );
+    expect(tagStore.tagsForSession("cx-1")).toEqual([]);
   });
 });

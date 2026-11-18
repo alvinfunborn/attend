@@ -13,6 +13,8 @@ export type AnalysisState =
 /** The daemon's structured verdict for one task session. */
 export interface Analysis {
   analyzerProfile?: string;
+  /** Suggested short session tags; absent in older verdicts. */
+  tags?: string[];
   /** ≤8-word headline — the tab title */
   brief: string;
   /** why the assistant handed control back, or null for older cached verdicts */

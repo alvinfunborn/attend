@@ -1,3 +1,4 @@
+import { normalizeAutoTags } from "../auto-tags.js";
 import {
   type CollaborationTurnLabel,
   isCollaborationFeedbackTarget,
@@ -40,6 +41,10 @@ export function parseAnalysis(text: string): Analysis | null {
   if ("nextStep" in obj) out.nextStep = parseAvoidancePromptValue(obj.nextStep);
   // probe is the scrutiny-lane counterpart to nextStep — same shape, independent.
   if ("probe" in obj) out.probe = parseAvoidancePromptValue(obj.probe);
+  if (Array.isArray(obj.tags)) {
+    const tags = normalizeAutoTags(obj.tags);
+    if (!obj.tags.length || tags.length) out.tags = tags;
+  }
   return out;
 }
 

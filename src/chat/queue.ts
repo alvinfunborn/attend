@@ -9,6 +9,8 @@ export interface QueuedChatTurn extends UserTurn {
   cwd: string;
   vendor: string;
   goal?: boolean;
+  /** Server deadline for automatic mid-turn append; absent means ordinary queue. */
+  appendAt?: number;
   createdAt: number;
   /** Present when this turn entered the queue through the durable scheduler. */
   scheduleRunId?: string;
@@ -100,6 +102,7 @@ export class ChatQueueStore {
       references?: ChatReference[];
       referenceContext?: string;
       goal?: boolean;
+      appendAt?: number;
       scheduleRunId?: string;
       scheduledAt?: number;
     },
@@ -122,9 +125,22 @@ export class ChatQueueStore {
         ...(input.goal === true ? { goal: true } : {}),
         ...(input.scheduleRunId ? { scheduleRunId: input.scheduleRunId } : {}),
         ...(Number.isFinite(input.scheduledAt) ? { scheduledAt: input.scheduledAt } : {}),
+        ...(Number.isFinite(input.appendAt) ? { appendAt: input.appendAt } : {}),
         createdAt: Date.now(),
       };
       queue.items.push(item);
+      return cloneTurn(item);
+    });
+  }
+
+  clearAppend(sessionId: string, itemId: string, expectedAt?: number): QueuedChatTurn | null {
+    return this.data.update((data) => {
+      const queue = data.sessions[sessionId];
+      if (!queue || activelyLeased(queue, itemId)) return null;
+      const item = queue.items.find((candidate) => candidate.id === itemId);
+      if (!item) return null;
+      if (expectedAt !== undefined && item.appendAt !== expectedAt) return null;
+      item.appendAt = undefined;
       return cloneTurn(item);
     });
   }
@@ -221,7 +237,7 @@ export class ChatQueueStore {
     return this.data.update((data) => {
       const queue = data.sessions[sessionId];
       const item = queue?.items[0];
-      if (!queue || queue.parked || !item) return null;
+      if (!queue || queue.parked || !item || (item.appendAt ?? 0) > now) return null;
       if (queue.lease && queue.lease.expiresAt > now && queue.lease.owner !== owner) return null;
       queue.lease = {
         itemId: item.id,
@@ -269,11 +285,15 @@ export class ChatQueueStore {
     });
   }
 
-  summary(): Record<string, { count: number; parked: boolean }> {
+  summary(): Record<string, { count: number; parked: boolean; appends: number }> {
     return Object.fromEntries(
       Object.entries(this.data.read().sessions).map(([sessionId, queue]) => [
         sessionId,
-        { count: queue.items.length, parked: queue.parked },
+        {
+          count: queue.items.length,
+          parked: queue.parked,
+          appends: queue.items.filter((item) => item.appendAt).length,
+        },
       ]),
     );
   }

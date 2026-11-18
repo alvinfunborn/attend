@@ -1,4 +1,4 @@
-// Public theme color IDs and their CSS variables. Built-ins preserve Attend's palette.
+// Public theme color IDs, CSS variables, and built-in palettes.
 export interface ThemeColor {
   variable: string;
   light: string;
@@ -154,15 +154,105 @@ export const THEME_COLORS: Record<string, ThemeColor> = {
   },
   "newSession.gradientStart": {
     variable: "newbox-gradient-color-1",
-    light: "#f7f4ed",
-    dark: "#151f31",
-    fallback: "panel.background",
+    light: "var(--new-session-background)",
+    dark: "var(--new-session-background)",
+    fallback: "newSession.background",
   },
   "chat.pinned.gradientStart": {
     variable: "latest-gradient-color-1",
-    light: "#f5f2eb",
-    dark: "#1e1b4b",
+    light: "var(--chat-pinned-background)",
+    dark: "var(--chat-pinned-background)",
+    fallback: "chat.pinned.background",
+  },
+  "floatingPanel.background": {
+    variable: "floating-panel-background",
+    light: "#f8fbff",
+    dark: "#1e2b40",
     fallback: "panel.background",
+  },
+  "floatingPanel.border": {
+    variable: "floating-panel-border",
+    light: "#94a3b8",
+    dark: "#657b99",
+    fallback: "strongBorder",
+  },
+  "floatingPanel.shadow": {
+    variable: "floating-panel-shadow",
+    light: "rgba(15,23,42,0.26)",
+    dark: "rgba(0,0,0,0.62)",
+    fallback: "shadow.popColor1",
+  },
+  "newSession.background": {
+    variable: "new-session-background",
+    light: "var(--floating-panel-background)",
+    dark: "var(--floating-panel-background)",
+    fallback: "floatingPanel.background",
+  },
+  "newSession.border": {
+    variable: "new-session-border",
+    light: "var(--floating-panel-border)",
+    dark: "var(--floating-panel-border)",
+    fallback: "floatingPanel.border",
+  },
+  "newSession.shadow": {
+    variable: "new-session-shadow",
+    light: "var(--floating-panel-shadow)",
+    dark: "var(--floating-panel-shadow)",
+    fallback: "floatingPanel.shadow",
+  },
+  "listPanel.background": {
+    variable: "list-panel-background",
+    light: "var(--floating-panel-background)",
+    dark: "var(--floating-panel-background)",
+    fallback: "floatingPanel.background",
+  },
+  "listPanel.border": {
+    variable: "list-panel-border",
+    light: "var(--floating-panel-border)",
+    dark: "var(--floating-panel-border)",
+    fallback: "floatingPanel.border",
+  },
+  "listPanel.shadow": {
+    variable: "list-panel-shadow",
+    light: "var(--floating-panel-shadow)",
+    dark: "var(--floating-panel-shadow)",
+    fallback: "floatingPanel.shadow",
+  },
+  "comment.background": {
+    variable: "comment-background",
+    light: "var(--floating-panel-background)",
+    dark: "var(--floating-panel-background)",
+    fallback: "floatingPanel.background",
+  },
+  "comment.border": {
+    variable: "comment-border",
+    light: "var(--floating-panel-border)",
+    dark: "var(--floating-panel-border)",
+    fallback: "floatingPanel.border",
+  },
+  "comment.shadow": {
+    variable: "comment-shadow",
+    light: "var(--floating-panel-shadow)",
+    dark: "var(--floating-panel-shadow)",
+    fallback: "floatingPanel.shadow",
+  },
+  "chat.pinned.background": {
+    variable: "chat-pinned-background",
+    light: "#fff1c9",
+    dark: "#182334",
+    fallback: "panel.background",
+  },
+  "chat.pinned.border": {
+    variable: "chat-pinned-border",
+    light: "#e3c378",
+    dark: "#344154",
+    fallback: "border",
+  },
+  "chat.pinned.hoverBackground": {
+    variable: "chat-pinned-hover-background",
+    light: "#f9e5ac",
+    dark: "#202d40",
+    fallback: "chat.pinned.background",
   },
   "session.divider": {
     variable: "row-line",
@@ -2029,8 +2119,9 @@ export const THEME_COLORS: Record<string, ThemeColor> = {
   },
   "chat.pinned.foreground": {
     variable: "theme-chat-pinned-foreground",
-    light: "#dbe4ee",
-    dark: "#dbe4ee",
+    light: "var(--ink-2)",
+    dark: "var(--ink-2)",
+    fallback: "text.foreground",
   },
   "tag.delete.hoverBorder": {
     variable: "theme-tag-delete-hover-border",
@@ -2114,12 +2205,12 @@ export const THEME_COLORS: Record<string, ThemeColor> = {
   "selection.background": {
     variable: "selection-background",
     light: "#c7d2fe",
-    dark: "#3730a3",
+    dark: "#a5b4fc",
   },
   "selection.foreground": {
     variable: "selection-foreground",
     light: "#111827",
-    dark: "#f8fafc",
+    dark: "#111827",
   },
   "panel.gradientEnd": {
     variable: "panel-gradient-color-2",
@@ -2129,9 +2220,9 @@ export const THEME_COLORS: Record<string, ThemeColor> = {
   },
   "chat.pinned.gradientEnd": {
     variable: "latest-gradient-color-2",
-    light: "var(--surface)",
-    dark: "#141b2b",
-    fallback: "panel.background",
+    light: "var(--chat-pinned-background)",
+    dark: "var(--chat-pinned-background)",
+    fallback: "chat.pinned.background",
   },
   "project.1.foreground": {
     variable: "project-1-fg",
