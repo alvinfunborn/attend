@@ -464,11 +464,16 @@ describe("GET /", () => {
     expect(diagnostics.sessionIndex).toMatchObject({ pending: false, error: null });
     expect(diagnostics.sessionIndex?.sessions).toBeTypeOf("number");
     expect(diagnostics.background?.compactTransport).toBe(true);
-    expect(diagnostics.background?.refreshing).toMatchObject({
-      vendors: false,
-      claudeModels: false,
-      codexModels: false,
-      cursorModels: false,
+    await vi.waitFor(async () => {
+      const current = (await (
+        await app.request("/debug/performance")
+      ).json()) as typeof diagnostics;
+      expect(current.background?.refreshing).toMatchObject({
+        vendors: false,
+        claudeModels: false,
+        codexModels: false,
+        cursorModels: false,
+      });
     });
   });
 
@@ -541,7 +546,12 @@ describe("GET /", () => {
       const startedAt = performance.now();
       current = readySnapshot;
       for (const listener of listeners) listener(current);
-      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+      // Observe multiple timer turns, rather than assuming a loaded runner
+      // schedules six 2ms ticks during one fixed 40ms sleep. Lag bounds below
+      // still catch a projection that blocks the request loop.
+      for (let i = 0; i < 8; i++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      }
       const projectionMs = performance.now() - startedAt;
       const projectionTicks = ticks;
       const projectionMaxLagMs = maxLagMs;

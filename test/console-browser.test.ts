@@ -7198,6 +7198,7 @@ describe("console browser behavior", () => {
       attachments: [],
       references: [],
       goal: false,
+      append: false,
     });
     await expect
       .poll(() => page.locator("#queue .qitem:not(.todo) .qtext").textContent())

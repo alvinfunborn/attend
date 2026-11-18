@@ -2,6 +2,28 @@
 
 All notable changes to Attend are documented in this file.
 
+## 1.3.12 — 2026-11-18
+
+### Added
+
+- Reading views, richer tag colors and hover previews, and analyzer-assisted tags.
+- Timed mid-turn appends for queued messages and improved session-panel navigation.
+
+### Changed
+
+- Share custom theme libraries globally while retaining per-instance selections.
+- Index Codex and Claude transcripts in bounded blocks with durable append checkpoints.
+  Instances sharing an index path coordinate indexing through a separate search database.
+- Evaluate search clauses per visible message, combining AND/OR/exclusions across
+  messages without assembling a full transcript string. Search rejects individual
+  records over 32 MiB; other providers retain a 32 MiB source-file safety limit.
+
+### Fixed
+
+- Prevent repeated whole-file reads and unbounded allocations when large session logs grow.
+- Improve Codex app-server handling, live-stream writes, and browser transcript memory.
+- Preserve saved theme overrides and synchronize console and analyzer state more reliably.
+
 ## 1.3.11 — 2026-11-05
 
 ### Changed

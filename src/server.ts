@@ -72,7 +72,6 @@ import { EngagementStore } from "./core/engagement.js";
 import { type LaunchAction, type LaunchVendor, launchSession, revealPath } from "./core/launch.js";
 import type { ModelDefaults, ModelOption } from "./core/model-options.js";
 import { RuntimePerformanceMonitor } from "./core/performance.js";
-import { BoundedSseWriter } from "./core/sse-writer.js";
 import {
   avoidanceEvidence,
   avoidanceEvidenceData,
@@ -100,6 +99,7 @@ import {
   type SessionStatusRecord,
   SessionStatusStore,
 } from "./core/session-status.js";
+import { BoundedSseWriter } from "./core/sse-writer.js";
 import { claimStateMaintenance, optimizeStateDatabase } from "./core/state-database.js";
 import { TagStore } from "./core/tags.js";
 import { themeEngine, validThemeId } from "./core/themes.js";
@@ -631,6 +631,10 @@ function scopeTagList(
     scopeId?: string;
   } = {},
 ): string[] {
+  const catalog = tags.list();
+  // No binding can contribute a visible tag when the catalog is empty. Avoid
+  // thousands of synchronous state-store reads during a large projection.
+  if (!catalog.length) return [];
   const wanted = new Set<string>();
   for (const tag of tags.tagsFor(scopeTagReadKeys(opts.scopeRoots ?? [], opts.scopeId ?? "")))
     wanted.add(tag);
@@ -645,7 +649,7 @@ function scopeTagList(
     const tag = normalizeTagName(extra);
     if (tag) wanted.add(tag);
   }
-  return tags.list().filter((tag) => wanted.has(tag));
+  return catalog.filter((tag) => wanted.has(tag));
 }
 
 function redactPageTitleLabel(label: string, passphrase?: string | null): string {
@@ -2644,7 +2648,7 @@ export function createApp(config: AttendConfig, suppliedDeps?: AppDeps): Hono {
     const vaultState = uiState.get();
     // SessionView already contains the resolved model/effort/speed. This
     // machine-wide server lookup is never read by the browser.
-    delete vaultState.sessionRunConfigs;
+    vaultState.sessionRunConfigs = undefined;
     const dirs = knownDirs([], vaultState.recentDirectories, config.scopeRoots);
     return {
       sessions: [],

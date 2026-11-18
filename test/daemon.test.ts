@@ -594,7 +594,7 @@ describe("DaemonOrchestrator", () => {
       '"state":"<continue_ready|needs_decision|needs_input|blocked|needs_review|followup_suggested|done>"',
     );
     expect(prompt).toContain('"priority" is workspace-level business importance');
-    expect(prompt).toContain("An activity can be the glance label");
+    expect(prompt).toContain('An activity can be "brief" when it is the clearest way');
     expect(prompt).toContain("Do not let meta/debugging about the workflow become the brief");
     expect(prompt).toContain('"reason" is volatile current context, not a second title');
     expect(prompt).toContain('without repeating "brief"');
